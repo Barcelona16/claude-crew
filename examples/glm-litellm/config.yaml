@@ -1,0 +1,28 @@
+# LiteLLM config for the "glm" crew backend.
+#
+# LiteLLM exposes an Anthropic /v1/messages endpoint (with tool-calling) and
+# translates it to an OpenAI-compatible /v1/chat/completions upstream. That lets
+# Claude Code drive a non-Anthropic model as a real tool-using agent.
+#
+# Fill in your upstream:
+#   - api_base: your OpenAI-compatible gateway, ending at /v1 (NOT /v1/chat/completions;
+#     LiteLLM appends that itself — a trailing /chat/completions gives a 404).
+#   - model:    openai/<YourModelName>
+#   - api_key:  read from the GLM_GATEWAY_TOKEN env var (set it before launching).
+#
+# Client side connects with ANTHROPIC_BASE_URL=http://127.0.0.1:4000 and
+# ANTHROPIC_AUTH_TOKEN=<master_key below>.
+
+model_list:
+  - model_name: glm-5.2                      # the name clients pass as --model
+    litellm_params:
+      model: openai/GLM-5.2                   # openai/<upstream model name>
+      api_base: https://your-openai-compatible-gateway.example/v1
+      api_key: os.environ/GLM_GATEWAY_TOKEN
+      max_tokens: 8192                        # reasoning models need headroom
+
+litellm_settings:
+  drop_params: true                           # drop params the upstream rejects (e.g. Anthropic `thinking`)
+
+general_settings:
+  master_key: sk-local-crew                   # the token clients present to LiteLLM

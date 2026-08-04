@@ -1,0 +1,30 @@
+# Example backend preset. Copy to ~/.config/claude-crew/backends/<name>.conf and edit.
+# All keys are optional — an empty file behaves like the built-in "default" backend
+# (plain Claude with your ambient config). This file is sourced by bash, so it must
+# be valid shell (KEY=value, quote values with spaces).
+
+# ANTHROPIC_BASE_URL override — point Claude at a proxy/gateway that speaks the
+# Anthropic /v1/messages API (e.g. a local LiteLLM translating to another provider).
+BASE_URL=
+
+# Model name passed as `claude --model <MODEL>`. Leave empty for Claude's default.
+MODEL=
+
+# Auth token sent as ANTHROPIC_AUTH_TOKEN. Either a literal:
+TOKEN=
+# ...or a command whose stdout is the token (takes precedence over TOKEN).
+# Useful to pull a token from a keychain, a router config, or an env file.
+TOKEN_CMD=
+
+# Optional idempotent command run before the session starts — e.g. start a local
+# proxy if it isn't already up. Must be safe to run repeatedly.
+ENSURE_CMD=
+
+# Extra environment injected into the session, space-separated K=V pairs.
+ENV_EXTRA=
+
+# Set to 1 to add --dangerously-skip-permissions (unattended tool use). Off by default.
+DANGEROUS=
+
+# Override the flags passed to `claude` entirely (advanced).
+CLAUDE_FLAGS=

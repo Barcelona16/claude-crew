@@ -1,0 +1,6 @@
+# Local state (do not commit)
+*.sid
+registry
+proxy.log
+*.out
+.DS_Store
