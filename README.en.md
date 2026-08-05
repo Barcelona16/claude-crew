@@ -33,7 +33,6 @@ crew ls                   # list running sessions
 crew attach mysess        # attach to observe
 crew kill mysess          # stop a session
 crew backends             # list backend presets
-crew log mysess           # view a session's FULL analysis trail (see "Seeing the whole run")
 crew send bob "look at X" # drop a message in another session's mailbox (see "Talking between sessions")
 crew inbox                # read your own mailbox
 ```
@@ -115,24 +114,6 @@ Each message is tagged with a sender (`--from`, defaults to `$CREW_SESSION` or `
 timestamp. crew injects `CREW_SESSION=<name>` into each session, so an agent knows "who am I"
 and its messages are auto-signed. The mailbox is **async** — it doesn't interrupt the recipient
 unless you add `--nudge`.
-
-## Seeing the whole run
-
-If `attach` shows a cropped view, it's usually a **window-size** issue: a session pinned to a
-fixed size shows only a cropped slice when you attach with a smaller terminal (enlarging it
-reveals more). crew now makes sessions **reflow to whatever terminal you attach with**
-(`window-size latest` + `aggressive-resize`) and bumps tmux scrollback to 200k lines
-(`CREW_HISTORY_LIMIT`).
-
-For the **complete record, independent of tmux display**, use `crew log` — it reads Claude
-Code's own session log (JSONL); crew tracks each session's id, so it renders the full
-turn-by-turn trail (and you can review it after the session ends):
-
-```bash
-crew log mysess            # full trail: text / ⏺ tool calls / ⎿ results / thinking
-crew log --tail 50 mysess  # only the last 50 events
-crew log --raw mysess      # print the raw JSONL path + contents
-```
 
 ## Notes & gotchas
 
