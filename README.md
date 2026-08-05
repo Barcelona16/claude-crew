@@ -68,7 +68,7 @@ crew --backend glm worker "跑个快速冒烟测试并汇报"
 
 ## 与 GKD 配合:交互会话 + 程序化委派
 
-`crew` 管的是**交互式、可观察、长活**的 tmux 会话。而 GKD(搞快点)是**程序化一次性委派**:起一个 `claude -p --model X`
+`crew` 管的是**交互式、可观察、长活**的 tmux 会话。而 [GKD](https://github.com/alvis-HaoH/gkd)(搞快点)是**程序化一次性委派**:起一个 `claude -p --model X`
 子进程去干活、只把**结果**回传。两者天然互补,crew 直接把 GKD 接了进来:
 
 - **crew 是后端的唯一真源,GKD 借用。** `crew gkd-sync` 把 crew 的 `backends/*.conf`
@@ -82,8 +82,9 @@ crew delegate --backend glm "把这50个文件改成 X"   # 程序化:GKD 换脑
 crew gkd-sync                            # 手动把 crew 后端同步进 GKD models.json
 ```
 
-**GKD 是可选依赖**:`delegate`/`gkd-sync` 需要 GKD(用 `$GKD_DIR`,或 `~/Desktop/gkd`);
-其余功能(会话管理)不装 GKD 也照常用。crew **不依赖 GKD 也不依赖任何具体项目**。
+**GKD 是可选依赖**:`delegate`/`gkd-sync` 需要 GKD —— 把 `GKD_DIR` 指向你的 GKD checkout
+([安装 GKD](https://github.com/alvis-HaoH/gkd));其余功能(会话管理)不装 GKD 也照常用。
+crew **不依赖 GKD 也不依赖任何具体项目**。
 
 ## 说明与坑
 

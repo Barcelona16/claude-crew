@@ -74,7 +74,7 @@ crew --backend glm worker "run a quick smoke test and report"
 
 ## Working with GKD: interactive sessions + programmatic delegation
 
-`crew` manages **interactive, observable, long-lived** tmux sessions. GKD is for
+`crew` manages **interactive, observable, long-lived** tmux sessions. [GKD](https://github.com/alvis-HaoH/gkd) is for
 **programmatic one-shot delegation**: it spawns a `claude -p --model X` sub-process to do
 the work and returns just the **result**. The two are complementary, and crew wires GKD in:
 
@@ -89,9 +89,9 @@ crew delegate --backend glm "rewrite these 50 files to X"   # programmatic: GKD 
 crew gkd-sync                                          # manually sync crew backends into GKD's models.json
 ```
 
-**GKD is an optional dependency**: `delegate`/`gkd-sync` need GKD (via `$GKD_DIR`, or
-`~/Desktop/gkd`); everything else (session management) works without it. crew depends on
-**neither GKD nor any particular project**.
+**GKD is an optional dependency**: `delegate`/`gkd-sync` need GKD — point `GKD_DIR` at your
+GKD checkout ([install GKD](https://github.com/alvis-HaoH/gkd)); everything else (session
+management) works without it. crew depends on **neither GKD nor any particular project**.
 
 ## Notes & gotchas
 

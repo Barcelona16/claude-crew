@@ -27,8 +27,9 @@
 #   --fresh       start a brand-new conversation (do not --resume old history)
 #   --yolo        add --dangerously-skip-permissions (unattended tool use)
 #
-# GKD integration is optional: `delegate`/`gkd-sync` need GKD ($GKD_DIR or ~/Desktop/gkd);
-# everything else works standalone. See README.md / README.en.md.
+# GKD integration is optional: `delegate`/`gkd-sync` need GKD — set GKD_DIR to your GKD
+# checkout (https://github.com/alvis-HaoH/gkd). Everything else works standalone.
+# See README.md / README.en.md.
 set -uo pipefail
 
 CREW_HOME="${CREW_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-crew}"
@@ -125,18 +126,24 @@ ensure_session(){
 send_task(){ tmux send-keys -t "$TMUX_PREFIX$1" -l "$2"; sleep 1; tmux send-keys -t "$TMUX_PREFIX$1" Enter; log "fed task to '$1'; watch: crew attach $1"; }
 
 # --- GKD integration (optional) --------------------------------------------
-# GKD (a Claude Code delegation tool) runs one-shot `claude -p --model X` sub-agents
-# and returns their result. crew owns the backends; GKD borrows them. `crew delegate`
-# and `crew gkd-sync` are the only GKD-aware paths — everything else works without GKD.
+# GKD (https://github.com/alvis-HaoH/gkd) is a Claude Code delegation tool that runs
+# one-shot `claude -p --model X` sub-agents and returns their result. crew owns the
+# backends; GKD borrows them. `crew delegate` and `crew gkd-sync` are the only GKD-aware
+# paths — everything else works without GKD.
+#
+# Discovery: set GKD_DIR (or GKD_HOME) to your GKD checkout. crew does not guess install
+# locations — if you want delegation, install GKD and point GKD_DIR at it.
+GKD_INSTALL_HINT='Install GKD (git clone https://github.com/alvis-HaoH/gkd) and set GKD_DIR to its path. crew sessions work without GKD.'
 gkd_root(){
-  for d in "${GKD_DIR:-}" "$HOME/Desktop/gkd" "$HOME/.claude/plugins/gkd" "$HOME/gkd"; do
+  local d
+  for d in "${GKD_DIR:-}" "${GKD_HOME:-}"; do
     [ -n "$d" ] && [ -f "$d/scripts/gkd-runtime.mjs" ] && { echo "$d"; return 0; }
   done
   return 1
 }
 # Project crew's backends/*.conf into GKD's config/models.json (crew = source of truth).
 crew_gkd_sync(){
-  local gkd; gkd=$(gkd_root) || die "GKD not found (optional). Install it or set GKD_DIR; core 'crew' sessions work without GKD."
+  local gkd; gkd=$(gkd_root) || die "GKD not found. $GKD_INSTALL_HINT"
   command -v node >/dev/null 2>&1 || die "node is required to sync GKD's models.json"
   local tmp; tmp=$(mktemp)
   local f name tok
@@ -166,7 +173,7 @@ crew_delegate(){
   local backend="$1"; shift; local task="$*"
   [ "$backend" = default ] && die "delegate needs a backend with a base URL (e.g. --backend glm); 'default' is plain Claude."
   [ -n "$task" ] || die "usage: crew delegate --backend <name> \"<task>\""
-  local gkd; gkd=$(gkd_root) || die "GKD not found (optional). Install it or set GKD_DIR; core 'crew' sessions work without GKD."
+  local gkd; gkd=$(gkd_root) || die "GKD not found. $GKD_INSTALL_HINT"
   load_backend "$backend"
   [ -n "$BK_ENSURE_CMD" ] && { log "ensuring backend '$backend' is up..."; bash -c "$BK_ENSURE_CMD" >&2 || log "WARN: ENSURE_CMD failed (continuing)"; }
   crew_gkd_sync
