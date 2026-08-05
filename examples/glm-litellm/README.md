@@ -46,6 +46,31 @@ containers with no `lsof`/`ss`.
 - Some gateways have **broken streaming**; if you hit stream errors, prefer a non-streaming
   upstream. LiteLLM buffers fine for the delegation use case.
 
+## Installing in a container / behind a slow or blocked PyPI (esp. Python 3.8)
+
+Two things make a naive `pip install litellm` hang for a long time — both handled by
+`setup.sh`, but worth knowing if you install manually:
+
+1. **PyPI is slow/blocked** (e.g. inside a corporate container, `files.pythonhosted.org`
+   times out) → pip stalls on downloads. **Fix:** use a nearby mirror.
+   ```bash
+   PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple bash setup.sh
+   ```
+2. **Python 3.8/3.9 + `tokenizers`** — litellm pulls `tokenizers`, and 0.21+ has **no
+   prebuilt wheel for py3.8**, so pip tries to compile it from source (needs a Rust
+   toolchain) and hangs. **Fix:** pin `tokenizers<0.21` (0.19.1 has a py3.8 wheel).
+   `setup.sh` does this automatically on py3.8/3.9.
+
+Manual install equivalent (what `setup.sh` runs):
+```bash
+python3 -m pip install --user -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    "litellm==1.80.0" "litellm[proxy]" "tokenizers<0.21"
+```
+
+Verified combo: Python 3.8.10 + `litellm==1.80.0` (with `[proxy]`: fastapi/uvicorn/openai/
+boto3…), CLI at `/usr/local/bin/litellm`. With the mirror + `tokenizers<0.21` it installs
+in seconds instead of hanging.
+
 ## Two tokens, don't confuse them
 
 - **Client → LiteLLM**: the `master_key` in `config.yaml` (`sk-local-crew`). The `glm`
