@@ -1,94 +1,99 @@
 # claude-crew
 
-Named, attachable, persistent **tmux sessions for [Claude Code](https://claude.com/claude-code)**,
-with pluggable model backends.
+<p align="right"><a href="./README.md">中文</a> · <a href="./README.en.md">English</a></p>
 
-A *crew session* is a tmux session running `claude`, pinned to a **name**, a **backend**
-(base URL + model + token + env), and a **stable session-id**. That gives you:
+给 [Claude Code](https://claude.com/claude-code) 的**命名、可 attach、可持久化的 tmux 会话管理器**,后端可插拔。
 
-- **Address agents by name** — `crew api "add rate limiting"`, `crew docs "update the changelog"`.
-- **Attach any time to watch** — `crew attach api` drops you into the live session.
-- **Persistence** — sessions `--resume` the same conversation across tmux/host restarts.
-- **Per-session backends** — run one session on Claude, another on a cheaper model, side by side.
+一个 *crew 会话* = 一个跑着 `claude` 的具名 tmux 会话,绑定一个**名字**、一个**后端**(base URL + 模型 + token + 环境变量)和一个**固定的 session-id**。于是你能:
 
-It's a thin, dependency-light bash script (tmux + Claude Code). No daemon, no config server.
+- **按名字指挥长活 agent** —— `crew api "加限流"`、`crew docs "更新 changelog"`
+- **随时 attach 观察它干活** —— `crew attach api` 直接进到活会话里看
+- **持久** —— 会话用 `--resume` 接回同一段对话,跨 tmux/宿主机重启不丢
+- **每会话独立后端** —— 一个会话跑 Claude、另一个跑便宜模型,并排开
 
-## Install
+它是一个依赖极少的 bash 脚本(只要 tmux + Claude Code)。无守护进程、无配置服务、**不依赖任何具体项目**。
+
+## 安装
 
 ```bash
 git clone <this repo> && cd claude-crew
-bash install.sh          # symlinks `crew` into ~/.local/bin
+bash install.sh          # 把 `crew` 软链到 ~/.local/bin
 crew --help
 ```
 
-## Usage
+## 用法
 
 ```bash
-crew mysess "read src/app.ts and list its exports"   # start/continue a named session + feed a task
-crew                      # ensure + attach the session for the current directory
-crew ls                   # list running sessions
-crew attach mysess        # attach to observe
-crew kill mysess          # stop a session
-crew backends             # list backend presets
+crew mysess "读 src/app.ts 列出它的导出"   # 起/续一个具名会话并(可选)喂任务
+crew                      # 对当前目录的会话:ensure + attach
+crew ls                   # 列出运行中的会话
+crew attach mysess        # attach 观察
+crew kill mysess          # 关掉
+crew backends             # 列出后端预设
 ```
 
-Session name defaults to the current directory's basename (deduped with a number on
-collision). The directory↔name map and each session's id are stored under
-`~/.local/share/claude-crew/`, so re-running `crew` from the same directory reattaches
-the same conversation.
+会话名缺省=当前目录名(重名自动加数字)。目录↔名字映射、每个会话的 session-id 存在
+`~/.local/share/claude-crew/`,所以在同一目录再敲 `crew` 会接回同一段对话。
 
-**Flags:** `--backend <name>` pick a backend · `--fresh` start a new conversation (no
-`--resume`) · `--yolo` add `--dangerously-skip-permissions`.
+**Flags:** `--backend <名>` 选后端 · `--fresh` 开全新对话(不 `--resume`)· `--yolo` 加 `--dangerously-skip-permissions`。
 
-## Backends
+## 后端
 
-A backend is a preset in `~/.config/claude-crew/backends/<name>.conf` (sourced as bash).
-The built-in `default` backend is just plain Claude with your ambient config. Any of the
-keys are optional — see [`backends/default.conf.example`](backends/default.conf.example):
+后端是 `~/.config/claude-crew/backends/<名>.conf` 里的预设(按 bash 源码 source)。内置的
+`default` 后端就是原生 Claude(用你环境里现成的配置)。所有键都可选,见
+[`backends/default.conf.example`](backends/default.conf.example):
 
-| Key | Meaning |
+| 键 | 含义 |
 |-----|---------|
-| `BASE_URL` | `ANTHROPIC_BASE_URL` override (point at a proxy/gateway) |
+| `BASE_URL` | 覆盖 `ANTHROPIC_BASE_URL`(指向某个代理/网关) |
 | `MODEL` | `claude --model <MODEL>` |
-| `TOKEN` / `TOKEN_CMD` | auth token, literal or from a command's stdout |
-| `ENSURE_CMD` | idempotent command run before the session (e.g. start a proxy) |
-| `ENV_EXTRA` | extra `K=V` env injected into the session |
-| `DANGEROUS` | `1` → add `--dangerously-skip-permissions` |
-| `CLAUDE_FLAGS` | override the flags passed to `claude` |
+| `TOKEN` / `TOKEN_CMD` | auth token,字面量或某条命令的 stdout |
+| `ENSURE_CMD` | 起会话前跑的幂等命令(如拉起一个代理) |
+| `ENV_EXTRA` | 注入会话的额外 `K=V` 环境变量 |
+| `DANGEROUS` | `1` → 加 `--dangerously-skip-permissions` |
+| `CLAUDE_FLAGS` | 完全覆盖传给 `claude` 的 flags |
 
-### Example: drive a non-Anthropic model as a tool-using agent
+### 例子:把非 Anthropic 模型当会用工具的 agent
 
-[`examples/glm-litellm/`](examples/glm-litellm/) sets up a `glm` backend that uses
-[LiteLLM](https://github.com/BerriAI/litellm) to translate Anthropic `/v1/messages`
-(with tool-calling) to an OpenAI-compatible upstream — so a cheaper model runs as a real
-tool-using Claude Code agent, and `crew` starts the proxy on demand.
+[`examples/glm-litellm/`](examples/glm-litellm/) 配了个 `glm` 后端,用
+[LiteLLM](https://github.com/BerriAI/litellm) 把 Anthropic `/v1/messages`(带 tool-calling)
+翻成 OpenAI 兼容上游 —— 于是一个便宜模型就能当**真正会调工具**的 Claude Code agent,
+`crew` 还会按需把代理拉起来。
 
 ```bash
 bash examples/glm-litellm/setup.sh
-export GLM_GATEWAY_TOKEN=...            # your upstream token
-crew --backend glm worker "run a quick smoke test and report"
+export GLM_GATEWAY_TOKEN=...            # 你的上游 token
+crew --backend glm worker "跑个快速冒烟测试并汇报"
 ```
 
-## Notes & gotchas
+## 与 GKD 配合:交互会话 + 程序化委派
 
-- **Session isolation.** Named sessions are persistent (`--resume`) *and* inherit their
-  working directory's `CLAUDE.md`. For a clean one-off task, use a fresh session name in a
-  neutral directory (or `--fresh`) — otherwise prior history or a project's `CLAUDE.md` can
-  steer the agent off-task.
-- **Container-friendly.** The "is the backend already up?" check uses bash's built-in
-  `/dev/tcp` (falling back to `nc`/`lsof`/`ss`), so it works in minimal containers that
-  ship no `lsof` — where an `lsof`-based check would silently fail and spawn duplicate
-  backends.
-- **Portable UUIDs** via `uuidgen` / `/proc` / `python3` / `node` / `openssl`.
+`crew` 管的是**交互式、可观察、长活**的 tmux 会话。而 GKD(搞快点)是**程序化一次性委派**:起一个 `claude -p --model X`
+子进程去干活、只把**结果**回传。两者天然互补,crew 直接把 GKD 接了进来:
 
-## Relationship to GKD
+- **crew 是后端的唯一真源,GKD 借用。** `crew gkd-sync` 把 crew 的 `backends/*.conf`
+  投影进 GKD 的 `config/models.json`(一处定义、两处用)。
+- **`crew delegate --backend B "任务"`** —— 一次性程序化委派:确保后端起来 → 同步后端到 GKD →
+  调 GKD 的 runtime → 把结果打到 stdout。
 
-`crew` is for **interactive, observable, long-lived** worker sessions you watch in tmux.
-If you instead want to **programmatically delegate** a task to another model and get the
-result back into your main session, use a delegation tool like GKD — it spawns
-`claude -p --model X` sub-agents and returns their output. The two compose well: the same
-LiteLLM backend from `examples/glm-litellm/` can serve a delegation tool's `baseUrl` too.
+```bash
+crew mysess "长期迭代这个模块"          # 交互:可 attach 盯着看的 tmux 会话
+crew delegate --backend glm "把这50个文件改成 X"   # 程序化:GKD 换脑委派,拿结果回来
+crew gkd-sync                            # 手动把 crew 后端同步进 GKD models.json
+```
+
+**GKD 是可选依赖**:`delegate`/`gkd-sync` 需要 GKD(用 `$GKD_DIR`,或 `~/Desktop/gkd`);
+其余功能(会话管理)不装 GKD 也照常用。crew **不依赖 GKD 也不依赖任何具体项目**。
+
+## 说明与坑
+
+- **会话隔离。** 具名会话是持久的(`--resume`),且**继承所在目录的 `CLAUDE.md`**。
+  干净的一次性活请用新会话名 + 中性目录(或 `--fresh`)—— 否则旧对话历史或项目的
+  `CLAUDE.md` 会把 agent 带偏。
+- **容器友好。** "后端起没起"的探测用 bash 内建 `/dev/tcp`(退化到 `nc`/`lsof`/`ss`),
+  在没装 `lsof` 的极简容器里也能用 —— 用 `lsof` 判会静默失效、进而重复拉起后端。
+- **可移植 UUID**:`uuidgen` / `/proc` / `python3` / `node` / `openssl` 逐个兜底。
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT —— 见 [LICENSE](LICENSE)。
