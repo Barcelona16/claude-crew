@@ -30,6 +30,9 @@ crew ls                   # 列出运行中的会话
 crew attach mysess        # attach 观察
 crew kill mysess          # 关掉
 crew backends             # 列出后端预设
+crew log mysess           # 看某会话的【完整】分析过程(见下「看全过程」)
+crew send bob "看下这段"  # 给另一个会话的信箱投消息(见下「会话间通信」)
+crew inbox                # 读自己的信箱
 ```
 
 会话名缺省=当前目录名(重名自动加数字)。目录↔名字映射、每个会话的 session-id 存在
@@ -85,6 +88,38 @@ crew gkd-sync                            # 手动把 crew 后端同步进 GKD mo
 **GKD 是可选依赖**:`delegate`/`gkd-sync` 需要 GKD —— 把 `GKD_DIR` 指向你的 GKD checkout
 ([安装 GKD](https://github.com/alvis-HaoH/gkd));其余功能(会话管理)不装 GKD 也照常用。
 crew **不依赖 GKD 也不依赖任何具体项目**。
+
+## 会话间通信(异步信箱)
+
+会话之间靠**信箱**通信:`crew send` 把消息投进对方信箱(文件),对方在方便时用 `crew inbox` 读。
+因为 `crew` 在 PATH 上,**会话里的 agent 可以自己 `crew send 别的会话 "..."`**——这就是 agent 间协作。
+
+```bash
+crew send bob "帮我 review 限流分母那段"        # 投递(异步,不打断对方)
+crew send --nudge bob "急,看下这个"            # 投递并往对方会话注入一行"你有新消息"提醒
+crew send --all "都停一下,主干要改了"           # 广播给所有运行中的会话
+crew inbox                                       # 读+清空自己的信箱(在会话内自动认领本会话)
+crew inbox --peek bob                            # 只看不清空
+```
+
+每条消息带发信人(`--from`,缺省=`$CREW_SESSION` 或 `cli`)和时间。会话启动时 crew 会把
+`CREW_SESSION=<名字>` 注入进去,所以会话内的 agent 知道"我是谁"、投递会自动署名。
+信箱是**异步**的:默认不打断收件人,想立刻提醒用 `--nudge`。
+
+## 看全过程
+
+attach 看不全,通常是**窗口尺寸**问题:会话若被钉死在固定大小,你用更小的终端 attach 就只能看到
+被裁掉的一部分(把终端放大才显示更多)。crew 现在让会话**自动 reflow 到你 attach 时的终端尺寸**
+(`window-size latest` + `aggressive-resize`),并把 tmux 回滚上限调到 20 万行(`CREW_HISTORY_LIMIT` 可改)。
+
+要看**完整、不受 tmux 显示影响**的记录,用 `crew log` —— 它读 Claude Code 自己的会话日志(JSONL),
+crew 记着每个会话的 id,所以能渲染全程逐轮记录(还能在会话结束后回看):
+
+```bash
+crew log mysess            # 完整逐轮:文本 / ⏺ 工具调用 / ⎿ 结果 / thinking
+crew log --tail 50 mysess  # 只看最后 50 条事件
+crew log --raw mysess      # 直接给原始 JSONL 路径+内容
+```
 
 ## 说明与坑
 

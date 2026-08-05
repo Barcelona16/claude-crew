@@ -33,6 +33,9 @@ crew ls                   # list running sessions
 crew attach mysess        # attach to observe
 crew kill mysess          # stop a session
 crew backends             # list backend presets
+crew log mysess           # view a session's FULL analysis trail (see "Seeing the whole run")
+crew send bob "look at X" # drop a message in another session's mailbox (see "Talking between sessions")
+crew inbox                # read your own mailbox
 ```
 
 Session name defaults to the current directory's basename (deduped with a number on
@@ -92,6 +95,44 @@ crew gkd-sync                                          # manually sync crew back
 **GKD is an optional dependency**: `delegate`/`gkd-sync` need GKD — point `GKD_DIR` at your
 GKD checkout ([install GKD](https://github.com/alvis-HaoH/gkd)); everything else (session
 management) works without it. crew depends on **neither GKD nor any particular project**.
+
+## Talking between sessions (async mailbox)
+
+Sessions communicate via a **mailbox**: `crew send` drops a message (a file) into another
+session's inbox, and the recipient reads it with `crew inbox` when it's ready. Since `crew`
+is on PATH inside a session, an agent can `crew send other "..."` itself — that's agent-to-agent
+collaboration.
+
+```bash
+crew send bob "review the rate-limit denominator"   # deliver (async, doesn't interrupt bob)
+crew send --nudge bob "urgent, look now"             # deliver AND inject a one-line "you have mail" prompt
+crew send --all "pausing — main is about to change"  # broadcast to all running sessions
+crew inbox                                            # read + consume your mailbox (auto-detects your session)
+crew inbox --peek bob                                 # look without consuming
+```
+
+Each message is tagged with a sender (`--from`, defaults to `$CREW_SESSION` or `cli`) and a
+timestamp. crew injects `CREW_SESSION=<name>` into each session, so an agent knows "who am I"
+and its messages are auto-signed. The mailbox is **async** — it doesn't interrupt the recipient
+unless you add `--nudge`.
+
+## Seeing the whole run
+
+If `attach` shows a cropped view, it's usually a **window-size** issue: a session pinned to a
+fixed size shows only a cropped slice when you attach with a smaller terminal (enlarging it
+reveals more). crew now makes sessions **reflow to whatever terminal you attach with**
+(`window-size latest` + `aggressive-resize`) and bumps tmux scrollback to 200k lines
+(`CREW_HISTORY_LIMIT`).
+
+For the **complete record, independent of tmux display**, use `crew log` — it reads Claude
+Code's own session log (JSONL); crew tracks each session's id, so it renders the full
+turn-by-turn trail (and you can review it after the session ends):
+
+```bash
+crew log mysess            # full trail: text / ⏺ tool calls / ⎿ results / thinking
+crew log --tail 50 mysess  # only the last 50 events
+crew log --raw mysess      # print the raw JSONL path + contents
+```
 
 ## Notes & gotchas
 

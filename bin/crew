@@ -21,6 +21,10 @@
 #   crew backends         list available backend presets
 #   crew delegate --backend B "task"   one-shot programmatic delegation via GKD
 #   crew gkd-sync         export crew backends into GKD's config/models.json
+#   crew send [--from X] [--nudge] <name> "msg"   drop a message in <name>'s mailbox
+#   crew send --all [--nudge] "msg"               broadcast to all running sessions
+#   crew inbox [--peek] [<name>]                  read (and consume) your mailbox
+#   crew log [--tail N] [--raw] [<name>]          full transcript from Claude's session log
 #
 # FLAGS
 #   --backend B   pick a backend preset (default: $CREW_BACKEND or "default")
@@ -111,6 +115,9 @@ ensure_session(){
   [ -n "$BK_BASE_URL" ] && envp="$envp ANTHROPIC_BASE_URL=$(printf %q "$BK_BASE_URL")"
   [ -n "$tok" ]         && envp="$envp ANTHROPIC_AUTH_TOKEN=$(printf %q "$tok")"
   [ -n "$BK_ENV_EXTRA" ] && envp="$envp $BK_ENV_EXTRA"
+  # Let the agent inside know its own name + where crew's state lives, so `crew send/inbox`
+  # from within the session addresses the right mailbox and auto-tags the sender.
+  envp="$envp CREW_SESSION=$(printf %q "$name") CREW_HOME=$(printf %q "$CREW_HOME") CREW_STATE=$(printf %q "$CREW_STATE")"
 
   local flags="${BK_CLAUDE_FLAGS:-${CREW_CLAUDE_FLAGS:-}}"
   if [ "$yolo" = 1 ] || [ "$BK_DANGEROUS" = 1 ]; then
@@ -119,7 +126,12 @@ ensure_session(){
   local modelarg=""; [ -n "$BK_MODEL" ] && modelarg="--model $BK_MODEL"
 
   local cmd="cd $(printf %q "$cwd") &&$envp exec $CLAUDE_BIN $modelarg $flags $resume; echo CREW_SESSION_EXITED; exec bash -i"
-  tmux -u new-session -d -s "$tmux_s" -x 220 -y 50 bash -lc "$cmd"
+  tmux set-option -g history-limit "${CREW_HISTORY_LIMIT:-200000}" 2>/dev/null || true  # keep long scrollback on attach
+  tmux -u new-session -d -s "$tmux_s" -x 200 -y 50 bash -lc "$cmd"
+  # Reflow to whatever terminal attaches (don't stay pinned at the detached size, or a
+  # smaller client sees a cropped pane and a larger one sees a small box in the corner).
+  tmux set-option -t "$tmux_s" window-size latest 2>/dev/null || true
+  tmux set-window-option -t "$tmux_s" aggressive-resize on 2>/dev/null || true
   log "session '$name' ready (tmux: $tmux_s, backend: $backend, model: ${BK_MODEL:-<default>}); watch: crew attach $name"
   sleep 5
 }
@@ -181,14 +193,99 @@ crew_delegate(){
   exec node "$gkd/scripts/gkd-runtime.mjs" "--$backend" "$task"
 }
 
+# --- inter-session mailbox (async) -----------------------------------------
+# Messages are files under $CREW_STATE/inbox/<name>/ (file-per-message = no append race).
+# `crew send` drops a message; the recipient reads it with `crew inbox` when it's ready.
+# Because `crew` is on PATH inside a session, an agent can `crew send other "..."` itself.
+inbox_dir(){ echo "$CREW_STATE/inbox/$1"; }
+whoami_session(){
+  local w="${CREW_SESSION:-}"
+  [ -z "$w" ] && [ -f "$REG" ] && w=$(awk -F'\t' -v p="$PWD" '$1==p{print $2}' "$REG" | head -1)
+  echo "$w"
+}
+deliver(){   # deliver <to> <from> <msg>
+  local to="$1" from="$2" msg="$3" dir; dir=$(inbox_dir "$to"); mkdir -p "$dir"
+  { printf '%s\t%s\n' "$from" "$(date '+%Y-%m-%d %H:%M:%S')"; printf '%s\n' "$msg"; } > "$dir/$(date +%Y%m%d-%H%M%S)-$$-${RANDOM}.msg"
+}
+nudge(){     # nudge <to> <from>
+  tmux has-session -t "$TMUX_PREFIX$1" 2>/dev/null || return 0
+  tmux send-keys -t "$TMUX_PREFIX$1" -l "[crew] new mail from $2 — run: crew inbox"; sleep 1; tmux send-keys -t "$TMUX_PREFIX$1" Enter
+}
+crew_send(){
+  local to="$1"; shift 2>/dev/null || true; local msg="$*"
+  [ -n "$to" ] || die "usage: crew send [--from X] [--nudge] <name> \"message\""
+  [ -n "$msg" ] || die "empty message"
+  local from="${FROM:-$(whoami_session)}"; [ -z "$from" ] && from="cli"
+  deliver "$to" "$from" "$msg"
+  log "queued -> inbox of '$to' (from $from)"
+  [ "${NUDGE:-0}" = 1 ] && { nudge "$to" "$from" && log "nudged '$to'"; } || true
+}
+crew_broadcast(){  # crew send --all "msg"  → every running crew session (except self)
+  local msg="$*"; [ -n "$msg" ] || die "usage: crew send --all \"message\""
+  local from="${FROM:-$(whoami_session)}"; [ -z "$from" ] && from="cli"
+  local names n; names=$(tmux ls 2>/dev/null | sed -n "s/^$TMUX_PREFIX\([^:]*\):.*/\1/p"); local cnt=0
+  for n in $names; do [ "$n" = "$from" ] && continue; deliver "$n" "$from" "$msg"; [ "${NUDGE:-0}" = 1 ] && nudge "$n" "$from"; cnt=$((cnt+1)); done
+  log "broadcast to $cnt session(s) (from $from)"
+}
+crew_inbox(){
+  local who="${1:-$(whoami_session)}"
+  [ -n "$who" ] || die "which inbox? pass a name or run inside a crew session"
+  local dir; dir=$(inbox_dir "$who"); local files; files=$(ls "$dir"/*.msg 2>/dev/null | sort)
+  [ -z "$files" ] && { echo "(inbox empty for '$who')"; return 0; }
+  local f n=0 hdr
+  for f in $files; do
+    n=$((n+1)); hdr=$(head -1 "$f")
+    echo "── #$n  from ${hdr%%$'\t'*}  at ${hdr#*$'\t'} ──"
+    tail -n +2 "$f"; echo ""
+    [ "${PEEK:-0}" = 1 ] || rm -f "$f"
+  done
+  [ "${PEEK:-0}" = 1 ] && echo "(peeked $n; not consumed — omit --peek to consume)" || echo "(consumed $n message(s))"
+}
+
+# --- full transcript (the complete analysis, unlike attach's limited scrollback) --------
+# `attach` only shows tmux's scrollback and Claude's TUI redraws in place, so long runs
+# scroll out of reach. The authoritative record is Claude Code's own session JSONL; crew
+# knows each session's id, so `crew log <name>` renders the full turn-by-turn trail.
+crew_log(){
+  local who="${1:-$(whoami_session)}"
+  [ -n "$who" ] || die "which session? pass a name or run inside a crew session"
+  local sidf="$CREW_STATE/$who.sid"; [ -f "$sidf" ] || die "no session id for '$who' (has it run yet?)"
+  local sid; sid=$(cat "$sidf"); local jf; jf=$(ls -t "$HOME"/.claude/projects/*/"$sid".jsonl 2>/dev/null | head -1)
+  [ -n "$jf" ] || die "no transcript file yet for '$who' (sid $sid)"
+  if [ "${RAW:-0}" = 1 ] || ! command -v node >/dev/null 2>&1; then echo "# transcript: $jf"; cat "$jf"; return 0; fi
+  CREW_JF="$jf" CREW_TAIL="${LOGTAIL:-0}" node -e '
+    const fs=require("fs");
+    let L=fs.readFileSync(process.env.CREW_JF,"utf8").split("\n").filter(Boolean);
+    const t=Number(process.env.CREW_TAIL)||0; if(t>0) L=L.slice(-t);
+    const s=x=>{x=String(x==null?"":x).replace(/\s+/g," ").trim(); return x.length>2000?x.slice(0,2000)+" …[+more]":x;};
+    for(const ln of L){ let o; try{o=JSON.parse(ln)}catch(e){continue;}
+      const m=o.message||o, role=m.role||o.type||"?", c=m.content;
+      if(typeof c==="string"){ if(c.trim()) console.log(`\n【${role}】 ${s(c)}`); continue; }
+      if(!Array.isArray(c)) continue;
+      for(const p of c){
+        if(p.type==="text"&&p.text&&p.text.trim()) console.log(`\n【${role}】 ${s(p.text)}`);
+        else if(p.type==="thinking") console.log(`\n【${role}·thinking】 ${s(p.thinking||p.text)}`);
+        else if(p.type==="tool_use") console.log(`\n  ⏺ ${p.name}(${s(JSON.stringify(p.input))})`);
+        else if(p.type==="tool_result"){ let r=p.content; if(Array.isArray(r)) r=r.map(x=>x&&x.text||"").join(" "); console.log(`  ⎿ ${s(r)}`); }
+      }
+    }
+  '
+}
+
 # --- arg parsing ------------------------------------------------------------
-BACKEND="${CREW_BACKEND:-default}"; FRESH=0; YOLO=0; POS=()
+BACKEND="${CREW_BACKEND:-default}"; FRESH=0; YOLO=0; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --backend) BACKEND="${2:?--backend needs a value}"; shift 2;;
     --backend=*) BACKEND="${1#*=}"; shift;;
     --fresh) FRESH=1; shift;;
     --yolo)  YOLO=1; shift;;
+    --from) FROM="${2:?--from needs a value}"; shift 2;;
+    --nudge) NUDGE=1; shift;;
+    --peek) PEEK=1; shift;;
+    --all) ALLTGT=1; shift;;
+    --raw) RAW=1; shift;;
+    --tail) LOGTAIL="${2:?--tail needs a number}"; shift 2;;
     --) shift; while [ $# -gt 0 ]; do POS+=("$1"); shift; done;;
     *) POS+=("$1"); shift;;
   esac
@@ -202,6 +299,9 @@ case "${1:-}" in
   kill) [ -n "${2:-}" ] || die "usage: crew kill <name>"; tmux kill-session -t "$TMUX_PREFIX$2" 2>/dev/null && log "killed $2" || log "no session $2";;
   gkd-sync) crew_gkd_sync;;
   delegate) shift; crew_delegate "$BACKEND" "$@";;
+  send) shift; if [ "$ALLTGT" = 1 ]; then crew_broadcast "$@"; else crew_send "$@"; fi;;
+  inbox) shift; crew_inbox "$@";;
+  log) shift; crew_log "$@";;
   ""|-h|--help)
     if [ "${1:-}" = "" ]; then name=$(resolve_name_for_cwd "$PWD"); ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO"; exec tmux -u attach -t "$TMUX_PREFIX$name"; fi
     awk 'NR>=2{ if($0 !~ /^#/) exit; sub(/^# ?/,""); print }' "$0";;
