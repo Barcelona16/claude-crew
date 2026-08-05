@@ -105,6 +105,28 @@ crew inbox --peek bob                            # 只看不清空
 `CREW_SESSION=<名字>` 注入进去,所以会话内的 agent 知道"我是谁"、投递会自动署名。
 信箱是**异步**的:默认不打断收件人,想立刻提醒用 `--nudge`。
 
+## tmux:滚轮翻历史 + 选中即复制
+
+`crew attach` 进去后,如果 tmux 鼠标是关的,滚轮会翻成 shell 的命令历史而不是 Claude 的输出,
+选中也没法复制到系统剪贴板。`crew` 已经给它建的会话**自动开 `mouse on`**(仅作用于 crew 会话,
+不动你全局配置),所以滚轮翻动开箱即用。但"选中即复制到系统剪贴板"是 tmux 键表绑定,得在你自己的
+`~/.tmux.conf` 里加一段:
+
+```tmux
+set -g mouse on
+set -g history-limit 50000
+# 滚轮在普通 pane 里自动进 copy-mode 翻历史
+bind-key -T root WheelUpPane if-shell -F "#{alternate_on}" "send-keys -M" "copy-mode -e"
+# 选中即复制到系统剪贴板(macOS 用 pbcopy;Linux 换成 "xclip -selection clipboard")
+setw -g mode-keys vi
+bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "pbcopy"
+bind-key -T copy-mode-vi Enter            send-keys -X copy-pipe-and-cancel "pbcopy"
+bind-key -T copy-mode-vi y                send-keys -X copy-pipe-and-cancel "pbcopy"
+```
+
+> Terminal.app 不支持按住 `Option` 绕过 tmux 鼠标(那是 iTerm2 的特性),所以走 copy-mode
+> 的路子最稳:拖拽选中 → 松开即进剪贴板 → `Cmd+V` 粘贴。iTerm2/Ghostty 则两种方式都行。
+
 ## 说明与坑
 
 - **会话隔离。** 具名会话是持久的(`--resume`),且**继承所在目录的 `CLAUDE.md`**。

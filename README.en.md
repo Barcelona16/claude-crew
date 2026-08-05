@@ -115,6 +115,30 @@ timestamp. crew injects `CREW_SESSION=<name>` into each session, so an agent kno
 and its messages are auto-signed. The mailbox is **async** — it doesn't interrupt the recipient
 unless you add `--nudge`.
 
+## tmux: scrollback with the wheel + select-to-copy
+
+When you `crew attach`, if tmux's mouse is off the scroll wheel flips through shell history instead of
+Claude's output, and selecting text won't reach the system clipboard. `crew` already turns `mouse on`
+for the sessions it creates (scoped to crew sessions, not your global config), so the wheel just works.
+But "select → copy to system clipboard" is a tmux key-table binding that belongs in your own
+`~/.tmux.conf`:
+
+```tmux
+set -g mouse on
+set -g history-limit 50000
+# Wheel in a normal pane enters copy-mode to scroll history
+bind-key -T root WheelUpPane if-shell -F "#{alternate_on}" "send-keys -M" "copy-mode -e"
+# Select-to-clipboard (macOS: pbcopy; Linux: "xclip -selection clipboard")
+setw -g mode-keys vi
+bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel "pbcopy"
+bind-key -T copy-mode-vi Enter            send-keys -X copy-pipe-and-cancel "pbcopy"
+bind-key -T copy-mode-vi y                send-keys -X copy-pipe-and-cancel "pbcopy"
+```
+
+> Terminal.app does not support holding `Option` to bypass the tmux mouse (that's an iTerm2 feature),
+> so the copy-mode path is the reliable one: drag to select → release → it's in the clipboard → `Cmd+V`
+> to paste. iTerm2/Ghostty support both ways.
+
 ## Notes & gotchas
 
 - **Session isolation.** Named sessions are persistent (`--resume`) *and* inherit their
