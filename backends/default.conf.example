@@ -21,6 +21,10 @@ TOKEN_CMD=
 ENSURE_CMD=
 
 # Extra environment injected into the session, space-separated K=V pairs.
+# NOTE: quote the whole value if it contains spaces (multiple K=V pairs), otherwise
+# bash's inline-env parsing splits it and only the first pair reaches the session.
+# Correct:   ENV_EXTRA="MAX_THINKING_TOKENS=0 IS_SANDBOX=1"
+# WRONG:     ENV_EXTRA=MAX_THINKING_TOKENS=0 IS_SANDBOX=1   # IS_SANDBOX becomes command-level env, lost
 ENV_EXTRA=
 
 # Set to 1 to add --dangerously-skip-permissions (unattended tool use). Off by default.
