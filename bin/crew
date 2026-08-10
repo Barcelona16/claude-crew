@@ -15,9 +15,10 @@
 #   crew [--backend B] [--fresh] [--yolo] [name] [task...]
 #                         start/continue a session, optionally feed it a task
 #   crew                  ensure + attach the session for the current directory
-#   crew ls               list running crew sessions
+#   crew ls               list all known crew sessions (live + resumable, survives restart)
 #   crew attach <name>    attach to observe a session
-#   crew kill <name>      kill a session
+#   crew stop <name>      stop a session's tmux but KEEP its state (resume/switch model later)
+#   crew kill <name> [--purge]   delete a session for good (tmux + id + registry; --purge also transcript)
 #   crew backends         list available backend presets
 #   crew delegate --backend B "task"   one-shot programmatic delegation via GKD
 #   crew gkd-sync         export crew backends into GKD's config/models.json
@@ -27,7 +28,8 @@
 #   crew log [--tail N] [--raw] [<name>]          full transcript from Claude's session log
 #
 # FLAGS
-#   --backend B   pick a backend preset (default: $CREW_BACKEND or "default")
+#   --backend B   pick a backend preset (default: $CREW_BACKEND or "default").
+#                 Remembered per session: pass it once and later `crew <name>` reuses it.
 #   --fresh       start a brand-new conversation (do not --resume old history)
 #   --yolo        add --dangerously-skip-permissions (unattended tool use)
 #
@@ -102,6 +104,13 @@ load_backend(){
 ensure_session(){
   local name="$1" backend="$2" fresh="$3" yolo="$4" tmux_s="$TMUX_PREFIX$1"
   tmux has-session -t "$tmux_s" 2>/dev/null && return
+  # Per-session backend memory: an explicit --backend wins and is remembered for
+  # next time; otherwise reuse whatever backend this session last started with;
+  # otherwise fall back to the default ($CREW_BACKEND or "default"). So switching a
+  # session's model once (crew --backend kimi <name>) sticks without re-passing it.
+  local bkf="$CREW_STATE/$name.backend"
+  if [ "${BACKEND_EXPLICIT:-0}" = 1 ]; then printf '%s\n' "$backend" > "$bkf"
+  elif [ -f "$bkf" ]; then backend=$(cat "$bkf"); fi
   load_backend "$backend"
   [ -n "$BK_ENSURE_CMD" ] && { log "ensuring backend '$backend' is up..."; bash -c "$BK_ENSURE_CMD" || log "WARN: backend ENSURE_CMD failed (continuing)"; }
 
@@ -281,11 +290,11 @@ crew_log(){
 }
 
 # --- arg parsing ------------------------------------------------------------
-BACKEND="${CREW_BACKEND:-default}"; FRESH=0; YOLO=0; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
+BACKEND="${CREW_BACKEND:-default}"; BACKEND_EXPLICIT=0; FRESH=0; YOLO=0; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --backend) BACKEND="${2:?--backend needs a value}"; shift 2;;
-    --backend=*) BACKEND="${1#*=}"; shift;;
+    --backend) BACKEND="${2:?--backend needs a value}"; BACKEND_EXPLICIT=1; shift 2;;
+    --backend=*) BACKEND="${1#*=}"; BACKEND_EXPLICIT=1; shift;;
     --fresh) FRESH=1; shift;;
     --yolo)  YOLO=1; shift;;
     --from) FROM="${2:?--from needs a value}"; shift 2;;
@@ -301,10 +310,53 @@ done
 set -- ${POS[@]+"${POS[@]}"}
 
 case "${1:-}" in
-  ls) echo "== crew sessions =="; tmux ls 2>/dev/null | grep "^$TMUX_PREFIX" | sed "s/^$TMUX_PREFIX/  /" || echo "  (none)";;
+  ls)
+    echo "== crew sessions =="
+    # List every session crew knows about from on-disk state (registry + .sid files),
+    # NOT just the live tmux ones. tmux dies on host restart, but a session's id +
+    # transcript persist on disk, so `crew <name>` still resumes it with full history.
+    # Status: live = running in tmux now | resumable = dormant, has a saved transcript
+    #         (`crew <name>` restores it) | new = has an id but no transcript yet.
+    names=$( { [ -f "$REG" ] && awk -F'\t' 'NF>=2{print $2}' "$REG"
+               ls "$CREW_STATE"/*.sid 2>/dev/null | sed 's:.*/::;s:\.sid$::'
+             } | sort -u )
+    if [ -z "$names" ]; then echo "  (none)"; else
+      printf '  %-24s %-10s %s\n' NAME STATUS DIR
+      while IFS= read -r nm; do
+        [ -n "$nm" ] || continue
+        cwd=$(path_for_name "$nm"); [ -n "$cwd" ] || cwd="?"
+        sidf="$CREW_STATE/$nm.sid"
+        if tmux has-session -t "$TMUX_PREFIX$nm" 2>/dev/null; then st="live"
+        elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$(cat "$sidf")".jsonl >/dev/null 2>&1; then st="resumable"
+        else st="new"; fi
+        printf '  %-24s %-10s %s\n' "$nm" "$st" "$cwd"
+      done <<EOF
+$names
+EOF
+    fi
+    ;;
+  stop) [ -n "${2:-}" ] || die "usage: crew stop <name>"
+    # Stop the running tmux session but KEEP its on-disk state (.sid + transcript),
+    # so `crew [--backend X] <name>` resumes it later with full history. This is how
+    # you switch a session's model: `crew stop <name>` then `crew --backend Y <name>`.
+    if tmux kill-session -t "$TMUX_PREFIX$2" 2>/dev/null; then log "stopped $2 (state kept; resume with: crew $2)"; else log "no live tmux session '$2' (nothing to stop)"; fi
+    ;;
   backends) echo "== backends =="; for b in $(list_backends_inline); do echo "  $b"; done;;
   attach) [ -n "${2:-}" ] || die "usage: crew attach <name>"; exec tmux -u attach -t "$TMUX_PREFIX$2";;
-  kill) [ -n "${2:-}" ] || die "usage: crew kill <name>"; tmux kill-session -t "$TMUX_PREFIX$2" 2>/dev/null && log "killed $2" || log "no session $2";;
+  kill) [ -n "${2:-}" ] || die "usage: crew kill <name> [--purge]"
+    nm="$2"; purge=0; [ "${3:-}" = "--purge" ] && purge=1
+    # Fully delete the session so it stops showing in `crew ls`: kill the tmux
+    # session (if any) AND remove its on-disk state (.sid + registry line).
+    # --purge additionally deletes the saved Claude transcript (irreversible).
+    tmux kill-session -t "$TMUX_PREFIX$nm" 2>/dev/null && log "killed tmux session $nm" || true
+    sidf="$CREW_STATE/$nm.sid"
+    if [ "$purge" = 1 ] && [ -f "$sidf" ]; then
+      psid=$(cat "$sidf"); rm -f "$HOME"/.claude/projects/*/"$psid".jsonl 2>/dev/null && log "purged transcript $psid" || true
+    fi
+    rm -f "$sidf" "$CREW_STATE/$nm.backend"
+    if [ -f "$REG" ]; then t=$(mktemp) && awk -F'\t' -v m="$nm" '$2!=m' "$REG" > "$t" && mv "$t" "$REG"; fi
+    log "deleted session '$nm' (tmux + sid + registry$( [ "$purge" = 1 ] && printf ' + transcript' ))"
+    ;;
   gkd-sync) crew_gkd_sync;;
   delegate) shift; crew_delegate "$BACKEND" "$@";;
   send) shift; if [ "$ALLTGT" = 1 ]; then crew_broadcast "$@"; else crew_send "$@"; fi;;
