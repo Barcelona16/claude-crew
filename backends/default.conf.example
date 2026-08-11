@@ -15,6 +15,13 @@ TOKEN=
 # ...or a command whose stdout is the token (takes precedence over TOKEN).
 # Useful to pull a token from a keychain, a router config, or an env file.
 TOKEN_CMD=
+# ...or the NAME of an environment variable to read the token from at launch time —
+# the crew analog of LiteLLM's `api_key: os.environ/GATEWAY_TOKEN`. HIGHEST precedence:
+# if the named var is set & non-empty it wins over TOKEN_CMD and TOKEN (otherwise crew
+# falls back to them). Lets several tools share one gateway token via the environment
+# instead of pasting it into each backend.
+#   TOKEN_ENV=GATEWAY_TOKEN
+TOKEN_ENV=
 
 # Optional idempotent command run before the session starts — e.g. start a local
 # proxy if it isn't already up. Must be safe to run repeatedly.

@@ -88,15 +88,25 @@ path_for_name(){ awk -F'\t' -v m="$1" '$2==m{print $1}' "$REG" 2>/dev/null | hea
 
 # --- backend presets --------------------------------------------------------
 list_backends_inline(){ { echo default; ls "$BACKEND_DIR"/*.conf 2>/dev/null | sed 's:.*/::;s:\.conf$::'; } | sort -u | tr '\n' ' '; }
+# Echo the model a backend runs, WITHOUT sourcing the conf (sourcing can fire a backend's
+# ENSURE_CMD side effects; read-only paths like `ls` must not). "-" = plain default Claude.
+model_for_backend(){
+  local b="$1" f="$BACKEND_DIR/$1.conf" m=""
+  [ "$b" = default ] && { printf -- '-'; return; }
+  [ -f "$f" ] || { printf '?'; return; }
+  m=$(grep -E '^[[:space:]]*MODEL=' "$f" 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*MODEL=//')
+  m="${m%\"}"; m="${m#\"}"; m="${m%\'}"; m="${m#\'}"
+  printf '%s' "${m:-<default>}"
+}
 # Sets BK_* globals from $BACKEND_DIR/<backend>.conf. "default" needs no file.
 load_backend(){
   local b="$1" f="$BACKEND_DIR/$1.conf"
-  BK_BASE_URL=""; BK_MODEL=""; BK_TOKEN=""; BK_TOKEN_CMD=""; BK_ENSURE_CMD=""; BK_ENV_EXTRA=""; BK_DANGEROUS=""; BK_CLAUDE_FLAGS=""
+  BK_BASE_URL=""; BK_MODEL=""; BK_TOKEN=""; BK_TOKEN_CMD=""; BK_TOKEN_ENV=""; BK_ENSURE_CMD=""; BK_ENV_EXTRA=""; BK_DANGEROUS=""; BK_CLAUDE_FLAGS=""
   if [ -f "$f" ]; then
-    local BASE_URL="" MODEL="" TOKEN="" TOKEN_CMD="" ENSURE_CMD="" ENV_EXTRA="" DANGEROUS="" CLAUDE_FLAGS=""
+    local BASE_URL="" MODEL="" TOKEN="" TOKEN_CMD="" TOKEN_ENV="" ENSURE_CMD="" ENV_EXTRA="" DANGEROUS="" CLAUDE_FLAGS=""
     # shellcheck disable=SC1090
     . "$f"
-    BK_BASE_URL="$BASE_URL"; BK_MODEL="$MODEL"; BK_TOKEN="$TOKEN"; BK_TOKEN_CMD="$TOKEN_CMD"
+    BK_BASE_URL="$BASE_URL"; BK_MODEL="$MODEL"; BK_TOKEN="$TOKEN"; BK_TOKEN_CMD="$TOKEN_CMD"; BK_TOKEN_ENV="$TOKEN_ENV"
     BK_ENSURE_CMD="$ENSURE_CMD"; BK_ENV_EXTRA="$ENV_EXTRA"; BK_DANGEROUS="$DANGEROUS"; BK_CLAUDE_FLAGS="$CLAUDE_FLAGS"
   elif [ "$b" != "default" ]; then
     die "backend '$b' not found ($f); available: $(list_backends_inline)"
@@ -134,7 +144,10 @@ ensure_session(){
   if [ "$fresh" = 1 ] || [ ! -f "$sidf" ]; then sid=$(gen_uuid); echo "$sid" > "$sidf"; else sid=$(cat "$sidf"); fi
   if [ "$fresh" != 1 ] && ls "$HOME"/.claude/projects/*/"$sid".jsonl >/dev/null 2>&1; then resume="--resume $sid"; else resume="--session-id $sid"; fi
 
-  local tok="$BK_TOKEN"; [ -n "$BK_TOKEN_CMD" ] && tok=$(bash -c "$BK_TOKEN_CMD" 2>/dev/null)
+  # token precedence: TOKEN_ENV (named env var, if non-empty) > TOKEN_CMD (stdout) > TOKEN (literal)
+  local tok="$BK_TOKEN"
+  [ -n "$BK_TOKEN_CMD" ] && tok=$(bash -c "$BK_TOKEN_CMD" 2>/dev/null)
+  if [ -n "$BK_TOKEN_ENV" ]; then local _ev="${!BK_TOKEN_ENV-}"; [ -n "$_ev" ] && tok="$_ev"; fi
   local envp=""
   [ -n "$BK_BASE_URL" ] && envp="$envp ANTHROPIC_BASE_URL=$(printf %q "$BK_BASE_URL")"
   [ -n "$tok" ]         && envp="$envp ANTHROPIC_AUTH_TOKEN=$(printf %q "$tok")"
@@ -190,12 +203,13 @@ crew_gkd_sync(){
   local gkd; gkd=$(gkd_root) || die "GKD not found. $GKD_INSTALL_HINT"
   command -v node >/dev/null 2>&1 || die "node is required to sync GKD's models.json"
   local tmp; tmp=$(mktemp)
-  local f name tok
+  local f name tok _ev
   for f in "$BACKEND_DIR"/*.conf; do
     [ -f "$f" ] || continue
     name=$(basename "$f" .conf); load_backend "$name"
     [ -z "$BK_BASE_URL" ] && continue          # GKD needs a real endpoint; skip plain-Claude backends
     tok="$BK_TOKEN"; [ -n "$BK_TOKEN_CMD" ] && tok=$(bash -c "$BK_TOKEN_CMD" 2>/dev/null)
+    if [ -n "$BK_TOKEN_ENV" ]; then _ev="${!BK_TOKEN_ENV-}"; [ -n "$_ev" ] && tok="$_ev"; fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$BK_MODEL" "$BK_BASE_URL" "$tok" "$BK_ENV_EXTRA" >> "$tmp"
   done
   CREW_TSV="$tmp" CREW_MF="$gkd/config/models.json" node -e '
@@ -336,7 +350,7 @@ case "${1:-}" in
                ls "$CREW_STATE"/*.sid 2>/dev/null | sed 's:.*/::;s:\.sid$::'
              } | sort -u )
     if [ -z "$names" ]; then echo "  (none)"; else
-      printf '  %-24s %-10s %s\n' NAME STATUS DIR
+      printf '  %-20s %-9s %-12s %-27s %s\n' NAME STATUS BACKEND MODEL DIR
       while IFS= read -r nm; do
         [ -n "$nm" ] || continue
         cwd=$(path_for_name "$nm"); [ -n "$cwd" ] || cwd="?"
@@ -344,7 +358,8 @@ case "${1:-}" in
         if tmux has-session -t "$TMUX_PREFIX$nm" 2>/dev/null; then st="live"
         elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$(cat "$sidf")".jsonl >/dev/null 2>&1; then st="resumable"
         else st="new"; fi
-        printf '  %-24s %-10s %s\n' "$nm" "$st" "$cwd"
+        bk=$(cat "$CREW_STATE/$nm.backend" 2>/dev/null || echo "${CREW_BACKEND:-default}")
+        printf '  %-20s %-9s %-12s %-27s %s\n' "$nm" "$st" "$bk" "$(model_for_backend "$bk")" "$cwd"
       done <<EOF
 $names
 EOF
