@@ -30,6 +30,9 @@
 # FLAGS
 #   --backend B   pick a backend preset (default: $CREW_BACKEND or "default").
 #                 Remembered per session: pass it once and later `crew <name>` reuses it.
+#                 If the session is already live on a DIFFERENT backend, an explicit
+#                 --backend restarts it on B (history preserved via --resume) — a
+#                 one-command model switch, no separate `crew stop` needed.
 #   --fresh       start a brand-new conversation (do not --resume old history)
 #   --yolo        add --dangerously-skip-permissions (unattended tool use)
 #
@@ -103,12 +106,24 @@ load_backend(){
 # --- session lifecycle ------------------------------------------------------
 ensure_session(){
   local name="$1" backend="$2" fresh="$3" yolo="$4" tmux_s="$TMUX_PREFIX$1"
-  tmux has-session -t "$tmux_s" 2>/dev/null && return
+  local bkf="$CREW_STATE/$name.backend"
+  # If the session is already live, just re-attach — UNLESS the caller explicitly
+  # asked for a DIFFERENT backend, in which case stop it and relaunch on the new one
+  # (history preserved below via --resume). This makes `crew --backend X <name>` a
+  # one-command model switch instead of "crew stop, then re-run with --backend".
+  if tmux has-session -t "$tmux_s" 2>/dev/null; then
+    local running="default"; [ -f "$bkf" ] && running=$(cat "$bkf")
+    if [ "${BACKEND_EXPLICIT:-0}" = 1 ] && [ "$backend" != "$running" ]; then
+      log "switching '$name' backend: $running -> $backend (restart; history kept via --resume)"
+      tmux kill-session -t "$tmux_s" 2>/dev/null || true
+    else
+      return
+    fi
+  fi
   # Per-session backend memory: an explicit --backend wins and is remembered for
   # next time; otherwise reuse whatever backend this session last started with;
   # otherwise fall back to the default ($CREW_BACKEND or "default"). So switching a
   # session's model once (crew --backend kimi <name>) sticks without re-passing it.
-  local bkf="$CREW_STATE/$name.backend"
   if [ "${BACKEND_EXPLICIT:-0}" = 1 ]; then printf '%s\n' "$backend" > "$bkf"
   elif [ -f "$bkf" ]; then backend=$(cat "$bkf"); fi
   load_backend "$backend"
