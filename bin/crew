@@ -24,6 +24,7 @@
 #   crew stop <name>      stop a session's tmux but KEEP its state (resume/switch later)
 #   crew kill <name> [--purge]   delete a session for good (tmux + id + registry; --purge also transcript)
 #   crew models           list available model presets (opus / kimi / glm / ...)
+#   crew up               ensure dependency services are up (CCR :3456 + joycode :8765)
 #   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
 #   crew delegate --model B "task"   one-shot delegation via GKD (needs ext/gkd.sh)
 #   crew gkd-sync         export crew models into GKD's config/models.json (needs ext/gkd.sh)
@@ -166,6 +167,25 @@ ccr_provider_for(){
   ' "$cfg" 2>/dev/null
 }
 
+# --- dependency services (CCR + joycode proxy) -------------------------------
+# crew's ccr-routed presets need claude-code-router (:3456) up, and joycode models also
+# need the joycode proxy (:8765). Both are meant to run as launchd agents (see README);
+# crew_dep_up brings one up on demand by kickstarting its agent if the port is down. Ports
+# and agent labels are overridable via env for other setups (e.g. the cloud).
+crew_dep_up(){
+  local name="$1" port="$2" label="$3" i
+  port_listening "$port" && return 0
+  if command -v launchctl >/dev/null 2>&1 && { launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 || [ -f "$HOME/Library/LaunchAgents/$label.plist" ]; }; then
+    log "$name (:$port) down — kickstarting launchd agent $label"
+    launchctl kickstart -k "gui/$(id -u)/$label" >/dev/null 2>&1 || launchctl load -w "$HOME/Library/LaunchAgents/$label.plist" >/dev/null 2>&1 || true
+    for i in $(seq 1 12); do port_listening "$port" && { log "$name up"; return 0; }; sleep 1; done
+    log "WARN: $name still down after kickstart — check: launchctl print gui/$(id -u)/$label"
+  else
+    log "WARN: $name (:$port) is down and no launchd agent '$label' — start it manually or install the agent."
+  fi
+  return 0
+}
+
 # --- session lifecycle ------------------------------------------------------
 ensure_session(){
   local name="$1" backend="$2" fresh="$3" yolo="$4" tmux_s="$TMUX_PREFIX$1"
@@ -225,6 +245,11 @@ ensure_session(){
     fi
   fi
   [ -n "$BK_ENSURE_CMD" ] && { log "ensuring backend '$backend' is up..."; bash -c "$BK_ENSURE_CMD" || log "WARN: backend ENSURE_CMD failed (continuing)"; }
+  # ccr-routed presets need CCR (:3456) up; joycode models also need the joycode proxy.
+  if [ "${BK_KEY_MODE:-}" = ccr ]; then
+    crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}"
+    case "$BK_MODEL" in joycode,*) crew_dep_up "joycode" "${CREW_JOYCODE_PORT:-8765}" "${CREW_JOYCODE_LABEL:-com.claudecrew.joycode}";; esac
+  fi
 
   local cwd; cwd=$(path_for_name "$name"); [ -z "$cwd" ] && cwd="$PWD"
   local sidf="$CREW_STATE/$name.sid" sid resume
@@ -416,6 +441,7 @@ EOF
     if tmux kill-session -t "$TMUX_PREFIX$2" 2>/dev/null; then log "stopped $2 (state kept; resume with: crew $2)"; else log "no live tmux session '$2' (nothing to stop)"; fi
     ;;
   models|backends) echo "== models =="; for b in $(list_backends_inline); do echo "  $b"; done;;
+  up) crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}"; crew_dep_up "joycode" "${CREW_JOYCODE_PORT:-8765}" "${CREW_JOYCODE_LABEL:-com.claudecrew.joycode}";;
   keys) echo "== api keys ($KEYS_FILE) =="
     if [ ! -f "$KEYS_FILE" ]; then echo "  (no keys file; create it with lines: <alias>=<api-key>)";
     else

@@ -9,7 +9,7 @@
 - **按名字指挥长活 agent** —— `crew api "加限流"`、`crew docs "更新 changelog"`
 - **随时 attach 观察它干活** —— `crew attach api` 直接进到活会话里看
 - **持久** —— 会话用 `--resume` 接回同一段对话,跨 tmux/宿主机重启不丢
-- **每会话独立后端** —— 一个会话跑 Claude、另一个跑便宜模型,并排开
+- **每会话可切模型 + key** —— `--model` / `--key` 两个旋钮(经 CCR),一个会话跑 Opus、另一个跑 GLM/kimi
 
 它是一个依赖极少的 bash 脚本(只要 tmux + Claude Code)。无守护进程、无配置服务、**不依赖任何具体项目**。
 
@@ -26,10 +26,13 @@ crew --help
 ```bash
 crew mysess "读 src/app.ts 列出它的导出"   # 起/续一个具名会话并(可选)喂任务
 crew                      # 对当前目录的会话:ensure + attach
-crew ls                   # 列出运行中的会话
+crew mysess --model opus  # 切模型(切完自动 attach);--key 切 key
+crew ls                   # 列出会话(名字 / 状态 / 模型 / key)
+crew models               # 列出模型预设
+crew keys                 # 列出 API key 别名(掩码)
+crew up                   # 确保依赖服务(CCR / joycode 代理)在跑
 crew attach mysess        # attach 观察
 crew kill mysess          # 关掉
-crew backends             # 列出后端预设
 crew send bob "看下这段"  # 给另一个会话的信箱投消息(见下「会话间通信」)
 crew inbox                # 读自己的信箱
 ```
@@ -37,56 +40,88 @@ crew inbox                # 读自己的信箱
 会话名缺省=当前目录名(重名自动加数字)。目录↔名字映射、每个会话的 session-id 存在
 `~/.local/share/claude-crew/`,所以在同一目录再敲 `crew` 会接回同一段对话。
 
-**Flags:** `--backend <名>` 选后端 · `--fresh` 开全新对话(不 `--resume`)· `--yolo` 加 `--dangerously-skip-permissions`。
+**Flags:** `--model <名>` 选模型预设(`--backend` 是隐藏别名)· `--key <别名>` 切 API key(`--key -` 清除)· `--fresh` 开全新对话(不 `--resume`)· `--safe` 不加 bypass(**bypass 现已默认开**;`CREW_YOLO=0` 全局关)。切 `--model`/`--key` 后在交互终端会**自动 attach**。
 
-## 后端
+## 模型预设(走 CCR)
 
-后端是 `~/.config/claude-crew/backends/<名>.conf` 里的预设(按 bash 源码 source)。内置的
-`default` 后端就是原生 Claude(用你环境里现成的配置)。所有键都可选,见
-[`backends/default.conf.example`](backends/default.conf.example):
+预设是 `~/.config/claude-crew/backends/<名>.conf`(bash source)。`crew models` 列出全部。
+每个预设定义走哪条路(`BASE_URL` / `MODEL` / `TOKEN`)以及 `KEY_MODE`(决定 `--key` 如何落地),
+见 [`backends/default.conf.example`](backends/default.conf.example):
 
 | 键 | 含义 |
 |-----|---------|
-| `BASE_URL` | 覆盖 `ANTHROPIC_BASE_URL`(指向某个代理/网关) |
-| `MODEL` | `claude --model <MODEL>` |
-| `TOKEN` / `TOKEN_CMD` | auth token,字面量或某条命令的 stdout |
-| `ENSURE_CMD` | 起会话前跑的幂等命令(如拉起一个代理) |
-| `ENV_EXTRA` | 注入会话的额外 `K=V` 环境变量 |
-| `DANGEROUS` | `1` → 加 `--dangerously-skip-permissions` |
-| `CLAUDE_FLAGS` | 完全覆盖传给 `claude` 的 flags |
+| `BASE_URL` | `ANTHROPIC_BASE_URL`(通常指向 CCR `:3456`) |
+| `MODEL` | `claude --model <MODEL>`;`ccr` 模式写成 `provider,realmodel` |
+| `TOKEN` / `TOKEN_CMD` / `TOKEN_ENV` | 入站 auth token(字面量 / 命令 stdout / 环境变量名) |
+| `KEY_MODE` | `token`(默认)/ `ccr` / `litellm` —— 见下表 |
+| `ENV_EXTRA` | 注入会话的额外 `K=V`(如 `MAX_THINKING_TOKENS=0`) |
+| `DANGEROUS` | `1` → 强制 `--dangerously-skip-permissions`(bypass 现已全局默认开) |
 
-### 例子:把非 Anthropic 模型当会用工具的 agent
+**两个旋钮:`--model`(选预设)+ `--key`(选 key)**。`--key` 如何落地由预设的 `KEY_MODE` 决定:
 
-[`examples/glm-litellm/`](examples/glm-litellm/) 配了个 `glm` 后端,用
-[LiteLLM](https://github.com/BerriAI/litellm) 把 Anthropic `/v1/messages`(带 tool-calling)
-翻成 OpenAI 兼容上游 —— 于是一个便宜模型就能当**真正会调工具**的 Claude Code agent,
-`crew` 还会按需把代理拉起来。
+| KEY_MODE | 走法 | `--key <别名>` 效果 |
+|---|---|---|
+| `token`(默认) | 直连网关,入站 token 即网关凭证 | 把 `ANTHROPIC_AUTH_TOKEN` 换成 `keys.conf` 里那把 |
+| `ccr` | 走 [claude-code-router](https://github.com/musistudio/claude-code-router)`:3456`,`MODEL=provider,realmodel` | 换成"服务该模型且 api_key==该 key"的 CCR provider(从 CCR config 动态查) |
+| `litellm` | 走本地 LiteLLM | 按 key 起对应上游端口(主要给 `claude -p` 委派) |
 
-```bash
-bash examples/glm-litellm/setup.sh
-export GLM_GATEWAY_TOKEN=...            # 你的上游 token
-crew --backend glm worker "跑个快速冒烟测试并汇报"
-```
-
-## 与 GKD 配合:交互会话 + 程序化委派
-
-`crew` 管的是**交互式、可观察、长活**的 tmux 会话。而 [GKD](https://github.com/alvis-HaoH/gkd)(搞快点)是**程序化一次性委派**:起一个 `claude -p --model X`
-子进程去干活、只把**结果**回传。两者天然互补,crew 直接把 GKD 接了进来:
-
-- **crew 是后端的唯一真源,GKD 借用。** `crew gkd-sync` 把 crew 的 `backends/*.conf`
-  投影进 GKD 的 `config/models.json`(一处定义、两处用)。
-- **`crew delegate --backend B "任务"`** —— 一次性程序化委派:确保后端起来 → 同步后端到 GKD →
-  调 GKD 的 runtime → 把结果打到 stdout。
+**推荐 `ccr`** —— CCR 的 Anthropic↔OpenAI 流式翻译正确(交互会话可用,LiteLLM 的流式会吐空 delta),
+key 也集中在 CCR config 一处管。`--key` 别名在 `~/.config/claude-crew/keys.conf`(`别名=key`),`crew keys` 掩码列出。
+要让"任意模型 × 任意 key"都能切,就在 CCR 里给每个模型都备好两把 key 的 provider。
 
 ```bash
-crew mysess "长期迭代这个模块"          # 交互:可 attach 盯着看的 tmux 会话
-crew delegate --backend glm "把这50个文件改成 X"   # 程序化:GKD 换脑委派,拿结果回来
-crew gkd-sync                            # 手动把 crew 后端同步进 GKD models.json
+crew mysess --model opus                 # Opus-4.8(经 CCR)
+crew mysess --model opus --key k8b04     # 换另一把 key(切到对应 CCR provider)
+crew mysess --model glm  --key k19aa
+crew mysess --model kimi                 # kimi(经 CCR)
+crew keys                                # 看 key 别名
 ```
 
-**GKD 是可选依赖**:`delegate`/`gkd-sync` 需要 GKD —— 把 `GKD_DIR` 指向你的 GKD checkout
-([安装 GKD](https://github.com/alvis-HaoH/gkd));其余功能(会话管理)不装 GKD 也照常用。
-crew **不依赖 GKD 也不依赖任何具体项目**。
+## 依赖服务(CCR + joycode 代理)
+
+`ccr` 预设依赖本地代理在跑:
+
+- **CCR(claude-code-router)`:3456`** —— 统一入口,把 Claude Code 的 Anthropic 请求翻译/转发到各网关,
+  并**按 provider 选上游 key**。所有 `ccr` 预设都经它。
+- **joycode 代理 `:8765`**(仅 `joycode` / `joyai` / `jc-*` 系模型需要)—— 读 VS Code 的 JoyCode 登录态、
+  HMAC 签名后转发到 JoyCode SaaS 网关。因为这套鉴权是定制的,CCR 无法替代,所以它必须单独跑。
+
+两者建议挂 **launchd 常驻**(后台 + 崩溃自拉起 + 开机自启)。crew 会在起 `ccr` 会话时自动 ensure 依赖,
+也可手动 `crew up` 检查并按需拉起:
+
+```bash
+crew up                                  # 确保 CCR:3456 + joycode:8765 都在(按需 kickstart launchd)
+```
+
+装 launchd agent(macOS;plist 由 setup 生成在 `~/.claude-code-router/`):
+
+```bash
+cp ~/.claude-code-router/com.claudecrew.ccr.plist     ~/Library/LaunchAgents/
+cp ~/.claude-code-router/com.claudecrew.joycode.plist ~/Library/LaunchAgents/
+launchctl load -w ~/Library/LaunchAgents/com.claudecrew.ccr.plist
+launchctl load -w ~/Library/LaunchAgents/com.claudecrew.joycode.plist
+# 改完 CCR config 后重启(不占终端):
+launchctl kickstart -k gui/$(id -u)/com.claudecrew.ccr
+```
+
+> **别再前台 `ccr start`** —— 它是前台进程,交给 launchd 托管。端口/label 可用 `CREW_CCR_PORT` /
+> `CREW_CCR_LABEL` / `CREW_JOYCODE_PORT` / `CREW_JOYCODE_LABEL` 覆盖(便于云端等其它环境适配)。
+> joycode 代理脚本放在非 TCC 目录(如 `~/.config/claude-crew/`),否则 launchd 读 `~/Desktop` 会被 macOS 拒。
+
+## 可选扩展:GKD 程序化委派
+
+核心 crew = tmux + CCR 切模型/key。可选扩展放在 `ext/*.sh`,crew 启动时从 `$CREW_HOME/ext/` 加载
+(有就加载,没有就是纯核心)。[GKD](https://github.com/alvis-HaoH/gkd)(搞快点)做**程序化一次性委派**:
+起一个 `claude -p --model X` 子进程干活、只把**结果**回传。启用:
+
+```bash
+cp ext/gkd.sh ~/.config/claude-crew/ext/       # 装扩展
+export GKD_DIR=/path/to/gkd                     # 指向你的 GKD checkout
+crew delegate --model glm "把这50个文件改成 X"  # 程序化委派,拿结果回来
+crew gkd-sync                                    # 把 crew 预设同步进 GKD models.json
+```
+
+没装扩展时,`delegate`/`gkd-sync` 会提示如何安装。核心会话管理不依赖 GKD,也不依赖任何具体项目。
 
 ## 会话间通信(异步信箱)
 
