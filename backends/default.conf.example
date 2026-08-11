@@ -27,6 +27,16 @@ TOKEN_ENV=
 # proxy if it isn't already up. Must be safe to run repeatedly.
 ENSURE_CMD=
 
+# KEY_MODE — how a pinned `crew --key <alias>` (alias from ~/.config/claude-crew/keys.conf)
+# applies to THIS backend:
+#   token   (default) the alias's key becomes ANTHROPIC_AUTH_TOKEN. Correct when this
+#           backend talks DIRECTLY to the gateway (the inbound token IS the credential).
+#   litellm this backend's BASE_URL is a local LiteLLM proxy that only accepts its own
+#           master key, so --key can't be sent inbound. Instead crew spins/points at a
+#           per-key LiteLLM instance whose UPSTREAM gateway token is the alias's key
+#           (inbound stays the proxy master key). Use for glm/kimi-style backends.
+KEY_MODE=
+
 # Extra environment injected into the session, space-separated K=V pairs.
 # NOTE: quote the whole value if it contains spaces (multiple K=V pairs), otherwise
 # bash's inline-env parsing splits it and only the first pair reaches the session.
@@ -34,7 +44,9 @@ ENSURE_CMD=
 # WRONG:     ENV_EXTRA=MAX_THINKING_TOKENS=0 IS_SANDBOX=1   # IS_SANDBOX becomes command-level env, lost
 ENV_EXTRA=
 
-# Set to 1 to add --dangerously-skip-permissions (unattended tool use). Off by default.
+# Force-enable --dangerously-skip-permissions for this backend regardless of the global
+# default. NOTE: crew now enables bypass by DEFAULT for every session (CREW_YOLO=1);
+# opt out per-launch with `crew --safe` (alias --no-yolo) or globally with CREW_YOLO=0.
 DANGEROUS=
 
 # Override the flags passed to `claude` entirely (advanced).

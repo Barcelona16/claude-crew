@@ -12,7 +12,7 @@
 # The built-in "default" backend is just plain Claude (your ambient config).
 #
 # USAGE
-#   crew [--backend B] [--fresh] [--yolo] [name] [task...]
+#   crew [--backend B] [--key A] [--fresh] [--safe] [name] [task...]
 #                         start/continue a session, optionally feed it a task
 #   crew                  ensure + attach the session for the current directory
 #   crew ls               list all known crew sessions (live + resumable, survives restart)
@@ -20,6 +20,7 @@
 #   crew stop <name>      stop a session's tmux but KEEP its state (resume/switch model later)
 #   crew kill <name> [--purge]   delete a session for good (tmux + id + registry; --purge also transcript)
 #   crew backends         list available backend presets
+#   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
 #   crew delegate --backend B "task"   one-shot programmatic delegation via GKD
 #   crew gkd-sync         export crew backends into GKD's config/models.json
 #   crew send [--from X] [--nudge] <name> "msg"   drop a message in <name>'s mailbox
@@ -33,8 +34,15 @@
 #                 If the session is already live on a DIFFERENT backend, an explicit
 #                 --backend restarts it on B (history preserved via --resume) — a
 #                 one-command model switch, no separate `crew stop` needed.
+#   --key A       use api-key alias A (from ~/.config/claude-crew/keys.conf) instead of the
+#                 backend's own token. Highest precedence, remembered per session; switching
+#                 it on a live session restarts it (history kept via --resume). `--key -`
+#                 clears the pin (revert to the backend's own token).
 #   --fresh       start a brand-new conversation (do not --resume old history)
-#   --yolo        add --dangerously-skip-permissions (unattended tool use)
+#   --yolo        add --dangerously-skip-permissions (ON by default; see --safe)
+#   --safe        DON'T add --dangerously-skip-permissions (opt out of the default
+#                 bypass for this one launch). Alias: --no-yolo. Set CREW_YOLO=0 to
+#                 make "safe" the default for every session.
 #
 # GKD integration is optional: `delegate`/`gkd-sync` need GKD — set GKD_DIR to your GKD
 # checkout (https://github.com/alvis-HaoH/gkd). Everything else works standalone.
@@ -44,6 +52,7 @@ set -uo pipefail
 CREW_HOME="${CREW_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-crew}"
 CREW_STATE="${CREW_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/claude-crew}"
 BACKEND_DIR="$CREW_HOME/backends"
+KEYS_FILE="$CREW_HOME/keys.conf"                 # lines: <alias>=<api-key>  (full-line # comments ok)
 REG="$CREW_STATE/registry"                       # lines: <cwd>\t<name>
 CLAUDE_BIN="${CREW_CLAUDE_BIN:-$(command -v claude || echo claude)}"
 TMUX_PREFIX="crew-"
@@ -101,34 +110,64 @@ model_for_backend(){
 # Sets BK_* globals from $BACKEND_DIR/<backend>.conf. "default" needs no file.
 load_backend(){
   local b="$1" f="$BACKEND_DIR/$1.conf"
-  BK_BASE_URL=""; BK_MODEL=""; BK_TOKEN=""; BK_TOKEN_CMD=""; BK_TOKEN_ENV=""; BK_ENSURE_CMD=""; BK_ENV_EXTRA=""; BK_DANGEROUS=""; BK_CLAUDE_FLAGS=""
+  BK_BASE_URL=""; BK_MODEL=""; BK_TOKEN=""; BK_TOKEN_CMD=""; BK_TOKEN_ENV=""; BK_ENSURE_CMD=""; BK_ENV_EXTRA=""; BK_DANGEROUS=""; BK_CLAUDE_FLAGS=""; BK_KEY_MODE=""
   if [ -f "$f" ]; then
-    local BASE_URL="" MODEL="" TOKEN="" TOKEN_CMD="" TOKEN_ENV="" ENSURE_CMD="" ENV_EXTRA="" DANGEROUS="" CLAUDE_FLAGS=""
+    local BASE_URL="" MODEL="" TOKEN="" TOKEN_CMD="" TOKEN_ENV="" ENSURE_CMD="" ENV_EXTRA="" DANGEROUS="" CLAUDE_FLAGS="" KEY_MODE=""
     # shellcheck disable=SC1090
     . "$f"
     BK_BASE_URL="$BASE_URL"; BK_MODEL="$MODEL"; BK_TOKEN="$TOKEN"; BK_TOKEN_CMD="$TOKEN_CMD"; BK_TOKEN_ENV="$TOKEN_ENV"
-    BK_ENSURE_CMD="$ENSURE_CMD"; BK_ENV_EXTRA="$ENV_EXTRA"; BK_DANGEROUS="$DANGEROUS"; BK_CLAUDE_FLAGS="$CLAUDE_FLAGS"
+    BK_ENSURE_CMD="$ENSURE_CMD"; BK_ENV_EXTRA="$ENV_EXTRA"; BK_DANGEROUS="$DANGEROUS"; BK_CLAUDE_FLAGS="$CLAUDE_FLAGS"; BK_KEY_MODE="$KEY_MODE"
   elif [ "$b" != "default" ]; then
     die "backend '$b' not found ($f); available: $(list_backends_inline)"
   fi
 }
 
+# --- api keys (switchable, independent of backend) --------------------------
+# Keys live in $KEYS_FILE as `<alias>=<api-key>` lines (full-line # comments ok; no
+# inline comments after the key). A session pins one with `crew --key <alias> <name>`;
+# the pinned alias wins over the backend's own TOKEN/TOKEN_CMD/TOKEN_ENV and is
+# remembered per session. Switching only the token (not model/base_url) is the point.
+lookup_key(){
+  local want="$1" line k v
+  [ -f "$KEYS_FILE" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue;; esac
+    k="${line%%=*}"; v="${line#*=}"
+    k="$(printf '%s' "$k" | tr -d '[:space:]')"
+    v="$(printf '%s' "$v" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ "$k" = "$want" ] && { printf '%s' "$v"; return 0; }
+  done < "$KEYS_FILE"
+  return 0
+}
+list_key_aliases(){ [ -f "$KEYS_FILE" ] || return 0; grep -Ev '^[[:space:]]*(#|$)' "$KEYS_FILE" 2>/dev/null | sed -E 's/[[:space:]]*=.*//;s/[[:space:]]//g' | awk 'NF'; }
+mask_key(){ local s="$1" n=${#1}; if [ "$n" -le 8 ]; then printf '****'; else printf '%s...%s' "${s:0:4}" "${s: -4}"; fi; }
+# For KEY_MODE=litellm backends, each key alias gets its own upstream LiteLLM port so the
+# proxy forwards to the gateway with THAT key while the inbound key stays sk-glm-local.
+# Deterministic: alias's 1-based position in keys.conf -> 4000+pos (4001, 4002, ...);
+# no/unknown alias -> 4000 (the shared instance). Same alias always maps to the same port,
+# so an already-running instance is reused (health-checked) rather than duplicated.
+litellm_port_for_key(){ local a="$1" i=1 al; for al in $(list_key_aliases); do [ "$al" = "$a" ] && { echo $((4000+i)); return; }; i=$((i+1)); done; echo 4000; }
+
 # --- session lifecycle ------------------------------------------------------
 ensure_session(){
   local name="$1" backend="$2" fresh="$3" yolo="$4" tmux_s="$TMUX_PREFIX$1"
   local bkf="$CREW_STATE/$name.backend"
+  local keyf="$CREW_STATE/$name.key"
   # If the session is already live, just re-attach — UNLESS the caller explicitly
   # asked for a DIFFERENT backend, in which case stop it and relaunch on the new one
   # (history preserved below via --resume). This makes `crew --backend X <name>` a
   # one-command model switch instead of "crew stop, then re-run with --backend".
   if tmux has-session -t "$tmux_s" 2>/dev/null; then
     local running="default"; [ -f "$bkf" ] && running=$(cat "$bkf")
+    local running_key=""; [ -f "$keyf" ] && running_key=$(cat "$keyf")
+    local want_restart=0
     if [ "${BACKEND_EXPLICIT:-0}" = 1 ] && [ "$backend" != "$running" ]; then
-      log "switching '$name' backend: $running -> $backend (restart; history kept via --resume)"
-      tmux kill-session -t "$tmux_s" 2>/dev/null || true
-    else
-      return
+      log "switching '$name' backend: $running -> $backend (restart; history kept via --resume)"; want_restart=1
     fi
+    if [ "${KEY_EXPLICIT:-0}" = 1 ] && [ "${KEY:-}" != "$running_key" ]; then
+      log "switching '$name' key: ${running_key:-<backend default>} -> ${KEY:-<backend default>} (restart; history kept via --resume)"; want_restart=1
+    fi
+    if [ "$want_restart" = 1 ]; then tmux kill-session -t "$tmux_s" 2>/dev/null || true; else return; fi
   fi
   # Per-session backend memory: an explicit --backend wins and is remembered for
   # next time; otherwise reuse whatever backend this session last started with;
@@ -136,7 +175,29 @@ ensure_session(){
   # session's model once (crew --backend kimi <name>) sticks without re-passing it.
   if [ "${BACKEND_EXPLICIT:-0}" = 1 ]; then printf '%s\n' "$backend" > "$bkf"
   elif [ -f "$bkf" ]; then backend=$(cat "$bkf"); fi
+  # Per-session key memory (mirrors backend memory): an explicit --key wins and sticks;
+  # otherwise reuse the last pinned alias; empty/"-" alias => fall back to backend token.
+  local keyalias="${KEY:-}"
+  if [ "${KEY_EXPLICIT:-0}" = 1 ]; then printf '%s\n' "$keyalias" > "$keyf"
+  elif [ -f "$keyf" ]; then keyalias=$(cat "$keyf"); fi
   load_backend "$backend"
+  # Apply a pinned --key per the backend's KEY_MODE. token (default): the key IS the inbound
+  # gateway credential. litellm: point at a per-key upstream LiteLLM instance (inbound stays
+  # sk-glm-local) — LiteLLM 1.80 can't passthrough the client key, so we swap the upstream.
+  local _inbound_override=""
+  if [ -n "$keyalias" ] && [ "$keyalias" != "-" ]; then
+    local _kv; _kv=$(lookup_key "$keyalias")
+    if [ -z "$_kv" ]; then log "WARN: key alias '$keyalias' not in $KEYS_FILE; ignoring pin"
+    elif [ "${BK_KEY_MODE:-token}" = "litellm" ]; then
+      local _port; _port=$(litellm_port_for_key "$keyalias")
+      BK_BASE_URL="http://127.0.0.1:$_port"
+      BK_ENSURE_CMD="bash $(printf %q "$HOME/.config/claude-crew/ensure-glm-litellm.sh") $_port $(printf %q "$_kv")"
+      _inbound_override="sk-glm-local"
+      log "key '$keyalias' -> litellm upstream on :$_port (inbound stays sk-glm-local)"
+    else
+      _inbound_override="$_kv"
+    fi
+  fi
   [ -n "$BK_ENSURE_CMD" ] && { log "ensuring backend '$backend' is up..."; bash -c "$BK_ENSURE_CMD" || log "WARN: backend ENSURE_CMD failed (continuing)"; }
 
   local cwd; cwd=$(path_for_name "$name"); [ -z "$cwd" ] && cwd="$PWD"
@@ -148,6 +209,9 @@ ensure_session(){
   local tok="$BK_TOKEN"
   [ -n "$BK_TOKEN_CMD" ] && tok=$(bash -c "$BK_TOKEN_CMD" 2>/dev/null)
   if [ -n "$BK_TOKEN_ENV" ]; then local _ev="${!BK_TOKEN_ENV-}"; [ -n "$_ev" ] && tok="$_ev"; fi
+  # A pinned --key overrides the token (highest precedence); its value was resolved above
+  # per KEY_MODE (the gateway key for token mode, or sk-glm-local for litellm mode).
+  [ -n "$_inbound_override" ] && tok="$_inbound_override"
   local envp=""
   [ -n "$BK_BASE_URL" ] && envp="$envp ANTHROPIC_BASE_URL=$(printf %q "$BK_BASE_URL")"
   [ -n "$tok" ]         && envp="$envp ANTHROPIC_AUTH_TOKEN=$(printf %q "$tok")"
@@ -319,13 +383,16 @@ crew_log(){
 }
 
 # --- arg parsing ------------------------------------------------------------
-BACKEND="${CREW_BACKEND:-default}"; BACKEND_EXPLICIT=0; FRESH=0; YOLO=0; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
+BACKEND="${CREW_BACKEND:-default}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --backend) BACKEND="${2:?--backend needs a value}"; BACKEND_EXPLICIT=1; shift 2;;
     --backend=*) BACKEND="${1#*=}"; BACKEND_EXPLICIT=1; shift;;
+    --key) KEY="${2:?--key needs an alias (or - to clear)}"; KEY_EXPLICIT=1; shift 2;;
+    --key=*) KEY="${1#*=}"; KEY_EXPLICIT=1; shift;;
     --fresh) FRESH=1; shift;;
     --yolo)  YOLO=1; shift;;
+    --safe|--no-yolo) YOLO=0; shift;;
     --from) FROM="${2:?--from needs a value}"; shift 2;;
     --nudge) NUDGE=1; shift;;
     --peek) PEEK=1; shift;;
@@ -350,7 +417,7 @@ case "${1:-}" in
                ls "$CREW_STATE"/*.sid 2>/dev/null | sed 's:.*/::;s:\.sid$::'
              } | sort -u )
     if [ -z "$names" ]; then echo "  (none)"; else
-      printf '  %-20s %-9s %-12s %-27s %s\n' NAME STATUS BACKEND MODEL DIR
+      printf '  %-20s %-9s %-12s %-10s %-27s %s\n' NAME STATUS BACKEND KEY MODEL DIR
       while IFS= read -r nm; do
         [ -n "$nm" ] || continue
         cwd=$(path_for_name "$nm"); [ -n "$cwd" ] || cwd="?"
@@ -359,7 +426,8 @@ case "${1:-}" in
         elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$(cat "$sidf")".jsonl >/dev/null 2>&1; then st="resumable"
         else st="new"; fi
         bk=$(cat "$CREW_STATE/$nm.backend" 2>/dev/null || echo "${CREW_BACKEND:-default}")
-        printf '  %-20s %-9s %-12s %-27s %s\n' "$nm" "$st" "$bk" "$(model_for_backend "$bk")" "$cwd"
+        ky=$(cat "$CREW_STATE/$nm.key" 2>/dev/null); [ -n "$ky" ] || ky="-"
+        printf '  %-20s %-9s %-12s %-10s %-27s %s\n' "$nm" "$st" "$bk" "$ky" "$(model_for_backend "$bk")" "$cwd"
       done <<EOF
 $names
 EOF
@@ -372,6 +440,16 @@ EOF
     if tmux kill-session -t "$TMUX_PREFIX$2" 2>/dev/null; then log "stopped $2 (state kept; resume with: crew $2)"; else log "no live tmux session '$2' (nothing to stop)"; fi
     ;;
   backends) echo "== backends =="; for b in $(list_backends_inline); do echo "  $b"; done;;
+  keys) echo "== api keys ($KEYS_FILE) =="
+    if [ ! -f "$KEYS_FILE" ]; then echo "  (no keys file; create it with lines: <alias>=<api-key>)";
+    else
+      als=$(list_key_aliases)
+      if [ -z "$als" ]; then echo "  (none)"; else
+        while IFS= read -r a; do [ -n "$a" ] || continue; printf '  %-16s %s\n' "$a" "$(mask_key "$(lookup_key "$a")")"; done <<EOF
+$als
+EOF
+      fi
+    fi;;
   attach) [ -n "${2:-}" ] || die "usage: crew attach <name>"; exec tmux -u attach -t "$TMUX_PREFIX$2";;
   kill) [ -n "${2:-}" ] || die "usage: crew kill <name> [--purge]"
     nm="$2"; purge=0; [ "${3:-}" = "--purge" ] && purge=1
