@@ -12,32 +12,35 @@
 # The built-in "default" backend is just plain Claude (your ambient config).
 #
 # USAGE
-#   crew [--backend B] [--key A] [--fresh] [--safe] [name] [task...]
-#                         start/continue a session, optionally feed it a task
+#   crew [--model M] [--key A] [--fresh] [--safe] [name] [task...]
+#                         start/continue a session (auto-attaches when interactive)
 #   crew                  ensure + attach the session for the current directory
+#   crew <name>           ensure + attach the named session
+#   crew <name> --model M           switch model, then attach
+#   crew <name> --key A             switch key, then attach
+#   crew <name> --model M --key A   switch both, then attach
 #   crew ls               list all known crew sessions (live + resumable, survives restart)
 #   crew attach <name>    attach to observe a session
-#   crew stop <name>      stop a session's tmux but KEEP its state (resume/switch model later)
+#   crew stop <name>      stop a session's tmux but KEEP its state (resume/switch later)
 #   crew kill <name> [--purge]   delete a session for good (tmux + id + registry; --purge also transcript)
-#   crew backends         list available backend presets
+#   crew models           list available model presets (opus / kimi / glm / ...)
 #   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
-#   crew delegate --backend B "task"   one-shot programmatic delegation via GKD
-#   crew gkd-sync         export crew backends into GKD's config/models.json
+#   crew delegate --model B "task"   one-shot programmatic delegation via GKD
+#   crew gkd-sync         export crew models into GKD's config/models.json
 #   crew send [--from X] [--nudge] <name> "msg"   drop a message in <name>'s mailbox
 #   crew send --all [--nudge] "msg"               broadcast to all running sessions
 #   crew inbox [--peek] [<name>]                  read (and consume) your mailbox
 #   crew log [--tail N] [--raw] [<name>]          full transcript from Claude's session log
 #
+# The two knobs you switch are --model and --key; everything else is plumbing.
+#
 # FLAGS
-#   --backend B   pick a backend preset (default: $CREW_BACKEND or "default").
-#                 Remembered per session: pass it once and later `crew <name>` reuses it.
-#                 If the session is already live on a DIFFERENT backend, an explicit
-#                 --backend restarts it on B (history preserved via --resume) — a
-#                 one-command model switch, no separate `crew stop` needed.
-#   --key A       use api-key alias A (from ~/.config/claude-crew/keys.conf) instead of the
-#                 backend's own token. Highest precedence, remembered per session; switching
-#                 it on a live session restarts it (history kept via --resume). `--key -`
-#                 clears the pin (revert to the backend's own token).
+#   --model M     pick a model preset (see `crew models`: opus / kimi / glm / ...). Remembered
+#                 per session; switching it on a live session restarts (history kept via
+#                 --resume) and then attaches. `--backend` is a hidden alias.
+#   --key A       use api-key alias A (from ~/.config/claude-crew/keys.conf). Works for every
+#                 model (direct-gateway = inbound token; litellm = per-key upstream). Remembered
+#                 per session; a live switch restarts + attaches. `--key -` clears the pin.
 #   --fresh       start a brand-new conversation (do not --resume old history)
 #   --yolo        add --dangerously-skip-permissions (ON by default; see --safe)
 #   --safe        DON'T add --dangerously-skip-permissions (opt out of the default
@@ -147,6 +150,20 @@ mask_key(){ local s="$1" n=${#1}; if [ "$n" -le 8 ]; then printf '****'; else pr
 # no/unknown alias -> 4000 (the shared instance). Same alias always maps to the same port,
 # so an already-running instance is reused (health-checked) rather than duplicated.
 litellm_port_for_key(){ local a="$1" i=1 al; for al in $(list_key_aliases); do [ "$al" = "$a" ] && { echo $((4000+i)); return; }; i=$((i+1)); done; echo 4000; }
+# For KEY_MODE=ccr backends the model is "provider,realmodel" and the key rides with the
+# provider. Given a realmodel + a raw gateway key, find the ccr provider that serves that
+# model with that key (from ccr's own config.json) so --key can swap the provider.
+ccr_provider_for(){
+  local model="$1" key="$2" cfg="$HOME/.claude-code-router/config.json"
+  [ -f "$cfg" ] || return 0; command -v node >/dev/null 2>&1 || return 0
+  MODEL="$model" KEY="$key" node -e '
+    const fs=require("fs");
+    const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    const ps=c.Providers||c.providers||[];
+    const hit=ps.find(p=>(p.models||[]).includes(process.env.MODEL) && (p.api_key||p.apiKey)===process.env.KEY);
+    process.stdout.write(hit?hit.name:"");
+  ' "$cfg" 2>/dev/null
+}
 
 # --- session lifecycle ------------------------------------------------------
 ensure_session(){
@@ -194,6 +211,14 @@ ensure_session(){
       BK_ENSURE_CMD="bash $(printf %q "$HOME/.config/claude-crew/ensure-glm-litellm.sh") $_port $(printf %q "$_kv")"
       _inbound_override="sk-glm-local"
       log "key '$keyalias' -> litellm upstream on :$_port (inbound stays sk-glm-local)"
+    elif [ "${BK_KEY_MODE:-token}" = "ccr" ]; then
+      # BK_MODEL is "provider,realmodel"; --key swaps the provider to the one serving realmodel
+      # with THIS key (found in ccr's own config.json). Inbound token stays as-is (ccr ignores
+      # it and uses the provider's own key upstream).
+      local _real="${BK_MODEL##*,}" _prov
+      _prov=$(ccr_provider_for "$_real" "$_kv")
+      if [ -n "$_prov" ]; then BK_MODEL="$_prov,$_real"; log "key '$keyalias' -> ccr provider '$_prov' for $_real"
+      else log "WARN: no ccr provider serves '$_real' with key '$keyalias'; keeping default provider"; fi
     else
       _inbound_override="$_kv"
     fi
@@ -386,8 +411,8 @@ crew_log(){
 BACKEND="${CREW_BACKEND:-default}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --backend) BACKEND="${2:?--backend needs a value}"; BACKEND_EXPLICIT=1; shift 2;;
-    --backend=*) BACKEND="${1#*=}"; BACKEND_EXPLICIT=1; shift;;
+    --model|--backend) BACKEND="${2:?--model needs a value (see: crew models)}"; BACKEND_EXPLICIT=1; shift 2;;
+    --model=*|--backend=*) BACKEND="${1#*=}"; BACKEND_EXPLICIT=1; shift;;
     --key) KEY="${2:?--key needs an alias (or - to clear)}"; KEY_EXPLICIT=1; shift 2;;
     --key=*) KEY="${1#*=}"; KEY_EXPLICIT=1; shift;;
     --fresh) FRESH=1; shift;;
@@ -417,7 +442,7 @@ case "${1:-}" in
                ls "$CREW_STATE"/*.sid 2>/dev/null | sed 's:.*/::;s:\.sid$::'
              } | sort -u )
     if [ -z "$names" ]; then echo "  (none)"; else
-      printf '  %-20s %-9s %-12s %-10s %-27s %s\n' NAME STATUS BACKEND KEY MODEL DIR
+      printf '  %-20s %-9s %-14s %-10s %s\n' NAME STATUS MODEL KEY DIR
       while IFS= read -r nm; do
         [ -n "$nm" ] || continue
         cwd=$(path_for_name "$nm"); [ -n "$cwd" ] || cwd="?"
@@ -427,7 +452,7 @@ case "${1:-}" in
         else st="new"; fi
         bk=$(cat "$CREW_STATE/$nm.backend" 2>/dev/null || echo "${CREW_BACKEND:-default}")
         ky=$(cat "$CREW_STATE/$nm.key" 2>/dev/null); [ -n "$ky" ] || ky="-"
-        printf '  %-20s %-9s %-12s %-10s %-27s %s\n' "$nm" "$st" "$bk" "$ky" "$(model_for_backend "$bk")" "$cwd"
+        printf '  %-20s %-9s %-14s %-10s %s\n' "$nm" "$st" "$bk" "$ky" "$cwd"
       done <<EOF
 $names
 EOF
@@ -439,7 +464,7 @@ EOF
     # you switch a session's model: `crew stop <name>` then `crew --backend Y <name>`.
     if tmux kill-session -t "$TMUX_PREFIX$2" 2>/dev/null; then log "stopped $2 (state kept; resume with: crew $2)"; else log "no live tmux session '$2' (nothing to stop)"; fi
     ;;
-  backends) echo "== backends =="; for b in $(list_backends_inline); do echo "  $b"; done;;
+  models|backends) echo "== models =="; for b in $(list_backends_inline); do echo "  $b"; done;;
   keys) echo "== api keys ($KEYS_FILE) =="
     if [ ! -f "$KEYS_FILE" ]; then echo "  (no keys file; create it with lines: <alias>=<api-key>)";
     else
@@ -479,5 +504,9 @@ EOF
       name=$(resolve_explicit_name "$first" "$PWD"); task="$rest"
     else name=$(resolve_name_for_cwd "$PWD"); task="$first${rest:+ $rest}"; fi
     ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO"
-    [ -n "$task" ] && send_task "$name" "$task" || log "session '$name' ready (no task); crew attach $name";;
+    # A task means "queue work, don't attach". Otherwise attach when interactive (a TTY) —
+    # so `crew <name>`, and any `--model`/`--key` switch, drops you straight into the session.
+    if [ -n "$task" ]; then send_task "$name" "$task"
+    elif [ -t 1 ]; then exec tmux -u attach -t "$TMUX_PREFIX$name"
+    else log "session '$name' ready (no task); crew attach $name"; fi;;
 esac
