@@ -78,15 +78,19 @@ interactive sessions; LiteLLM's emits empty deltas), and keys live in one place 
 `--key` aliases are in `~/.config/claude-crew/keys.conf` (`alias=key`); `crew keys` lists them
 masked. To make "any model × any key" switchable, give each model a provider for both keys in CCR.
 
-Preset names **are the CCR model names** (`crew models`); the joycode provider's several
-models are prefixed `joycode_<model>`.
+Preset names **are the CCR model names** (`crew models`); joycode-served models are prefixed
+`joycode_<model>`. joycode has **two routes**: Claude-family models go via `joycode,` (CCR
+Anthropic transformer → the proxy's anthropic endpoint), while non-Claude ones (kimi / glm /
+JoyAI-Code / MiniMax / DeepSeek …) go via `joycode-oai,` (CCR OpenAI transformer → the proxy's
+OpenAI endpoint) — the presets are set up, so you just `crew --model joycode_<name>`.
 
 ```bash
 crew mysess --model Claude-Opus-4.8-joybuilder             # Opus-4.8 (via CCR)
 crew mysess --model Claude-Opus-4.8-joybuilder --key k8b04 # switch key (→ the matching CCR provider)
 crew mysess --model GLM-5.2 --key k19aa
 crew mysess --model kimi-k3-joybuilder                     # kimi (via CCR)
-crew mysess --model joycode_JoyAI-Code-1.5                 # joycode family (via the :8765 proxy)
+crew mysess --model joycode_Claude-Opus-4.7-hq            # joycode Claude family (via the :8765 proxy)
+crew mysess --model joycode_Kimi-K2.6                     # joycode non-Claude (kimi/glm/etc, same proxy)
 crew keys                                                  # see key aliases
 ```
 

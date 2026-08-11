@@ -69,14 +69,15 @@ crew inbox                # 读自己的信箱
 key 也集中在 CCR config 一处管。`--key` 别名在 `~/.config/claude-crew/keys.conf`(`别名=key`),`crew keys` 掩码列出。
 要让"任意模型 × 任意 key"都能切,就在 CCR 里给每个模型都备好两把 key 的 provider。
 
-预设名**就是 CCR 里的模型名**(`crew models` 列出);joycode provider 服务的多个模型用 `joycode_<模型>` 前缀区分。
+预设名**就是 CCR 里的模型名**(`crew models` 列出);joycode 服务的模型用 `joycode_<模型>` 前缀区分。joycode 有**两条路**:Claude 系走 `joycode,`(CCR Anthropic transformer → 代理 anthropic 端点),kimi / glm / JoyAI-Code / MiniMax / DeepSeek 等非 Claude 走 `joycode-oai,`(CCR OpenAI transformer → 代理 OpenAI 端点)—— 预设已配好,你只管 `crew --model joycode_<名>`。
 
 ```bash
 crew mysess --model Claude-Opus-4.8-joybuilder             # Opus-4.8(经 CCR)
 crew mysess --model Claude-Opus-4.8-joybuilder --key k8b04 # 换另一把 key(切到对应 CCR provider)
 crew mysess --model GLM-5.2 --key k19aa
 crew mysess --model kimi-k3-joybuilder                     # kimi(经 CCR)
-crew mysess --model joycode_JoyAI-Code-1.5                 # joycode 系(经 :8765 代理)
+crew mysess --model joycode_Claude-Opus-4.7-hq            # joycode Claude 系(经 :8765)
+crew mysess --model joycode_Kimi-K2.6                     # joycode 非 Claude 系(kimi/glm 等,同经 :8765)
 crew keys                                                  # 看 key 别名
 ```
 
@@ -86,7 +87,7 @@ crew keys                                                  # 看 key 别名
 
 - **CCR(claude-code-router)`:3456`** —— 统一入口,把 Claude Code 的 Anthropic 请求翻译/转发到各网关,
   并**按 provider 选上游 key**。所有 `ccr` 预设都经它。
-- **joycode 代理 `:8765`**(仅 `joycode` / `joyai` / `jc-*` 系模型需要)—— 读 VS Code 的 JoyCode 登录态、
+- **joycode 代理 `:8765`**(仅 `joycode_*` 模型需要)—— 读 VS Code 的 JoyCode 登录态、
   HMAC 签名后转发到 JoyCode SaaS 网关。因为这套鉴权是定制的,CCR 无法替代,所以它必须单独跑。
 
 两者建议挂 **launchd 常驻**(后台 + 崩溃自拉起 + 开机自启)。crew 会在起 `ccr` 会话时自动 ensure 依赖,
