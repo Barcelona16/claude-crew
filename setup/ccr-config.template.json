@@ -1,0 +1,23 @@
+{
+  "LOG": false,
+  "HOST": "127.0.0.1",
+  "PORT": 3456,
+  "APIKEY": "",
+  "API_TIMEOUT_MS": "600000",
+  "Providers": [
+    { "name": "opus",  "api_base_url": "http://llm-gw.jd.local/anthropic/v1/messages", "api_key": "__GATEWAY_TOKEN__", "models": ["Claude-Opus-4.8-joybuilder"], "transformer": { "use": ["Anthropic"] } },
+    { "name": "glm",   "api_base_url": "http://llm-gw.jd.local/v1/chat/completions",    "api_key": "__GATEWAY_TOKEN__", "models": ["GLM-5.2"],                     "transformer": { "use": ["OpenAI"] } },
+    { "name": "kimi",  "api_base_url": "http://llm-gw.jd.local/v1/chat/completions",    "api_key": "__GATEWAY_TOKEN__", "models": ["kimi-k3-joybuilder"],          "transformer": { "use": ["OpenAI"] } },
+    { "name": "joycode",     "api_base_url": "http://127.0.0.1:8765/v1/messages",         "api_key": "joycode", "models": ["Claude-Opus-4.8-hq","Claude-Opus-4.7-hq","Claude-Sonnet-4.6-hq","Claude-Opus-4.6-hq"], "transformer": { "use": ["Anthropic"] } },
+    { "name": "joycode-oai", "api_base_url": "http://127.0.0.1:8765/v1/chat/completions", "api_key": "joycode", "models": ["JoyAI-Code-1.5","Kimi-K2.6","GLM-5.2","GLM-5.2-jcloud","GLM-5.1","GLM-5","GLM-5-jcloud","MiniMax-M3","MiniMax-M2.7","DeepSeek-V4-Pro","Doubao-Seed-2.0-pro"], "transformer": { "use": ["OpenAI"] } }
+  ],
+  "Router": {
+    "default": "opus,Claude-Opus-4.8-joybuilder",
+    "background": "opus,Claude-Opus-4.8-joybuilder",
+    "think": "opus,Claude-Opus-4.8-joybuilder",
+    "longContext": "opus,Claude-Opus-4.8-joybuilder",
+    "longContextThreshold": 60000,
+    "webSearch": "opus,Claude-Opus-4.8-joybuilder",
+    "image": "opus,Claude-Opus-4.8-joybuilder"
+  }
+}

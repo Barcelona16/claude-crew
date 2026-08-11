@@ -24,6 +24,29 @@ bash install.sh          # symlinks `crew` into ~/.local/bin
 crew --help
 ```
 
+## Onboarding a teammate (one-shot `setup.sh`, macOS / Linux)
+
+`install.sh` only installs the `crew` tool itself (session management on your existing Claude).
+To get the multi-model **opus/glm/kimi/joycode** switching, run `setup.sh` — it wires up the
+dependencies in one go:
+
+```bash
+git clone <repo> && cd claude-crew
+GATEWAY_TOKEN=<your JD gateway token> bash setup.sh   # or just `bash setup.sh` to be prompted
+```
+
+It: installs crew + claude-code-router (`npm i -g`) → **generates/merges** the CCR provider
+config with your token (leaves your existing providers untouched) → writes model presets +
+`keys.conf` → installs the joycode proxy → runs CCR (`:3456`) and joycode (`:8765`) as
+background services (**launchd on macOS / systemd --user on Linux**) → sets the default model.
+
+**Prerequisites (each person's own)**: Node.js, tmux, Claude Code CLI, python3; **your own JD
+llm-gw token** (can't share someone else's — it's tied to their account/quota); joycode models
+need you **logged in to JoyCode inside VS Code** (the proxy reads that session).
+
+Then: `crew models` · `crew up` (ensure deps up) · `crew <name> --model GLM-5.2`. **Keys stay
+local** (`~/.claude-code-router/config.json`, `~/.config/claude-crew/keys.conf`) — never committed.
+
 ## Usage
 
 ```bash

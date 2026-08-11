@@ -21,6 +21,21 @@ bash install.sh          # 把 `crew` 软链到 ~/.local/bin
 crew --help
 ```
 
+## 给同事上手(一键 `setup.sh`,mac / Linux 通用)
+
+`install.sh` 只装 `crew` 工具本身(会话管理,配合你现成的 Claude 就能用)。要拿到「多模型 opus/glm/kimi/joycode 切换」这套,跑 `setup.sh` 一键配依赖:
+
+```bash
+git clone <repo> && cd claude-crew
+GATEWAY_TOKEN=<你的JD网关token> bash setup.sh    # 或直接 bash setup.sh 交互输入 token
+```
+
+它会:装 crew + claude-code-router(`npm i -g`)→ 用你的 token **生成/合并** CCR provider 配置(不动你已有的 provider)→ 铺模型预设 + `keys.conf` → 装 joycode 代理 → **macOS 用 launchd / Linux 用 systemd --user** 把 CCR(`:3456`)和 joycode(`:8765`)起成常驻服务 → 设默认模型。
+
+**前提(各人自备)**:Node.js、tmux、Claude Code CLI、python3;**自己的 JD llm-gw token**(不能共用别人的,绑账号/额度);joycode 系模型需**在 VS Code 里登录 JoyCode**(代理读那个登录态)。
+
+完事:`crew models` 看模型 · `crew up` 确保依赖在跑 · `crew <名> --model GLM-5.2` 开跑。**密钥只落本机**(`~/.claude-code-router/config.json`、`~/.config/claude-crew/keys.conf`),不进 git。
+
 ## 用法
 
 ```bash

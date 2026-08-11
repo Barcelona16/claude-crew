@@ -1,0 +1,10 @@
+[Unit]
+Description=claude-code-router (crew dependency)
+After=network-online.target
+[Service]
+ExecStart=__NODE__ __CCR_CLI__ start
+Restart=always
+RestartSec=5
+Environment=HOME=__HOME__
+[Install]
+WantedBy=default.target
