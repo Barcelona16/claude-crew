@@ -26,7 +26,7 @@ crew --help
 ```bash
 crew mysess "读 src/app.ts 列出它的导出"   # 起/续一个具名会话并(可选)喂任务
 crew                      # 对当前目录的会话:ensure + attach
-crew mysess --model opus  # 切模型(切完自动 attach);--key 切 key
+crew mysess --model GLM-5.2  # 切模型(切完自动 attach);--key 切 key
 crew ls                   # 列出会话(名字 / 状态 / 模型 / key)
 crew models               # 列出模型预设
 crew keys                 # 列出 API key 别名(掩码)
@@ -69,12 +69,15 @@ crew inbox                # 读自己的信箱
 key 也集中在 CCR config 一处管。`--key` 别名在 `~/.config/claude-crew/keys.conf`(`别名=key`),`crew keys` 掩码列出。
 要让"任意模型 × 任意 key"都能切,就在 CCR 里给每个模型都备好两把 key 的 provider。
 
+预设名**就是 CCR 里的模型名**(`crew models` 列出);joycode provider 服务的多个模型用 `joycode_<模型>` 前缀区分。
+
 ```bash
-crew mysess --model opus                 # Opus-4.8(经 CCR)
-crew mysess --model opus --key k8b04     # 换另一把 key(切到对应 CCR provider)
-crew mysess --model glm  --key k19aa
-crew mysess --model kimi                 # kimi(经 CCR)
-crew keys                                # 看 key 别名
+crew mysess --model Claude-Opus-4.8-joybuilder             # Opus-4.8(经 CCR)
+crew mysess --model Claude-Opus-4.8-joybuilder --key k8b04 # 换另一把 key(切到对应 CCR provider)
+crew mysess --model GLM-5.2 --key k19aa
+crew mysess --model kimi-k3-joybuilder                     # kimi(经 CCR)
+crew mysess --model joycode_JoyAI-Code-1.5                 # joycode 系(经 :8765 代理)
+crew keys                                                  # 看 key 别名
 ```
 
 ## 依赖服务(CCR + joycode 代理)
@@ -117,7 +120,7 @@ launchctl kickstart -k gui/$(id -u)/com.claudecrew.ccr
 ```bash
 cp ext/gkd.sh ~/.config/claude-crew/ext/       # 装扩展
 export GKD_DIR=/path/to/gkd                     # 指向你的 GKD checkout
-crew delegate --model glm "把这50个文件改成 X"  # 程序化委派,拿结果回来
+crew delegate --model GLM-5.2 "把这50个文件改成 X"  # 程序化委派,拿结果回来
 crew gkd-sync                                    # 把 crew 预设同步进 GKD models.json
 ```
 

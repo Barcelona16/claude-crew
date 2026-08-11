@@ -11,7 +11,7 @@ A *crew session* is a tmux session running `claude`, pinned to a **name**, a **b
 - **Address a long-lived agent by name** — `crew api "add rate limiting"`, `crew docs "update the changelog"`.
 - **Attach any time to watch** — `crew attach api` drops you into the live session.
 - **Persistence** — sessions `--resume` the same conversation across tmux/host restarts.
-- **Per-session backends** — run one session on Claude, another on a cheaper model, side by side.
+- **Per-session model + key switching** — two knobs (`--model` / `--key`) over CCR; run one session on Opus, another on GLM/kimi.
 
 It's a thin, dependency-light bash script (tmux + Claude Code). No daemon, no config server,
 **no dependency on any particular project**.
@@ -29,10 +29,13 @@ crew --help
 ```bash
 crew mysess "read src/app.ts and list its exports"   # start/continue a named session + feed a task
 crew                      # ensure + attach the session for the current directory
-crew ls                   # list running sessions
+crew mysess --model GLM-5.2  # switch model (auto-attaches after); --key switches the key
+crew ls                   # list sessions (name / status / model / key)
+crew models               # list model presets
+crew keys                 # list API key aliases (masked)
+crew up                   # ensure dependency services are up (CCR / joycode proxy)
 crew attach mysess        # attach to observe
 crew kill mysess          # stop a session
-crew backends             # list backend presets
 crew send bob "look at X" # drop a message in another session's mailbox (see "Talking between sessions")
 crew inbox                # read your own mailbox
 ```
@@ -42,58 +45,101 @@ collision). The directory↔name map and each session's id live under
 `~/.local/share/claude-crew/`, so re-running `crew` from the same directory reattaches
 the same conversation.
 
-**Flags:** `--backend <name>` pick a backend · `--fresh` start a new conversation (no
-`--resume`) · `--yolo` add `--dangerously-skip-permissions`.
+**Flags:** `--model <name>` pick a model preset (`--backend` is a hidden alias) · `--key <alias>`
+switch the API key (`--key -` clears) · `--fresh` start a new conversation (no `--resume`) ·
+`--safe` drop the bypass (**bypass is ON by default**; `CREW_YOLO=0` disables globally). A
+`--model`/`--key` switch on an interactive TTY restarts (keeps history via `--resume`) and **auto-attaches**.
 
-## Backends
+## Model presets (over CCR)
 
-A backend is a preset in `~/.config/claude-crew/backends/<name>.conf` (sourced as bash).
-The built-in `default` backend is just plain Claude with your ambient config. Any of the
-keys are optional — see [`backends/default.conf.example`](backends/default.conf.example):
+A preset is `~/.config/claude-crew/backends/<name>.conf` (sourced as bash). `crew models`
+lists them. Each defines how it routes (`BASE_URL` / `MODEL` / `TOKEN`) and its `KEY_MODE`
+(how `--key` lands) — see [`backends/default.conf.example`](backends/default.conf.example):
 
 | Key | Meaning |
 |-----|---------|
-| `BASE_URL` | `ANTHROPIC_BASE_URL` override (point at a proxy/gateway) |
-| `MODEL` | `claude --model <MODEL>` |
-| `TOKEN` / `TOKEN_CMD` | auth token, literal or from a command's stdout |
-| `ENSURE_CMD` | idempotent command run before the session (e.g. start a proxy) |
-| `ENV_EXTRA` | extra `K=V` env injected into the session |
-| `DANGEROUS` | `1` → add `--dangerously-skip-permissions` |
-| `CLAUDE_FLAGS` | override the flags passed to `claude` |
+| `BASE_URL` | `ANTHROPIC_BASE_URL` (usually CCR `:3456`) |
+| `MODEL` | `claude --model <MODEL>`; for `ccr` mode written as `provider,realmodel` |
+| `TOKEN` / `TOKEN_CMD` / `TOKEN_ENV` | inbound auth token (literal / command stdout / env var name) |
+| `KEY_MODE` | `token` (default) / `ccr` / `litellm` — see below |
+| `ENV_EXTRA` | extra `K=V` injected into the session (e.g. `MAX_THINKING_TOKENS=0`) |
+| `DANGEROUS` | `1` → force `--dangerously-skip-permissions` (bypass is now on by default) |
 
-### Example: drive a non-Anthropic model as a tool-using agent
+**Two knobs: `--model` (pick a preset) + `--key` (pick a key)**. How `--key` lands depends on the preset's `KEY_MODE`:
 
-[`examples/glm-litellm/`](examples/glm-litellm/) sets up a `glm` backend that uses
-[LiteLLM](https://github.com/BerriAI/litellm) to translate Anthropic `/v1/messages`
-(with tool-calling) to an OpenAI-compatible upstream — so a cheaper model runs as a real
-tool-using Claude Code agent, and `crew` starts the proxy on demand.
+| KEY_MODE | Routing | `--key <alias>` effect |
+|---|---|---|
+| `token` (default) | direct to the gateway; the inbound token is the credential | replaces `ANTHROPIC_AUTH_TOKEN` with the key from `keys.conf` |
+| `ccr` | via [claude-code-router](https://github.com/musistudio/claude-code-router) `:3456`, `MODEL=provider,realmodel` | swaps to the CCR provider serving that model with that key (resolved live from CCR's config) |
+| `litellm` | via a local LiteLLM | starts a per-key upstream port (mainly for `claude -p` delegation) |
 
-```bash
-bash examples/glm-litellm/setup.sh
-export GLM_GATEWAY_TOKEN=...            # your upstream token
-crew --backend glm worker "run a quick smoke test and report"
-```
+**Prefer `ccr`** — CCR's Anthropic↔OpenAI streaming translation is correct (usable for
+interactive sessions; LiteLLM's emits empty deltas), and keys live in one place (CCR config).
+`--key` aliases are in `~/.config/claude-crew/keys.conf` (`alias=key`); `crew keys` lists them
+masked. To make "any model × any key" switchable, give each model a provider for both keys in CCR.
 
-## Working with GKD: interactive sessions + programmatic delegation
-
-`crew` manages **interactive, observable, long-lived** tmux sessions. [GKD](https://github.com/alvis-HaoH/gkd) is for
-**programmatic one-shot delegation**: it spawns a `claude -p --model X` sub-process to do
-the work and returns just the **result**. The two are complementary, and crew wires GKD in:
-
-- **crew is the single source of backend truth; GKD borrows it.** `crew gkd-sync` projects
-  crew's `backends/*.conf` into GKD's `config/models.json` (define once, use in both).
-- **`crew delegate --backend B "task"`** — one-shot programmatic delegation: ensure the
-  backend is up → sync backends into GKD → invoke GKD's runtime → print the result to stdout.
+Preset names **are the CCR model names** (`crew models`); the joycode provider's several
+models are prefixed `joycode_<model>`.
 
 ```bash
-crew mysess "iterate on this module over time"        # interactive: an attachable tmux session
-crew delegate --backend glm "rewrite these 50 files to X"   # programmatic: GKD delegation, result returned
-crew gkd-sync                                          # manually sync crew backends into GKD's models.json
+crew mysess --model Claude-Opus-4.8-joybuilder             # Opus-4.8 (via CCR)
+crew mysess --model Claude-Opus-4.8-joybuilder --key k8b04 # switch key (→ the matching CCR provider)
+crew mysess --model GLM-5.2 --key k19aa
+crew mysess --model kimi-k3-joybuilder                     # kimi (via CCR)
+crew mysess --model joycode_JoyAI-Code-1.5                 # joycode family (via the :8765 proxy)
+crew keys                                                  # see key aliases
 ```
 
-**GKD is an optional dependency**: `delegate`/`gkd-sync` need GKD — point `GKD_DIR` at your
-GKD checkout ([install GKD](https://github.com/alvis-HaoH/gkd)); everything else (session
-management) works without it. crew depends on **neither GKD nor any particular project**.
+## Dependency services (CCR + joycode proxy)
+
+`ccr` presets need local proxies running:
+
+- **CCR (claude-code-router) `:3456`** — the single entry point; translates/forwards Claude
+  Code's Anthropic requests to each gateway and **picks the upstream key per provider**.
+- **joycode proxy `:8765`** (only for `joycode_*` models) — reads the VS Code JoyCode login,
+  HMAC-signs, and forwards to JoyCode's SaaS gateway. That auth is custom, so CCR can't replace
+  it — it must run separately.
+
+Run both as **launchd agents** (background + auto-restart + start at login). crew auto-ensures
+deps when starting a `ccr` session, and `crew up` checks/starts them on demand:
+
+```bash
+crew up   # ensure CCR :3456 + joycode :8765 (kickstarts the launchd agents as needed)
+```
+
+Install the launchd agents (macOS; plists are generated under `~/.claude-code-router/`):
+
+```bash
+cp ~/.claude-code-router/com.claudecrew.ccr.plist     ~/Library/LaunchAgents/
+cp ~/.claude-code-router/com.claudecrew.joycode.plist ~/Library/LaunchAgents/
+launchctl load -w ~/Library/LaunchAgents/com.claudecrew.ccr.plist
+launchctl load -w ~/Library/LaunchAgents/com.claudecrew.joycode.plist
+# restart after editing CCR config (no terminal needed):
+launchctl kickstart -k gui/$(id -u)/com.claudecrew.ccr
+```
+
+> **Don't run `ccr start` in the foreground** — it's a foreground process; let launchd manage it.
+> Override ports/labels with `CREW_CCR_PORT` / `CREW_CCR_LABEL` / `CREW_JOYCODE_PORT` /
+> `CREW_JOYCODE_LABEL` (handy for other environments like the cloud). Keep the joycode proxy
+> script outside TCC-protected dirs (e.g. `~/.config/claude-crew/`), else launchd reading
+> `~/Desktop` is denied by macOS.
+
+## Optional extension: GKD programmatic delegation
+
+Core crew = tmux + CCR model/key switching. Optional add-ons live as `ext/*.sh`, sourced at
+startup from `$CREW_HOME/ext/` (loaded if present; pure core otherwise).
+[GKD](https://github.com/alvis-HaoH/gkd) does **programmatic one-shot delegation**: spawn a
+`claude -p --model X` sub-process and return just the **result**. Enable it:
+
+```bash
+cp ext/gkd.sh ~/.config/claude-crew/ext/       # install the extension
+export GKD_DIR=/path/to/gkd                      # point at your GKD checkout
+crew delegate --model GLM-5.2 "rewrite these 50 files to X"  # programmatic delegation, result returned
+crew gkd-sync                                    # sync crew presets into GKD's models.json
+```
+
+Without the extension, `delegate`/`gkd-sync` print how to install it. Core session management
+depends on neither GKD nor any particular project.
 
 ## Talking between sessions (async mailbox)
 
