@@ -20,6 +20,16 @@ CCRDIR="$HOME/.claude-code-router"
 CCRCFG="$CCRDIR/config.json"
 OS="$(uname -s)"
 
+# joycode needs a VS Code JoyCode login (the proxy reads that session). Skip it on headless
+# hosts (containers/cloud) automatically, or with --no-joycode.
+WANT_JOYCODE=1
+for a in "$@"; do [ "$a" = "--no-joycode" ] && WANT_JOYCODE=0; done
+if [ "$WANT_JOYCODE" = 1 ] \
+   && [ ! -f "$HOME/Library/Application Support/Code/User/globalStorage/state.vscdb" ] \
+   && [ ! -f "$HOME/.config/Code/User/globalStorage/state.vscdb" ]; then
+  WANT_JOYCODE=0; JOYCODE_OFF="no VS Code JoyCode login found (headless?) — skipping joycode models"
+fi
+
 say(){ printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 info(){ printf '   %s\n' "$*"; }
 die(){ printf '\n[setup] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -73,7 +83,7 @@ say "6) keys.conf + model presets + joycode proxy"
 mkdir -p "$CFG/backends"
 if [ -f "$CFG/keys.conf" ]; then info "keys.conf exists — leaving as is"
 else { echo "# crew api keys — <alias>=<key>. Use: crew --key <alias> <session>"; echo "gw=$TOKEN"; } > "$CFG/keys.conf"; chmod 600 "$CFG/keys.conf"; info "wrote keys.conf (gw=<your token>)"; fi
-[ -f "$HERE/setup/joycode_proxy.py" ] && cp "$HERE/setup/joycode_proxy.py" "$CFG/joycode_proxy.py"
+[ -f "$HERE/setup/joycode_proxy.py" ] && [ "$WANT_JOYCODE" = 1 ] && cp "$HERE/setup/joycode_proxy.py" "$CFG/joycode_proxy.py"
 mkpreset(){ cat > "$CFG/backends/$1.conf" <<EOF
 BASE_URL=http://127.0.0.1:3456
 MODEL=$2
@@ -85,31 +95,42 @@ EOF
 mkpreset "Claude-Opus-4.8-joybuilder" "opus,Claude-Opus-4.8-joybuilder"
 mkpreset "GLM-5.2"                    "glm,GLM-5.2"
 mkpreset "kimi-k3-joybuilder"         "kimi,kimi-k3-joybuilder"
-for m in Claude-Opus-4.8-hq Claude-Opus-4.7-hq Claude-Sonnet-4.6-hq Claude-Opus-4.6-hq; do mkpreset "joycode_$m" "joycode,$m"; done
-for m in JoyAI-Code-1.5 Kimi-K2.6 GLM-5.2 GLM-5.2-jcloud GLM-5.1 GLM-5 GLM-5-jcloud MiniMax-M3 MiniMax-M2.7 DeepSeek-V4-Pro Doubao-Seed-2.0-pro; do mkpreset "joycode_$m" "joycode-oai,$m"; done
+if [ "$WANT_JOYCODE" = 1 ]; then
+  for m in Claude-Opus-4.8-hq Claude-Opus-4.7-hq Claude-Sonnet-4.6-hq Claude-Opus-4.6-hq; do mkpreset "joycode_$m" "joycode,$m"; done
+  for m in JoyAI-Code-1.5 Kimi-K2.6 GLM-5.2 GLM-5.2-jcloud GLM-5.1 GLM-5 GLM-5-jcloud MiniMax-M3 MiniMax-M2.7 DeepSeek-V4-Pro Doubao-Seed-2.0-pro; do mkpreset "joycode_$m" "joycode-oai,$m"; done
+else
+  info "joycode disabled${JOYCODE_OFF:+ — $JOYCODE_OFF}"
+fi
 info "wrote $(ls "$CFG"/backends/*.conf 2>/dev/null | wc -l | tr -d ' ') model presets"
 
-say "7) run CCR + joycode as background services ($OS)"
+say "7) run background services ($OS)"
 PY="$(command -v python3 || echo /usr/bin/python3)"; PROXY="$CFG/joycode_proxy.py"
+SVCS="ccr"; [ "$WANT_JOYCODE" = 1 ] && SVCS="ccr joycode"
 fill(){ sed -e "s|__NODE__|$NODE_BIN|g" -e "s|__NODE_DIR__|$NODE_DIR|g" -e "s|__CCR_CLI__|$CCR_CLI|g" -e "s|__PY__|$PY|g" -e "s|__PROXY__|$PROXY|g" -e "s|__HOME__|$HOME|g" "$1"; }
-if [ "$OS" = Darwin ]; then
+port_up(){ (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&- 3<&-; return 0; }; return 1; }
+if [ "$OS" = Darwin ] && command -v launchctl >/dev/null 2>&1; then
   LA="$HOME/Library/LaunchAgents"; mkdir -p "$LA"; uid="$(id -u)"
-  for svc in ccr joycode; do
+  for svc in $SVCS; do
     lbl="com.claudecrew.$svc"
-    fill "$HERE/setup/launchd/$lbl.plist.tmpl" > "$LA/$lbl.plist" || { info "WARN: can't write $LA/$lbl.plist (permission?)"; continue; }
+    fill "$HERE/setup/launchd/$lbl.plist.tmpl" > "$LA/$lbl.plist" || { info "WARN: can't write $LA/$lbl.plist"; continue; }
     launchctl bootout "gui/$uid/$lbl" 2>/dev/null || true
     launchctl bootstrap "gui/$uid" "$LA/$lbl.plist" 2>/dev/null || launchctl load -w "$LA/$lbl.plist" 2>/dev/null || true
     launchctl kickstart -k "gui/$uid/$lbl" 2>/dev/null || true
   done
-  info "launchd agents: com.claudecrew.ccr / com.claudecrew.joycode"
-else
-  UD="$HOME/.config/systemd/user"; mkdir -p "$UD"
-  fill "$HERE/setup/systemd/claudecrew-ccr.service.tmpl"     > "$UD/claudecrew-ccr.service"
-  fill "$HERE/setup/systemd/claudecrew-joycode.service.tmpl" > "$UD/claudecrew-joycode.service"
+  info "launchd agents up ($SVCS)"
+elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  UD="$HOME/.config/systemd/user"; mkdir -p "$UD"; UNITS=""
+  for svc in $SVCS; do fill "$HERE/setup/systemd/claudecrew-$svc.service.tmpl" > "$UD/claudecrew-$svc.service"; UNITS="$UNITS claudecrew-$svc.service"; done
   systemctl --user daemon-reload 2>/dev/null || true
-  systemctl --user enable --now claudecrew-ccr.service claudecrew-joycode.service 2>/dev/null \
-    || info "systemctl --user enable failed — run: loginctl enable-linger $USER, then re-run this step."
-  info "systemd --user units: claudecrew-ccr / claudecrew-joycode"
+  systemctl --user enable --now $UNITS 2>/dev/null || info "systemctl enable failed — try: loginctl enable-linger $USER, then re-run"
+  info "systemd --user units up ($SVCS)"
+else
+  # headless / container (no launchd, no systemd user bus): launch detached with nohup.
+  # No auto-restart — a boot/rebuild script (e.g. your bridge start.sh) should re-launch these.
+  info "no launchd/systemd user session — launching detached (nohup, container mode)"
+  nsvc(){ local n="$1" p="$2"; shift 2; port_up "$p" && { info "  $n already up (:$p)"; return; }; nohup "$@" >>"$CCRDIR/$n.nohup.log" 2>&1 & disown 2>/dev/null || true; info "  started $n (:$p, pid $!)"; }
+  nsvc ccr 3456 "$NODE_BIN" "$CCR_CLI" start
+  [ "$WANT_JOYCODE" = 1 ] && nsvc joycode 8765 "$PY" "$PROXY"
 fi
 
 say "8) default model preset"
