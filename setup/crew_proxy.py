@@ -512,12 +512,143 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self._read_body()
-        # Only /v1/messages and /v1/chat/completions carry a model to route on.
         path = self.path.split("?")[0]
+        # Dashboard write endpoints (state-mutating; strict input validation below).
+        if path == "/api/session/kill":
+            self._api_session_kill(body); return
+        if path == "/api/session/config":
+            self._api_session_config(body); return
+        if path == "/api/ccr/provider":
+            self._api_ccr_provider(body); return
+        # Only /v1/messages and /v1/chat/completions carry a model to route on.
         if path.endswith("/messages") or path.endswith("/chat/completions"):
             self._route(body)
         else:
             self._passthrough(body)
+
+    def _read_json(self, body):
+        try:
+            return json.loads(body or b"{}")
+        except json.JSONDecodeError:
+            return None
+
+    # -- stage B: kill a session (delegates to `crew kill`, the canonical teardown) --
+    def _api_session_kill(self, body):
+        d = self._read_json(body)
+        if d is None:
+            return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
+        name = str(d.get("name", ""))
+        if not SAFE_NAME.match(name):
+            return self._send_json({"ok": False, "error": "invalid session name"}, 400)
+        # No --purge from the dashboard: keep the transcript, only tear down tmux + state.
+        out, err = run_crew(["kill", name])
+        if err:
+            return self._send_json({"ok": False, "error": err}, 500)
+        return self._send_json({"ok": True, "output": (out or "").strip()})
+
+    # -- stage C: change a session's model/key (single-value crew state files) --
+    def _api_session_config(self, body):
+        d = self._read_json(body)
+        if d is None:
+            return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
+        name = str(d.get("name", ""))
+        if not SAFE_NAME.match(name):
+            return self._send_json({"ok": False, "error": "invalid session name"}, 400)
+        os.makedirs(CREW_STATE, exist_ok=True)
+
+        def _write(field, val, allow_clear):
+            path = os.path.join(CREW_STATE, f"{name}.{field}")
+            if val == "" and allow_clear:
+                if os.path.exists(path):
+                    os.remove(path)
+                return None
+            if not SAFE_NAME.match(val):
+                return f"invalid {field}"
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(val)
+            os.replace(tmp, path)
+            return None
+
+        changed = []
+        if "model" in d:
+            e = _write("backend", str(d.get("model", "")), allow_clear=False)
+            if e:
+                return self._send_json({"ok": False, "error": e}, 400)
+            changed.append("model")
+        if "key" in d:
+            e = _write("key", str(d.get("key", "")), allow_clear=True)
+            if e:
+                return self._send_json({"ok": False, "error": e}, 400)
+            changed.append("key")
+        return self._send_json({"ok": True, "changed": changed,
+                                "note": "takes effect next `crew <name>` (restart the session to apply now)"})
+
+    # -- stage D: add a key + CCR provider (writes global config; backs up first) --
+    def _api_ccr_provider(self, body):
+        d = self._read_json(body)
+        if d is None:
+            return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
+        alias = str(d.get("alias", "")); key = str(d.get("key", ""))
+        model = str(d.get("model", "")); base_url = str(d.get("base_url", ""))
+        transformer = str(d.get("transformer", "OpenAI"))
+        # Validate the identifiers we control; key + base_url are opaque values (not exec'd,
+        # not used as filenames) so they only need to be non-empty and sane.
+        if not SAFE_NAME.match(alias):
+            return self._send_json({"ok": False, "error": "invalid alias"}, 400)
+        if not SAFE_NAME.match(model):
+            return self._send_json({"ok": False, "error": "invalid model"}, 400)
+        if transformer not in ("OpenAI", "Anthropic"):
+            return self._send_json({"ok": False, "error": "transformer must be OpenAI or Anthropic"}, 400)
+        if not key or not base_url.startswith(("http://", "https://")):
+            return self._send_json({"ok": False, "error": "key required and base_url must be http(s)"}, 400)
+
+        # 1) keys.conf: add/replace alias line.
+        try:
+            lines = []
+            found = False
+            if os.path.exists(KEYS_FILE):
+                with open(KEYS_FILE) as f:
+                    for ln in f:
+                        if ln.strip() and not ln.lstrip().startswith("#") and ln.split("=", 1)[0].strip() == alias:
+                            lines.append(f"{alias}={key}\n"); found = True
+                        else:
+                            lines.append(ln if ln.endswith("\n") else ln + "\n")
+            if not found:
+                lines.append(f"{alias}={key}\n")
+            os.makedirs(os.path.dirname(KEYS_FILE), exist_ok=True)
+            with open(KEYS_FILE, "w") as f:
+                f.writelines(lines)
+            os.chmod(KEYS_FILE, 0o600)
+        except OSError as e:
+            return self._send_json({"ok": False, "error": f"keys.conf write failed: {e}"}, 500)
+
+        # 2) CCR config: back up, then merge one provider ({model} x {key}).
+        try:
+            with open(CCR_CFG) as f:
+                cfg = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            return self._send_json({"ok": False, "error": f"cannot read CCR config: {e}"}, 500)
+        backup = f"{CCR_CFG}.bak.{int(time.time())}"
+        try:
+            shutil.copy2(CCR_CFG, backup)
+        except OSError as e:
+            return self._send_json({"ok": False, "error": f"backup failed: {e}"}, 500)
+        providers = cfg.setdefault("Providers", cfg.get("providers") and cfg.pop("providers") or [])
+        pname = f"{model}-{alias}"
+        if any(p.get("name") == pname for p in providers):
+            return self._send_json({"ok": False, "error": f"provider '{pname}' already exists"}, 409)
+        providers.append({"name": pname, "api_base_url": base_url, "api_key": key,
+                          "models": [model], "transformer": {"use": [transformer]}})
+        try:
+            tmp = CCR_CFG + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cfg, f, indent=2)
+            os.replace(tmp, CCR_CFG)
+        except OSError as e:
+            return self._send_json({"ok": False, "error": f"CCR write failed (backup at {backup}): {e}"}, 500)
+        log.info("added CCR provider '%s' + key '%s' (backup %s)", pname, alias, backup)
+        return self._send_json({"ok": True, "provider": pname, "backup_path": backup})
 
     # -- plain reverse proxy (no key logic): health, /v1/models, unknown paths --
     def _passthrough(self, body):

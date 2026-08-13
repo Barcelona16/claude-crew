@@ -164,6 +164,75 @@ code, _ = post()
 check("400 relayed, not failed over", code == 400 and MOCK["hits"] == ["p1"])
 check("p1 not counted as failure", cp.BREAKER._fails.get("p1", 0) == 0)
 
+# ── dashboard read endpoints ──────────────────────────────────────────────────────
+print("Dashboard read endpoints:")
+def get(path):
+    req = urllib.request.Request(PROXY + path)
+    try:
+        r = urllib.request.urlopen(req, timeout=10)
+        return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+code, html = get("/dashboard")
+check("/dashboard serves HTML", code == 200 and b"<!doctype html>" in html[:40].lower())
+code, raw = get("/api/status")
+st = json.loads(raw)
+check("/api/status has totals + keys", "totals" in st and "keys" in st)
+code, raw = get("/api/logs?n=5")
+check("/api/logs returns a list", isinstance(json.loads(raw).get("logs"), list))
+
+# ── write endpoints: session config (stage C) ────────────────────────────────────
+print("Write: session config (stage C):")
+def jpost(path, obj):
+    req = urllib.request.Request(PROXY + path, data=json.dumps(obj).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        r = urllib.request.urlopen(req, timeout=10)
+        return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+# point crew state at the test tmpdir so writes are isolated
+os.makedirs(os.path.join(_tmp, "state"), exist_ok=True)
+cp.CREW_STATE = os.path.join(_tmp, "state")
+code, r = jpost("/api/session/config", {"name": "demo", "model": "MODEL_X", "key": "k1"})
+check("config write ok", code == 200 and r.get("ok"))
+check("wrote demo.backend", open(os.path.join(cp.CREW_STATE, "demo.backend")).read() == "MODEL_X")
+check("wrote demo.key", open(os.path.join(cp.CREW_STATE, "demo.key")).read() == "k1")
+code, r = jpost("/api/session/config", {"name": "demo", "key": ""})
+check("empty key clears file", not os.path.exists(os.path.join(cp.CREW_STATE, "demo.key")))
+
+# ── injection defense ─────────────────────────────────────────────────────────────
+print("Injection defense:")
+code, r = jpost("/api/session/config", {"name": "demo; rm -rf /", "model": "X"})
+check("shell-metachar name rejected (config)", code == 400 and not r.get("ok"))
+code, r = jpost("/api/session/kill", {"name": "$(touch /tmp/pwned)"})
+check("shell-metachar name rejected (kill)", code == 400 and not r.get("ok"))
+code, r = jpost("/api/session/config", {"name": "demo", "model": "a/../b"})
+check("path-sep model rejected", code == 400 and not r.get("ok"))
+
+# ── write endpoints: CCR provider add (stage D) ───────────────────────────────────
+print("Write: CCR provider add (stage D):")
+cp.KEYS_FILE = os.path.join(_cfg, "keys.conf")
+cp.CCR_CFG = _ccr_cfg
+code, r = jpost("/api/ccr/provider", {"alias": "k4", "key": "KEY_FOUR", "model": "MODEL_X",
+                                       "base_url": "https://api.example.com/v1/chat/completions",
+                                       "transformer": "OpenAI"})
+check("provider add ok", code == 200 and r.get("ok"))
+check("backup file created", os.path.exists(r.get("backup_path", "")))
+_ccr = json.load(open(_ccr_cfg))
+check("new provider MODEL_X-k4 present", any(p["name"] == "MODEL_X-k4" for p in _ccr["Providers"]))
+check("keys.conf has k4", "k4=KEY_FOUR" in open(cp.KEYS_FILE).read())
+code, r = jpost("/api/ccr/provider", {"alias": "k4", "key": "x", "model": "MODEL_X",
+                                       "base_url": "https://x", "transformer": "OpenAI"})
+check("duplicate provider rejected", code == 409 and not r.get("ok"))
+code, r = jpost("/api/ccr/provider", {"alias": "bad;alias", "key": "x", "model": "MODEL_X",
+                                       "base_url": "https://x", "transformer": "OpenAI"})
+check("bad alias rejected", code == 400 and not r.get("ok"))
+code, r = jpost("/api/ccr/provider", {"alias": "k5", "key": "x", "model": "MODEL_X",
+                                       "base_url": "ftp://nope", "transformer": "OpenAI"})
+check("non-http base_url rejected", code == 400 and not r.get("ok"))
+
 print()
 if FAILS:
     print(f"{FAILS} check(s) FAILED")
