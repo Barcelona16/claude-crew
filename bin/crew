@@ -12,7 +12,7 @@
 # The built-in "default" backend is just plain Claude (your ambient config).
 #
 # USAGE
-#   crew [--model M] [--key A] [--fresh] [--safe] [name] [task...]
+#   crew [--model M] [--key A] [--fresh] [--safe] [--no-tmux] [name] [task...]
 #                         start/continue a session (auto-attaches when interactive)
 #   crew                  ensure + attach the session for the current directory
 #   crew <name>           ensure + attach the named session
@@ -47,6 +47,12 @@
 #   --safe        DON'T add --dangerously-skip-permissions (opt out of the default
 #                 bypass for this one launch). Alias: --no-yolo. Set CREW_YOLO=0 to
 #                 make "safe" the default for every session.
+#   --no-tmux     run Claude in the FOREGROUND of the current terminal instead of a
+#                 detached tmux session. Session state is still registered (shows in
+#                 `crew ls`, `send`/`inbox` work, next `crew <name>` --resumes it), but
+#                 it ends when you close the terminal. Can't be combined with a queued
+#                 task (tasks need tmux + send-keys). Alias to opt back in: --tmux.
+#                 Set CREW_NO_TMUX=1 to make foreground the default.
 #
 # GKD is an OPTIONAL extension: copy ext/gkd.sh into $CREW_HOME/ext/ and set GKD_DIR to your
 # GKD checkout (https://github.com/alvis-HaoH/gkd) to enable `delegate`/`gkd-sync`. Core
@@ -191,14 +197,16 @@ crew_dep_up(){
 
 # --- session lifecycle ------------------------------------------------------
 ensure_session(){
-  local name="$1" backend="$2" fresh="$3" yolo="$4" tmux_s="$TMUX_PREFIX$1"
+  local name="$1" backend="$2" fresh="$3" yolo="$4" no_tmux="${5:-0}" tmux_s="$TMUX_PREFIX$1"
   local bkf="$CREW_STATE/$name.backend"
   local keyf="$CREW_STATE/$name.key"
   # If the session is already live, just re-attach — UNLESS the caller explicitly
   # asked for a DIFFERENT backend, in which case stop it and relaunch on the new one
   # (history preserved below via --resume). This makes `crew --backend X <name>` a
   # one-command model switch instead of "crew stop, then re-run with --backend".
-  if tmux has-session -t "$tmux_s" 2>/dev/null; then
+  # In --no-tmux mode there's no tmux session to inspect or re-attach to, so skip
+  # this block entirely and always (re)launch in the foreground below.
+  if [ "$no_tmux" != 1 ] && tmux has-session -t "$tmux_s" 2>/dev/null; then
     local running="default"; [ -f "$bkf" ] && running=$(cat "$bkf")
     local running_key=""; [ -f "$keyf" ] && running_key=$(cat "$keyf")
     local want_restart=0
@@ -221,6 +229,9 @@ ensure_session(){
   local keyalias="${KEY:-}"
   if [ "${KEY_EXPLICIT:-0}" = 1 ]; then printf '%s\n' "$keyalias" > "$keyf"
   elif [ -f "$keyf" ]; then keyalias=$(cat "$keyf"); fi
+  # Friendly label for launch logs: the pinned alias name, or "<backend default>"
+  # when no key is pinned (empty or "-" => fall back to the backend's own token).
+  local keydisp="<backend default>"; [ -n "$keyalias" ] && [ "$keyalias" != "-" ] && keydisp="$keyalias"
   load_backend "$backend"
   # Apply a pinned --key per the backend's KEY_MODE. token (default): the key IS the inbound
   # gateway credential. litellm: point at a per-key upstream LiteLLM instance (inbound stays
@@ -280,6 +291,17 @@ ensure_session(){
   fi
   local modelarg=""; [ -n "$BK_MODEL" ] && modelarg="--model $BK_MODEL"
 
+  # --no-tmux: run claude directly in THIS terminal. All the backend/key/model/--resume
+  # resolution above is tmux-independent and already ran; state (.sid/.backend/.key) is
+  # written, so `crew ls`/`send`/`inbox`/resume keep working. exec replaces this process
+  # (never returns), mirroring the tmux cmd's own `exec $CLAUDE_BIN`.
+  if [ "$no_tmux" = 1 ]; then
+    log "session '$name' starting in foreground (no tmux; backend: $backend, model: ${BK_MODEL:-<default>}, key: $keydisp)"
+    cd "$cwd" || die "cannot cd to $cwd"
+    eval "export $envp"   # envp is space-separated, printf %q-quoted KEY=value pairs
+    exec $CLAUDE_BIN $modelarg $flags $resume
+  fi
+
   local cmd="cd $(printf %q "$cwd") &&$envp exec $CLAUDE_BIN $modelarg $flags $resume; echo CREW_SESSION_EXITED; exec bash -i"
   tmux set-option -g history-limit "${CREW_HISTORY_LIMIT:-200000}" 2>/dev/null || true  # keep long scrollback on attach
   # 2026-08-07 修:bash -lc 起【非交互 shell】,claude cli 检测无 TTY 自动进 --print 模式导致 "Input must be provided..." 拒启动.
@@ -305,7 +327,7 @@ ensure_session(){
   # smaller client sees a cropped pane and a larger one sees a small box in the corner).
   tmux set-option -t "$tmux_s" window-size latest 2>/dev/null || true
   tmux set-window-option -t "$tmux_s" aggressive-resize on 2>/dev/null || true
-  log "session '$name' ready (tmux: $tmux_s, backend: $backend, model: ${BK_MODEL:-<default>}); watch: crew attach $name"
+  log "session '$name' ready (tmux: $tmux_s, backend: $backend, model: ${BK_MODEL:-<default>}, key: $keydisp); watch: crew attach $name"
   sleep 5
 }
 send_task(){ tmux send-keys -t "$TMUX_PREFIX$1" -l "$2"; sleep 1; tmux send-keys -t "$TMUX_PREFIX$1" Enter; log "fed task to '$1'; watch: crew attach $1"; }
@@ -397,7 +419,7 @@ crew_log(){
 }
 
 # --- arg parsing ------------------------------------------------------------
-BACKEND="${CREW_BACKEND:-default}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
+BACKEND="${CREW_BACKEND:-default}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; NO_TMUX="${CREW_NO_TMUX:-0}"; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --model|--backend) BACKEND="${2:?--model needs a value (see: crew models)}"; BACKEND_EXPLICIT=1; shift 2;;
@@ -407,6 +429,8 @@ while [ $# -gt 0 ]; do
     --fresh) FRESH=1; shift;;
     --yolo)  YOLO=1; shift;;
     --safe|--no-yolo) YOLO=0; shift;;
+    --no-tmux) NO_TMUX=1; shift;;
+    --tmux)    NO_TMUX=0; shift;;
     --from) FROM="${2:?--from needs a value}"; shift 2;;
     --nudge) NUDGE=1; shift;;
     --peek) PEEK=1; shift;;
@@ -486,14 +510,22 @@ EOF
   inbox) shift; crew_inbox "$@";;
   log) shift; crew_log "$@";;
   ""|-h|--help)
-    if [ "${1:-}" = "" ]; then name=$(resolve_name_for_cwd "$PWD"); ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO"; exec tmux -u attach -t "$TMUX_PREFIX$name"; fi
+    if [ "${1:-}" = "" ]; then name=$(resolve_name_for_cwd "$PWD"); ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO" "$NO_TMUX"; exec tmux -u attach -t "$TMUX_PREFIX$name"; fi
     awk 'NR>=2{ if($0 !~ /^#/) exit; sub(/^# ?/,""); print }' "$0";;
   *)
     first="$1"; shift || true; rest="$*"
     if { [ -f "$REG" ] && awk -F'\t' -v m="$first" '$2==m{ok=1}END{exit !ok}' "$REG"; } || [[ "$first" =~ ^[A-Za-z0-9._-]{1,32}$ ]]; then
       name=$(resolve_explicit_name "$first" "$PWD"); task="$rest"
     else name=$(resolve_name_for_cwd "$PWD"); task="$first${rest:+ $rest}"; fi
-    ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO"
+    # A queued task needs tmux + send-keys to deliver, so --no-tmux + task can't coexist:
+    # fall back to tmux for this launch and note it.
+    if [ "$NO_TMUX" = 1 ] && [ -n "$task" ]; then
+      log "note: --no-tmux ignored — a queued task needs tmux (send-keys); launching detached instead"
+      NO_TMUX=0
+    fi
+    ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO" "$NO_TMUX"
+    # (in --no-tmux mode with no task, ensure_session exec'd claude in the foreground and
+    #  never returned; the lines below only run for the tmux path)
     # A task means "queue work, don't attach". Otherwise attach when interactive (a TTY) —
     # so `crew <name>`, and any `--model`/`--key` switch, drops you straight into the session.
     if [ -n "$task" ]; then send_task "$name" "$task"
