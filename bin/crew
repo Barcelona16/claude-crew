@@ -14,6 +14,8 @@
 # USAGE
 #   crew [--model M] [--key A] [--pick] [--fresh] [--safe] [--no-tmux] [name] [task...]
 #                         start/continue a session (auto-attaches when interactive)
+#
+# SESSIONS (the everyday commands)
 #   crew                  ensure + attach the session for the current directory
 #   crew <name>           ensure + attach the named session
 #   crew <name> --model M           switch model, then attach
@@ -23,19 +25,25 @@
 #   crew attach <name>    attach to observe a session
 #   crew stop <name>      stop a session's tmux but KEEP its state (resume/switch later)
 #   crew kill <name> [--purge]   delete a session for good (tmux + id + registry; --purge also transcript)
-#   crew models           list available model presets (opus / kimi / glm / ...)
-#   crew up               ensure dependency services are up (CCR :3456, + any extension services)
+#
+# CONFIG
+#   crew models           list available model presets
 #   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
-#   crew delegate --model B "task"   one-shot `claude -p` delegation (result to stdout)
+#   crew up               ensure dependency services are up (CCR :3456 + crew-proxy :8788)
+#
+# MESSAGING (between sessions)
 #   crew send [--from X] [--nudge] <name> "msg"   drop a message in <name>'s mailbox
 #   crew send --all [--nudge] "msg"               broadcast to all running sessions
 #   crew inbox [--peek] [<name>]                  read (and consume) your mailbox
+#
+# ADVANCED
+#   crew delegate --model M "task"   one-shot `claude -p` delegation (result to stdout)
 #   crew log [--tail N] [--raw] [<name>]          full transcript from Claude's session log
 #
 # The two knobs you switch are --model and --key; everything else is plumbing.
 #
 # FLAGS
-#   --model M     pick a model preset (see `crew models`: opus / kimi / glm / ...). Remembered
+#   --model M     pick a model preset (see `crew models`). Remembered
 #                 per session; switching it on a live session restarts (history kept via
 #                 --resume) and then attaches. `--backend` is a hidden alias.
 #   --key A       use api-key alias A (from ~/.config/claude-crew/keys.conf). Works for every
