@@ -4,7 +4,9 @@
 
 TOKEN_PROMPT="Enter your LLM gateway / API token: "
 TOKEN_DESC="API token (your own; stays local)"
-CCR_TEMPLATE="ccr-config.public.template.json"
+# the generic placeholder CCR template (make-public.sh renames the .public template to this
+# canonical name in the build, so setup.sh reads the same filename in both versions).
+CCR_TEMPLATE="ccr-config.template.json"
 DEFAULT_BACKEND="default"
 
 # Generic starter presets. The template ships __PROVIDER__/__MODEL__ placeholders; edit
