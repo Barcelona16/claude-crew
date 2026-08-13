@@ -12,6 +12,8 @@ A *crew session* is a tmux session running `claude`, pinned to a **name**, a **b
 - **Attach any time to watch** — `crew attach api` drops you into the live session.
 - **Persistence** — sessions `--resume` the same conversation across tmux/host restarts.
 - **Per-session model + key switching** — two knobs (`--model` / `--key`) over CCR; run one session on Opus, another on GLM/kimi.
+- **Don't want to remember flags? `--pick` pops a menu** — `crew <name> --pick` walks you through model → key → tmux (fzf if installed, else a numbered prompt); an existing session preselects its last config, just hit Enter.
+- **Ride your JoyCode quota** — `joycode_*` presets borrow your VS Code JoyCode extension login to run Claude/GLM/kimi etc. (log in to JoyCode in VS Code first; local only — use GATEWAY_TOKEN in the cloud, see below).
 
 It's a thin, dependency-light bash script (tmux + Claude Code). No daemon, no config server,
 **no dependency on any particular project**.
@@ -53,6 +55,7 @@ local** (`~/.claude-code-router/config.json`, `~/.config/claude-crew/keys.conf`)
 crew mysess "read src/app.ts and list its exports"   # start/continue a named session + feed a task
 crew                      # ensure + attach the session for the current directory
 crew mysess --model GLM-5.2  # switch model (auto-attaches after); --key switches the key
+crew mysess --pick           # interactive menus: model → key → tmux (no flags to remember)
 crew ls                   # list sessions (name / status / model / key)
 crew models               # list model presets
 crew keys                 # list API key aliases (masked)

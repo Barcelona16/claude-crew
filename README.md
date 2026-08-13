@@ -10,6 +10,8 @@
 - **随时 attach 观察它干活** —— `crew attach api` 直接进到活会话里看
 - **持久** —— 会话用 `--resume` 接回同一段对话,跨 tmux/宿主机重启不丢
 - **每会话可切模型 + key** —— `--model` / `--key` 两个旋钮(经 CCR),一个会话跑 Opus、另一个跑 GLM/kimi
+- **懒得记 flag?`--pick` 弹菜单选** —— `crew <名> --pick` 依次交互选 model → key → tmux(有 fzf 用 fzf,否则数字菜单);已有会话默认沿用上次配置,回车即可
+- **可走 JoyCode 额度** —— `joycode_*` 预设借你 VS Code 里 JoyCode 插件的登录态跑 Claude/GLM/kimi 等(需先在 VS Code 登录;仅本机,云端请用 GATEWAY_TOKEN,见下)
 
 它是一个依赖极少的 bash 脚本(只要 tmux + Claude Code)。无守护进程、无配置服务、**不依赖任何具体项目**。
 
@@ -42,6 +44,7 @@ GATEWAY_TOKEN=<你的JD网关token> bash setup.sh    # 或直接 bash setup.sh �
 crew mysess "读 src/app.ts 列出它的导出"   # 起/续一个具名会话并(可选)喂任务
 crew                      # 对当前目录的会话:ensure + attach
 crew mysess --model GLM-5.2  # 切模型(切完自动 attach);--key 切 key
+crew mysess --pick           # 弹菜单交互选 model → key → tmux(不用记 flag)
 crew ls                   # 列出会话(名字 / 状态 / 模型 / key)
 crew models               # 列出模型预设
 crew keys                 # 列出 API key 别名(掩码)
