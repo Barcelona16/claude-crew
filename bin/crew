@@ -26,7 +26,7 @@
 #   crew models           list available model presets (opus / kimi / glm / ...)
 #   crew up               ensure dependency services are up (CCR :3456 + joycode :8765)
 #   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
-#   crew delegate --model B "task"   one-shot delegation via GKD (needs ext/gkd.sh)
+#   crew delegate --model B "task"   one-shot `claude -p` delegation (core; GKD optional)
 #   crew gkd-sync         export crew models into GKD's config/models.json (needs ext/gkd.sh)
 #   crew send [--from X] [--nudge] <name> "msg"   drop a message in <name>'s mailbox
 #   crew send --all [--nudge] "msg"               broadcast to all running sessions
@@ -40,8 +40,9 @@
 #                 per session; switching it on a live session restarts (history kept via
 #                 --resume) and then attaches. `--backend` is a hidden alias.
 #   --key A       use api-key alias A (from ~/.config/claude-crew/keys.conf). Works for every
-#                 model (direct-gateway = inbound token; litellm = per-key upstream). Remembered
-#                 per session; a live switch restarts + attaches. `--key -` clears the pin.
+#                 model (direct-gateway = inbound token; ccr = swaps to the provider that
+#                 serves the model with that key). Remembered per session; a live switch
+#                 restarts + attaches. `--key -` clears the pin.
 #   --pick, -p    interactively choose model, then key, then tmux mode from menus
 #                 (fzf if installed, else a numbered bash prompt). Any knob you also
 #                 pass explicitly (--model/--key/--tmux/--no-tmux) is skipped. Defaults
@@ -60,8 +61,9 @@
 #                 Set CREW_NO_TMUX=1 to make foreground the default.
 #
 # GKD is an OPTIONAL extension: copy ext/gkd.sh into $CREW_HOME/ext/ and set GKD_DIR to your
-# GKD checkout (https://github.com/alvis-HaoH/gkd) to enable `delegate`/`gkd-sync`. Core
-# crew (tmux + CCR) works without it.
+# GKD checkout (https://github.com/alvis-HaoH/gkd) for `gkd-sync` and GKD's multi-agent
+# orchestration (CREW_DELEGATE_GKD=1 routes `delegate` through it). Plain `delegate` and all
+# core crew (tmux + CCR) work without it.
 # See README.md / README.en.md.
 set -uo pipefail
 
@@ -157,12 +159,6 @@ lookup_key(){
 }
 list_key_aliases(){ [ -f "$KEYS_FILE" ] || return 0; grep -Ev '^[[:space:]]*(#|$)' "$KEYS_FILE" 2>/dev/null | sed -E 's/[[:space:]]*=.*//;s/[[:space:]]//g' | awk 'NF'; }
 mask_key(){ local s="$1" n=${#1}; if [ "$n" -le 8 ]; then printf '****'; else printf '%s...%s' "${s:0:4}" "${s: -4}"; fi; }
-# For KEY_MODE=litellm backends, each key alias gets its own upstream LiteLLM port so the
-# proxy forwards to the gateway with THAT key while the inbound key stays sk-glm-local.
-# Deterministic: alias's 1-based position in keys.conf -> 4000+pos (4001, 4002, ...);
-# no/unknown alias -> 4000 (the shared instance). Same alias always maps to the same port,
-# so an already-running instance is reused (health-checked) rather than duplicated.
-litellm_port_for_key(){ local a="$1" i=1 al; for al in $(list_key_aliases); do [ "$al" = "$a" ] && { echo $((4000+i)); return; }; i=$((i+1)); done; echo 4000; }
 # For KEY_MODE=ccr backends the model is "provider,realmodel" and the key rides with the
 # provider. Given a realmodel + a raw gateway key, find the ccr provider that serves that
 # model with that key (from ccr's own config.json) so --key can swap the provider.
@@ -176,6 +172,25 @@ ccr_provider_for(){
     const hit=ps.find(p=>(p.models||[]).includes(process.env.MODEL) && (p.api_key||p.apiKey)===process.env.KEY);
     process.stdout.write(hit?hit.name:"");
   ' "$cfg" 2>/dev/null
+}
+# Resolve a pinned --key alias per the loaded backend's KEY_MODE. Shared by ensure_session
+# and crew_delegate_core so both honor --key identically. token mode: sets KEY_INBOUND_OVERRIDE
+# to the raw key (becomes ANTHROPIC_AUTH_TOKEN). ccr mode: rewrites BK_MODEL to the provider
+# serving this model with that key. Reads BK_MODEL/BK_KEY_MODE; may mutate BK_MODEL; sets the
+# global KEY_INBOUND_OVERRIDE ("" if none).
+apply_key_pin(){
+  local keyalias="$1"; KEY_INBOUND_OVERRIDE=""
+  [ -n "$keyalias" ] && [ "$keyalias" != "-" ] || return 0
+  local _kv; _kv=$(lookup_key "$keyalias")
+  if [ -z "$_kv" ]; then log "WARN: key alias '$keyalias' not in $KEYS_FILE; ignoring pin"
+  elif [ "${BK_KEY_MODE:-token}" = "ccr" ]; then
+    local _real="${BK_MODEL##*,}" _prov
+    _prov=$(ccr_provider_for "$_real" "$_kv")
+    if [ -n "$_prov" ]; then BK_MODEL="$_prov,$_real"; log "key '$keyalias' -> ccr provider '$_prov' for $_real"
+    else log "WARN: no ccr provider serves '$_real' with key '$keyalias'; keeping default provider"; fi
+  else
+    KEY_INBOUND_OVERRIDE="$_kv"
+  fi
 }
 
 # --- dependency services (CCR + joycode proxy) -------------------------------
@@ -295,30 +310,9 @@ ensure_session(){
   local keydisp="<backend default>"; [ -n "$keyalias" ] && [ "$keyalias" != "-" ] && keydisp="$keyalias"
   load_backend "$backend"
   # Apply a pinned --key per the backend's KEY_MODE. token (default): the key IS the inbound
-  # gateway credential. litellm: point at a per-key upstream LiteLLM instance (inbound stays
-  # sk-glm-local) — LiteLLM 1.80 can't passthrough the client key, so we swap the upstream.
-  local _inbound_override=""
-  if [ -n "$keyalias" ] && [ "$keyalias" != "-" ]; then
-    local _kv; _kv=$(lookup_key "$keyalias")
-    if [ -z "$_kv" ]; then log "WARN: key alias '$keyalias' not in $KEYS_FILE; ignoring pin"
-    elif [ "${BK_KEY_MODE:-token}" = "litellm" ]; then
-      local _port; _port=$(litellm_port_for_key "$keyalias")
-      BK_BASE_URL="http://127.0.0.1:$_port"
-      BK_ENSURE_CMD="bash $(printf %q "$HOME/.config/claude-crew/ensure-glm-litellm.sh") $_port $(printf %q "$_kv")"
-      _inbound_override="sk-glm-local"
-      log "key '$keyalias' -> litellm upstream on :$_port (inbound stays sk-glm-local)"
-    elif [ "${BK_KEY_MODE:-token}" = "ccr" ]; then
-      # BK_MODEL is "provider,realmodel"; --key swaps the provider to the one serving realmodel
-      # with THIS key (found in ccr's own config.json). Inbound token stays as-is (ccr ignores
-      # it and uses the provider's own key upstream).
-      local _real="${BK_MODEL##*,}" _prov
-      _prov=$(ccr_provider_for "$_real" "$_kv")
-      if [ -n "$_prov" ]; then BK_MODEL="$_prov,$_real"; log "key '$keyalias' -> ccr provider '$_prov' for $_real"
-      else log "WARN: no ccr provider serves '$_real' with key '$keyalias'; keeping default provider"; fi
-    else
-      _inbound_override="$_kv"
-    fi
-  fi
+  # gateway credential. ccr: swap to the provider that serves this model with that key.
+  apply_key_pin "$keyalias"
+  local _inbound_override="$KEY_INBOUND_OVERRIDE"
   [ -n "$BK_ENSURE_CMD" ] && { log "ensuring backend '$backend' is up..."; bash -c "$BK_ENSURE_CMD" || log "WARN: backend ENSURE_CMD failed (continuing)"; }
   # ccr-routed presets need CCR (:3456) up; joycode models also need the joycode proxy.
   if [ "${BK_KEY_MODE:-}" = ccr ]; then
@@ -336,7 +330,7 @@ ensure_session(){
   [ -n "$BK_TOKEN_CMD" ] && tok=$(bash -c "$BK_TOKEN_CMD" 2>/dev/null)
   if [ -n "$BK_TOKEN_ENV" ]; then local _ev="${!BK_TOKEN_ENV-}"; [ -n "$_ev" ] && tok="$_ev"; fi
   # A pinned --key overrides the token (highest precedence); its value was resolved above
-  # per KEY_MODE (the gateway key for token mode, or sk-glm-local for litellm mode).
+  # per KEY_MODE (the gateway key for token mode; ccr mode swaps the provider instead).
   [ -n "$_inbound_override" ] && tok="$_inbound_override"
   local envp=""
   [ -n "$BK_BASE_URL" ] && envp="$envp ANTHROPIC_BASE_URL=$(printf %q "$BK_BASE_URL")"
@@ -392,6 +386,35 @@ ensure_session(){
   sleep 5
 }
 send_task(){ tmux send-keys -t "$TMUX_PREFIX$1" -l "$2"; sleep 1; tmux send-keys -t "$TMUX_PREFIX$1" Enter; log "fed task to '$1'; watch: crew attach $1"; }
+
+# --- one-shot delegation (core; no GKD needed) ------------------------------
+# `crew delegate --model X "task"` runs a one-shot `claude -p` sub-agent on a crew
+# backend and prints its result to stdout — no tmux, no session, no --resume. Reuses
+# load_backend + the same env assembly as ensure_session. GKD (ext/gkd.sh) is only
+# needed for its multi-agent orchestration; plain delegation lives here in core.
+crew_delegate_core(){
+  local backend="$1"; shift; local task="$*"
+  [ "$backend" = default ] && die "delegate needs a backend with a base URL (e.g. --model glm); 'default' is plain Claude."
+  [ -n "$task" ] || die "usage: crew delegate --model <name> \"<task>\""
+  load_backend "$backend"
+  apply_key_pin "${KEY:-}"   # honor --key (ccr: swaps provider; token: overrides inbound below)
+  [ -n "$BK_ENSURE_CMD" ] && { log "ensuring backend '$backend' is up..."; bash -c "$BK_ENSURE_CMD" >&2 || log "WARN: ENSURE_CMD failed (continuing)"; }
+  if [ "${BK_KEY_MODE:-}" = ccr ]; then
+    crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}" >&2
+    case "$BK_MODEL" in joycode,*|joycode-oai,*) crew_dep_up "joycode" "${CREW_JOYCODE_PORT:-8765}" "${CREW_JOYCODE_LABEL:-com.claudecrew.joycode}" "${CREW_JOYCODE_UNIT:-claudecrew-joycode}" >&2;; esac
+  fi
+  local tok="$BK_TOKEN"
+  [ -n "$BK_TOKEN_CMD" ] && tok=$(bash -c "$BK_TOKEN_CMD" 2>/dev/null)
+  if [ -n "$BK_TOKEN_ENV" ]; then local _ev="${!BK_TOKEN_ENV-}"; [ -n "$_ev" ] && tok="$_ev"; fi
+  [ -n "$KEY_INBOUND_OVERRIDE" ] && tok="$KEY_INBOUND_OVERRIDE"
+  local modelarg=""; [ -n "$BK_MODEL" ] && modelarg="--model $BK_MODEL"
+  local flags="${BK_CLAUDE_FLAGS:-${CREW_CLAUDE_FLAGS:-}}"
+  [ -n "$BK_BASE_URL" ] && export ANTHROPIC_BASE_URL="$BK_BASE_URL"
+  [ -n "$tok" ]         && export ANTHROPIC_AUTH_TOKEN="$tok"
+  [ -n "$BK_ENV_EXTRA" ] && eval "export $BK_ENV_EXTRA"
+  log "delegating to '$backend' (model: ${BK_MODEL:-<default>}) via claude -p..."
+  exec $CLAUDE_BIN -p $modelarg $flags "$task"
+}
 
 # --- optional extensions -----------------------------------------------------
 # Core crew = tmux + a CCR/proxy-routed model preset. Optional add-ons (GKD delegation,
@@ -567,7 +590,11 @@ EOF
     log "deleted session '$nm' (tmux + sid + registry$( [ "$purge" = 1 ] && printf ' + transcript' ))"
     ;;
   gkd-sync) command -v crew_gkd_sync >/dev/null 2>&1 || die "GKD extension not installed — copy ext/gkd.sh into $CREW_HOME/ext/ (and set GKD_DIR)."; crew_gkd_sync;;
-  delegate) command -v crew_delegate >/dev/null 2>&1 || die "GKD extension not installed — copy ext/gkd.sh into $CREW_HOME/ext/ (and set GKD_DIR)."; shift; crew_delegate "$BACKEND" "$@";;
+  delegate) shift
+    # Default: core one-shot delegation (claude -p), no GKD needed. Use GKD's multi-agent
+    # orchestration only when explicitly asked (CREW_DELEGATE_GKD=1) and it's installed.
+    if [ "${CREW_DELEGATE_GKD:-0}" = 1 ] && command -v crew_delegate >/dev/null 2>&1; then crew_delegate "$BACKEND" "$@"
+    else crew_delegate_core "$BACKEND" "$@"; fi;;
   send) shift; if [ "$ALLTGT" = 1 ]; then crew_broadcast "$@"; else crew_send "$@"; fi;;
   inbox) shift; crew_inbox "$@";;
   log) shift; crew_log "$@";;

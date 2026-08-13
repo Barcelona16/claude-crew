@@ -4,3 +4,7 @@ registry
 proxy.log
 *.out
 .DS_Store
+
+# Python bytecode (joycode proxy)
+__pycache__/
+*.pyc
