@@ -6,10 +6,10 @@
 # in ~/.claude-code-router/config.json + ~/.config/claude-crew/keys.conf.
 #
 # What it does:
-#   1. put `crew` on PATH            5. write keys.conf + model presets
-#   2. check deps (node/tmux/py3)    6. install joycode proxy
-#   3. install claude-code-router    7. run CCR + joycode as launchd/systemd services
-#   4. merge CCR provider config     8. set the default model preset
+#   1. put `crew` on PATH            5. keys.conf + model presets
+#   2. check deps (node/tmux)        6. merge CCR provider config
+#   3. install claude-code-router    7. run CCR as launchd/systemd service
+#   4. JD gateway token (local)      8. set the default model preset
 #
 # Re-runnable (idempotent-ish): merges providers, backs up existing CCR config, skips keys.conf if present.
 set -uo pipefail
@@ -19,17 +19,6 @@ CFG="${XDG_CONFIG_HOME:-$HOME/.config}/claude-crew"
 CCRDIR="$HOME/.claude-code-router"
 CCRCFG="$CCRDIR/config.json"
 OS="$(uname -s)"
-
-# joycode needs a VS Code JoyCode login (the proxy reads that session). Skip it on headless
-# hosts (containers/cloud) automatically, or with --no-joycode.
-WANT_JOYCODE=1
-for a in "$@"; do [ "$a" = "--no-joycode" ] && WANT_JOYCODE=0; done
-if [ "$WANT_JOYCODE" = 1 ] \
-   && [ ! -f "$HOME/Library/Application Support/Code/User/globalStorage/state.vscdb" ] \
-   && [ ! -f "$HOME/.config/Code/User/globalStorage/state.vscdb" ]; then
-  WANT_JOYCODE=0
-  JOYCODE_OFF="no VS Code found (headless?) — skipping joycode models. To enable: install VS Code, log in to the JoyCode extension, then re-run setup.sh"
-fi
 
 say(){ printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 info(){ printf '   %s\n' "$*"; }
@@ -43,7 +32,6 @@ say "2) check dependencies"
 have tmux    || info "MISSING tmux — brew install tmux  /  apt install tmux"
 have claude  || info "MISSING claude (Claude Code CLI) — https://claude.com/claude-code"
 have node    || die  "node is required (for claude-code-router). Install Node.js first."
-have python3 || info "MISSING python3 — needed only for the joycode proxy"
 
 say "3) claude-code-router (CCR)"
 if ! have ccr; then
@@ -80,11 +68,10 @@ console.log("   merged "+n+" new provider(s); existing providers left untouched"
 NODE
 rm -f "$FILLED"
 
-say "6) keys.conf + model presets + joycode proxy"
+say "6) keys.conf + model presets"
 mkdir -p "$CFG/backends"
 if [ -f "$CFG/keys.conf" ]; then info "keys.conf exists — leaving as is"
 else { echo "# crew api keys — <alias>=<key>. Use: crew --key <alias> <session>"; echo "gw=$TOKEN"; } > "$CFG/keys.conf"; chmod 600 "$CFG/keys.conf"; info "wrote keys.conf (gw=<your token>)"; fi
-[ -f "$HERE/setup/joycode_proxy.py" ] && [ "$WANT_JOYCODE" = 1 ] && cp "$HERE/setup/joycode_proxy.py" "$CFG/joycode_proxy.py"
 mkpreset(){ cat > "$CFG/backends/$1.conf" <<EOF
 BASE_URL=http://127.0.0.1:3456
 MODEL=$2
@@ -96,20 +83,11 @@ EOF
 mkpreset "Claude-Opus-4.8-joybuilder" "opus,Claude-Opus-4.8-joybuilder"
 mkpreset "GLM-5.2"                    "glm,GLM-5.2"
 mkpreset "kimi-k3-joybuilder"         "kimi,kimi-k3-joybuilder"
-if [ "$WANT_JOYCODE" = 1 ]; then
-  for m in Claude-Opus-4.8-hq Claude-Opus-4.7-hq Claude-Sonnet-4.6-hq Claude-Opus-4.6-hq; do mkpreset "joycode_$m" "joycode,$m"; done
-  for m in JoyAI-Code-1.5 Kimi-K2.6 GLM-5.2 GLM-5.2-jcloud GLM-5.1 GLM-5 GLM-5-jcloud MiniMax-M3 MiniMax-M2.7 DeepSeek-V4-Pro Doubao-Seed-2.0-pro; do mkpreset "joycode_$m" "joycode-oai,$m"; done
-  info "joycode enabled — IMPORTANT: open VS Code and log in to the JoyCode extension"
-  info "  the proxy reads that live session; without a login, joycode_* models return 'Not logged in'"
-else
-  info "joycode disabled${JOYCODE_OFF:+ — $JOYCODE_OFF}"
-fi
 info "wrote $(ls "$CFG"/backends/*.conf 2>/dev/null | wc -l | tr -d ' ') model presets"
 
 say "7) run background services ($OS)"
-PY="$(command -v python3 || echo /usr/bin/python3)"; PROXY="$CFG/joycode_proxy.py"
-SVCS="ccr"; [ "$WANT_JOYCODE" = 1 ] && SVCS="ccr joycode"
-fill(){ sed -e "s|__NODE__|$NODE_BIN|g" -e "s|__NODE_DIR__|$NODE_DIR|g" -e "s|__CCR_CLI__|$CCR_CLI|g" -e "s|__PY__|$PY|g" -e "s|__PROXY__|$PROXY|g" -e "s|__HOME__|$HOME|g" "$1"; }
+SVCS="ccr"
+fill(){ sed -e "s|__NODE__|$NODE_BIN|g" -e "s|__NODE_DIR__|$NODE_DIR|g" -e "s|__CCR_CLI__|$CCR_CLI|g" -e "s|__HOME__|$HOME|g" "$1"; }
 port_up(){ (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&- 3<&-; return 0; }; return 1; }
 if [ "$OS" = Darwin ] && command -v launchctl >/dev/null 2>&1; then
   LA="$HOME/Library/LaunchAgents"; mkdir -p "$LA"; uid="$(id -u)"
@@ -133,7 +111,6 @@ else
   info "no launchd/systemd user session — launching detached (nohup, container mode)"
   nsvc(){ local n="$1" p="$2"; shift 2; port_up "$p" && { info "  $n already up (:$p)"; return; }; nohup "$@" >>"$CCRDIR/$n.nohup.log" 2>&1 & disown 2>/dev/null || true; info "  started $n (:$p, pid $!)"; }
   nsvc ccr 3456 "$NODE_BIN" "$CCR_CLI" start
-  [ "$WANT_JOYCODE" = 1 ] && nsvc joycode 8765 "$PY" "$PROXY"
 fi
 
 say "8) default model preset"
@@ -145,12 +122,10 @@ say "done ✅"
 cat <<EOF
 
   crew models                        # list all model presets
-  crew up                            # ensure CCR (:3456) + joycode (:8765) are up
+  crew up                            # ensure CCR (:3456) is up
   crew myproj --model GLM-5.2        # start a session on a model (auto-attaches)
-  crew myproj --model joycode_Kimi-K2.6
 
   Notes:
-   • joycode_* models need you logged in to JoyCode inside VS Code (the proxy reads that session).
    • Open a new shell (or: source $RC) so CREW_BACKEND takes effect.
    • Only ONE gateway token is wired by default; add more keys in $CFG/keys.conf and
      extra CCR providers if you want per-model key switching (crew --key ...).

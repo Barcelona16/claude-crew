@@ -24,7 +24,7 @@
 #   crew stop <name>      stop a session's tmux but KEEP its state (resume/switch later)
 #   crew kill <name> [--purge]   delete a session for good (tmux + id + registry; --purge also transcript)
 #   crew models           list available model presets (opus / kimi / glm / ...)
-#   crew up               ensure dependency services are up (CCR :3456 + joycode :8765)
+#   crew up               ensure dependency services are up (CCR :3456, + any extension services)
 #   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
 #   crew delegate --model B "task"   one-shot `claude -p` delegation (core; GKD optional)
 #   crew gkd-sync         export crew models into GKD's config/models.json (needs ext/gkd.sh)
@@ -193,11 +193,12 @@ apply_key_pin(){
   fi
 }
 
-# --- dependency services (CCR + joycode proxy) -------------------------------
-# crew's ccr-routed presets need claude-code-router (:3456) up, and joycode models also
-# need the joycode proxy (:8765). Both are meant to run as launchd agents (see README);
-# crew_dep_up brings one up on demand by kickstarting its agent if the port is down. Ports
-# and agent labels are overridable via env for other setups (e.g. the cloud).
+# --- dependency services (CCR) ----------------------------------------------
+# crew's ccr-routed presets need claude-code-router (:3456) up. It's meant to run as a
+# launchd agent (see README); crew_dep_up brings one up on demand by kickstarting its
+# agent if the port is down. Ports and agent labels are overridable via env for other
+# setups (e.g. the cloud). Optional extensions (ext/*.sh) can register extra services
+# via the crew_ext_dep_up hook below.
 crew_dep_up(){
   local name="$1" port="$2" mac_label="$3" linux_unit="$4" i
   port_listening "$port" && return 0
@@ -214,6 +215,13 @@ crew_dep_up(){
   log "WARN: $name (:$port) still down after restart."
   return 0
 }
+
+# Extension dependency hook. Core calls this after ensuring CCR, so an optional ext/*.sh
+# can bring up its own background service. Default is a no-op; an extension overrides it.
+# Arg $1 = the resolved model ("provider,realmodel", or empty in `crew up` = bring up all),
+# so the extension can decide whether its service is needed for this launch. Extensions
+# reuse crew_dep_up for the actual launchd/systemd kickstart.
+crew_ext_dep_up(){ :; }
 
 # --- interactive picker (--pick) --------------------------------------------
 # One menu per knob (model -> key -> tmux), skipping any the user already gave on
@@ -314,10 +322,10 @@ ensure_session(){
   apply_key_pin "$keyalias"
   local _inbound_override="$KEY_INBOUND_OVERRIDE"
   [ -n "$BK_ENSURE_CMD" ] && { log "ensuring backend '$backend' is up..."; bash -c "$BK_ENSURE_CMD" || log "WARN: backend ENSURE_CMD failed (continuing)"; }
-  # ccr-routed presets need CCR (:3456) up; joycode models also need the joycode proxy.
+  # ccr-routed presets need CCR (:3456) up; extensions may need their own service (hook).
   if [ "${BK_KEY_MODE:-}" = ccr ]; then
     crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}"
-    case "$BK_MODEL" in joycode,*|joycode-oai,*) crew_dep_up "joycode" "${CREW_JOYCODE_PORT:-8765}" "${CREW_JOYCODE_LABEL:-com.claudecrew.joycode}" "${CREW_JOYCODE_UNIT:-claudecrew-joycode}";; esac
+    crew_ext_dep_up "$BK_MODEL"
   fi
 
   local cwd; cwd=$(path_for_name "$name"); [ -z "$cwd" ] && cwd="$PWD"
@@ -401,7 +409,7 @@ crew_delegate_core(){
   [ -n "$BK_ENSURE_CMD" ] && { log "ensuring backend '$backend' is up..."; bash -c "$BK_ENSURE_CMD" >&2 || log "WARN: ENSURE_CMD failed (continuing)"; }
   if [ "${BK_KEY_MODE:-}" = ccr ]; then
     crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}" >&2
-    case "$BK_MODEL" in joycode,*|joycode-oai,*) crew_dep_up "joycode" "${CREW_JOYCODE_PORT:-8765}" "${CREW_JOYCODE_LABEL:-com.claudecrew.joycode}" "${CREW_JOYCODE_UNIT:-claudecrew-joycode}" >&2;; esac
+    crew_ext_dep_up "$BK_MODEL"
   fi
   local tok="$BK_TOKEN"
   [ -n "$BK_TOKEN_CMD" ] && tok=$(bash -c "$BK_TOKEN_CMD" 2>/dev/null)
@@ -563,7 +571,7 @@ EOF
     if tmux kill-session -t "$TMUX_PREFIX$2" 2>/dev/null; then log "stopped $2 (state kept; resume with: crew $2)"; else log "no live tmux session '$2' (nothing to stop)"; fi
     ;;
   models|backends) echo "== models =="; for b in $(list_backends_inline); do echo "  $b"; done;;
-  up) crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}"; crew_dep_up "joycode" "${CREW_JOYCODE_PORT:-8765}" "${CREW_JOYCODE_LABEL:-com.claudecrew.joycode}" "${CREW_JOYCODE_UNIT:-claudecrew-joycode}";;
+  up) crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}"; crew_ext_dep_up "";;
   keys) echo "== api keys ($KEYS_FILE) =="
     if [ ! -f "$KEYS_FILE" ]; then echo "  (no keys file; create it with lines: <alias>=<api-key>)";
     else
