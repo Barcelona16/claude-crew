@@ -11,7 +11,7 @@
 - **持久** —— 会话用 `--resume` 接回同一段对话,跨 tmux/宿主机重启不丢
 - **每会话可切模型 + key** —— `--model` / `--key` 两个旋钮(经 CCR),一个会话跑 Opus、另一个跑 GLM/kimi
 - **懒得记 flag?`--pick` 弹菜单选** —— `crew <名> --pick` 依次交互选 model → key → tmux(有 fzf 用 fzf,否则数字菜单);已有会话默认沿用上次配置,回车即可
-- **可走 JoyCode 额度** —— `joycode_*` 预设借你 VS Code 里 JoyCode 插件的登录态跑 Claude/GLM/kimi 等(需先在 VS Code 登录;仅本机,云端请用 GATEWAY_TOKEN,见下)
+- **多 key 自动降级** —— 可给一个模型配一串按优先级排的 key,最高优先级的连续失败(401/403/429/5xx)时,本地 `crew-proxy` 自动透明切到下一把,对 claude 无感知
 
 它是一个依赖极少的 bash 脚本(只要 tmux + Claude Code)。无守护进程、无配置服务、**不依赖任何具体项目**。
 
@@ -25,16 +25,18 @@ crew --help
 
 ## 给同事上手(一键 `setup.sh`,mac / Linux 通用)
 
-`install.sh` 只装 `crew` 工具本身(会话管理,配合你现成的 Claude 就能用)。要拿到「多模型 opus/glm/kimi/joycode 切换」这套,跑 `setup.sh` 一键配依赖:
+`install.sh` 只装 `crew` 工具本身(会话管理,配合你现成的 Claude 就能用)。要拿到「多模型 opus/glm/kimi 切换 + key 降级」这套,跑 `setup.sh` 一键配依赖:
 
 ```bash
 git clone <repo> && cd claude-crew
 GATEWAY_TOKEN=<你的JD网关token> bash setup.sh    # 或直接 bash setup.sh 交互输入 token
 ```
 
-它会:装 crew + claude-code-router(`npm i -g`)→ 用你的 token **生成/合并** CCR provider 配置(不动你已有的 provider)→ 铺模型预设 + `keys.conf` → 装 joycode 代理 → **macOS 用 launchd / Linux 用 systemd --user** 把 CCR(`:3456`)和 joycode(`:8765`)起成常驻服务 → 设默认模型。
+它会:装 crew + claude-code-router(`npm i -g`)→ 用你的 token **生成/合并** CCR provider 配置(不动你已有的 provider)→ 铺模型预设 + `keys.conf` + `key-policy.conf` → 装 `crew-proxy` → **macOS 用 launchd / Linux 用 systemd --user** 把 CCR(`:3456`)和 crew-proxy(`:8788`)起成常驻服务 → 设默认模型。
 
-**前提(各人自备)**:Node.js、tmux、Claude Code CLI、python3;**自己的 JD llm-gw token**(不能共用别人的,绑账号/额度);joycode 系模型需**在 VS Code 里登录 JoyCode**(代理读那个登录态)。
+**前提(各人自备)**:Node.js、tmux、Claude Code CLI、python3(crew-proxy 用);**自己的 JD llm-gw token**(不能共用别人的,绑账号/额度)。CCR 模板内部走 `llm-gw.jd.local`。
+
+> **想走 JoyCode 额度?** joycode 已从核心拆出,成为独立的内部插件仓 `claude-crew-joycode`(在 JD coding 上)。跑完核心 `setup.sh` 后再跑该插件的 `install.sh` 即可,它会补上 `joycode_*` 预设 + 代理。
 
 完事:`crew models` 看模型 · `crew up` 确保依赖在跑 · `crew <名> --model GLM-5.2` 开跑。**密钥只落本机**(`~/.claude-code-router/config.json`、`~/.config/claude-crew/keys.conf`),不进 git。
 
@@ -48,7 +50,7 @@ crew mysess --pick           # 弹菜单交互选 model → key → tmux(不用�
 crew ls                   # 列出会话(名字 / 状态 / 模型 / key)
 crew models               # 列出模型预设
 crew keys                 # 列出 API key 别名(掩码)
-crew up                   # 确保依赖服务(CCR / joycode 代理)在跑
+crew up                   # 确保依赖服务(CCR / crew-proxy)在跑
 crew attach mysess        # attach 观察
 crew kill mysess          # 关掉
 crew send bob "看下这段"  # 给另一个会话的信箱投消息(见下「会话间通信」)
@@ -68,10 +70,10 @@ crew inbox                # 读自己的信箱
 
 | 键 | 含义 |
 |-----|---------|
-| `BASE_URL` | `ANTHROPIC_BASE_URL`(通常指向 CCR `:3456`) |
+| `BASE_URL` | `ANTHROPIC_BASE_URL`(默认指向 crew-proxy `:8788`,它再转 CCR `:3456`) |
 | `MODEL` | `claude --model <MODEL>`;`ccr` 模式写成 `provider,realmodel` |
 | `TOKEN` / `TOKEN_CMD` / `TOKEN_ENV` | 入站 auth token(字面量 / 命令 stdout / 环境变量名) |
-| `KEY_MODE` | `token`(默认)/ `ccr` / `litellm` —— 见下表 |
+| `KEY_MODE` | `token`(默认)/ `ccr` —— 见下表 |
 | `ENV_EXTRA` | 注入会话的额外 `K=V`(如 `MAX_THINKING_TOKENS=0`) |
 | `DANGEROUS` | `1` → 强制 `--dangerously-skip-permissions`(bypass 现已全局默认开) |
 
@@ -80,63 +82,83 @@ crew inbox                # 读自己的信箱
 | KEY_MODE | 走法 | `--key <别名>` 效果 |
 |---|---|---|
 | `token`(默认) | 直连网关,入站 token 即网关凭证 | 把 `ANTHROPIC_AUTH_TOKEN` 换成 `keys.conf` 里那把 |
-| `ccr` | 走 [claude-code-router](https://github.com/musistudio/claude-code-router)`:3456`,`MODEL=provider,realmodel` | 换成"服务该模型且 api_key==该 key"的 CCR provider(从 CCR config 动态查) |
-| `litellm` | 走本地 LiteLLM | 按 key 起对应上游端口(主要给 `claude -p` 委派) |
+| `ccr` | 走 [claude-code-router](https://github.com/musistudio/claude-code-router)`:3456`(默认经 crew-proxy),`MODEL=provider,realmodel` | 换成"服务该模型且 api_key==该 key"的 CCR provider(从 CCR config 动态查) |
 
-**推荐 `ccr`** —— CCR 的 Anthropic↔OpenAI 流式翻译正确(交互会话可用,LiteLLM 的流式会吐空 delta),
+**推荐 `ccr`** —— CCR 的 Anthropic↔OpenAI 流式翻译正确(交互会话可用),
 key 也集中在 CCR config 一处管。`--key` 别名在 `~/.config/claude-crew/keys.conf`(`别名=key`),`crew keys` 掩码列出。
 要让"任意模型 × 任意 key"都能切,就在 CCR 里给每个模型都备好两把 key 的 provider。
 
-预设名**就是 CCR 里的模型名**(`crew models` 列出);joycode 服务的模型用 `joycode_<模型>` 前缀区分。joycode 有**两条路**:Claude 系走 `joycode,`(CCR Anthropic transformer → 代理 anthropic 端点),kimi / glm / JoyAI-Code / MiniMax / DeepSeek 等非 Claude 走 `joycode-oai,`(CCR OpenAI transformer → 代理 OpenAI 端点)—— 预设已配好,你只管 `crew --model joycode_<名>`。
+预设名**就是 CCR 里的模型名**(`crew models` 列出)。
 
 ```bash
 crew mysess --model Claude-Opus-4.8-joybuilder             # Opus-4.8(经 CCR)
 crew mysess --model Claude-Opus-4.8-joybuilder --key k8b04 # 换另一把 key(切到对应 CCR provider)
 crew mysess --model GLM-5.2 --key k19aa
 crew mysess --model kimi-k3-joybuilder                     # kimi(经 CCR)
-crew mysess --model joycode_Claude-Opus-4.7-hq            # joycode Claude 系(经 :8765)
-crew mysess --model joycode_Kimi-K2.6                     # joycode 非 Claude 系(kimi/glm 等,同经 :8765)
 crew keys                                                  # 看 key 别名
 ```
 
-## 依赖服务(CCR + joycode 代理)
+## 依赖服务(CCR + crew-proxy)
 
-`ccr` 预设依赖本地代理在跑:
+`ccr` 预设依赖两个本地服务在跑:
 
 - **CCR(claude-code-router)`:3456`** —— 统一入口,把 Claude Code 的 Anthropic 请求翻译/转发到各网关,
   并**按 provider 选上游 key**。所有 `ccr` 预设都经它。
-- **joycode 代理 `:8765`**(仅 `joycode_*` 模型需要)—— 读 VS Code 的 JoyCode 登录态、
-  HMAC 签名后转发到 JoyCode SaaS 网关。因为这套鉴权是定制的,CCR 无法替代,所以它必须单独跑。
+- **crew-proxy `:8788`** —— 坐在 claude 与 CCR 之间的薄代理,负责 **key 优先级 + 失败自动降级**。
+  某个模型在 `key-policy.conf` 里没配优先级时,它就是**透明转发**,单 key 用户完全无感。
 
-> **用 joycode 前必须先在 VS Code 登录 JoyCode 插件。** 代理不持有任何长期 key,它每次实时读你 VS Code
-> 里那次登录的会话(`state.vscdb` 里的 `jdhLoginInfo`)。没登录 → `joycode_*` 模型会返回 `Not logged in`。
-> - **本地**:插件自己续期,只要保持登录就长期可用,代理每次读最新会话。
-> - **分给别人**:各人用自己的 VS Code 账号登录即可,无需共享凭证。
-> - **云端 / 容器 / CI**:没有 VS Code 会话,这条路走不通 —— setup 会自动检测并跳过 joycode。
->   即便硬拷会话文件过去,里面的 `ptKey` 是会话令牌**会过期且无法自动续期**,只能短期用。
->   云端要用 Claude,请走 **GATEWAY_TOKEN**(llm-gw 长期令牌)那条路,即 `Claude-Opus-4.8-joybuilder` 等非 joycode 预设。
-
-两者建议挂 **launchd 常驻**(后台 + 崩溃自拉起 + 开机自启)。crew 会在起 `ccr` 会话时自动 ensure 依赖,
-也可手动 `crew up` 检查并按需拉起:
+预设的 `BASE_URL` 默认指向 crew-proxy;它再转发给 CCR。二者建议挂 **launchd 常驻**(后台 +
+崩溃自拉起 + 开机自启)。crew 会在起 `ccr` 会话时自动 ensure 依赖,也可手动 `crew up`:
 
 ```bash
-crew up                                  # 确保 CCR:3456 + joycode:8765 都在(按需 kickstart launchd)
+crew up                                  # 确保 CCR:3456 + crew-proxy:8788 都在(按需 kickstart launchd)
 ```
+
+### 多 key 自动降级
+
+给一个模型配一串按优先级(高→低)排列的 key,`crew-proxy` 会用最高优先级的 healthy key 转发;
+它连续失败到阈值(默认 3 次,状态码 401/403/429/5xx 或连接错误)就**熔断**该 key、冷却一段时间
+(默认 60s),并**在同一次请求里**透明切到下一把——claude 侧无感知。全部 key 都熔断时,用最高优先级
+那把硬转发,把上游真实错误透传出来(不假装成功)。
+
+在 `~/.config/claude-crew/key-policy.conf` 配置:
+
+```
+# <模型> = <别名1> <别名2> ...   (高优先级在前)
+Claude-Opus-4.8-joybuilder = k8b04 k8b05 k8b06
+```
+
+前提:每个别名都(a)在 `keys.conf` 里、(b)在 CCR config 里有一个"服务该模型且用这把 key"的 provider。
+可用环境变量调:`CREW_PROXY_FAILS`(熔断阈值)、`CREW_PROXY_COOLDOWN`(冷却秒数)、`CREW_PROXY_PORT`、
+`CREW_PROXY_DISABLE=1`(整体关掉、直连 CCR)。
+
+### 控制面板(dashboard)
+
+crew-proxy 自带一个本地控制面板,浏览器打开 **http://127.0.0.1:8788/dashboard** 即可(零依赖、
+和 proxy 同进程,原生 JS 每 3s 刷新)。看到:
+
+- **Keys**:每把 key 的健康/熔断状态、请求数、成功/失败、连续失败数、冷却倒计时
+- **Sessions**:所有 crew 会话(名/状态/模型/key/目录),每行可**点 kill** 或 **edit 改 model/key**
+- **Recent requests**:近期请求流(模型 · key · 状态 · 是否 failover)
+- **+ add key/provider**:填别名/key/模型/base_url 一键写入 CCR config(**写前自动备份** config.json,
+  之后 `crew up` 重载 CCR 生效)
+
+面板只监听 `127.0.0.1`(本机),写操作(kill / 改配置 / 加 provider)都做了输入校验防注入。
+本版**不统计 token/成本**(只统计请求次数),token 计量留作后续。
 
 装 launchd agent(macOS;plist 由 setup 生成在 `~/.claude-code-router/`):
 
 ```bash
-cp ~/.claude-code-router/com.claudecrew.ccr.plist     ~/Library/LaunchAgents/
-cp ~/.claude-code-router/com.claudecrew.joycode.plist ~/Library/LaunchAgents/
+cp ~/.claude-code-router/com.claudecrew.ccr.plist   ~/Library/LaunchAgents/
+cp ~/.claude-code-router/com.claudecrew.proxy.plist ~/Library/LaunchAgents/
 launchctl load -w ~/Library/LaunchAgents/com.claudecrew.ccr.plist
-launchctl load -w ~/Library/LaunchAgents/com.claudecrew.joycode.plist
+launchctl load -w ~/Library/LaunchAgents/com.claudecrew.proxy.plist
 # 改完 CCR config 后重启(不占终端):
 launchctl kickstart -k gui/$(id -u)/com.claudecrew.ccr
 ```
 
 > **别再前台 `ccr start`** —— 它是前台进程,交给 launchd 托管。端口/label 可用 `CREW_CCR_PORT` /
-> `CREW_CCR_LABEL` / `CREW_JOYCODE_PORT` / `CREW_JOYCODE_LABEL` 覆盖(便于云端等其它环境适配)。
-> joycode 代理脚本放在非 TCC 目录(如 `~/.config/claude-crew/`),否则 launchd 读 `~/Desktop` 会被 macOS 拒。
+> `CREW_CCR_LABEL` / `CREW_PROXY_PORT` / `CREW_PROXY_LABEL` 覆盖(便于云端等其它环境适配)。
 
 ## 程序化一次性委派
 

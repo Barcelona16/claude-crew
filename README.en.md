@@ -13,7 +13,7 @@ A *crew session* is a tmux session running `claude`, pinned to a **name**, a **b
 - **Persistence** — sessions `--resume` the same conversation across tmux/host restarts.
 - **Per-session model + key switching** — two knobs (`--model` / `--key`) over CCR; run one session on Opus, another on GLM/kimi.
 - **Don't want to remember flags? `--pick` pops a menu** — `crew <name> --pick` walks you through model → key → tmux (fzf if installed, else a numbered prompt); an existing session preselects its last config, just hit Enter.
-- **Ride your JoyCode quota** — `joycode_*` presets borrow your VS Code JoyCode extension login to run Claude/GLM/kimi etc. (log in to JoyCode in VS Code first; local only — use GATEWAY_TOKEN in the cloud, see below).
+- **Automatic multi-key failover** — give a model a priority-ordered list of keys; when the top one fails repeatedly (401/403/429/5xx), the local `crew-proxy` transparently switches to the next, invisibly to claude.
 
 It's a thin, dependency-light bash script (tmux + Claude Code). No daemon, no config server,
 **no dependency on any particular project**.
@@ -29,7 +29,7 @@ crew --help
 ## Onboarding a teammate (one-shot `setup.sh`, macOS / Linux)
 
 `install.sh` only installs the `crew` tool itself (session management on your existing Claude).
-To get the multi-model **opus/glm/kimi/joycode** switching, run `setup.sh` — it wires up the
+To get the multi-model **opus/glm/kimi** switching + key failover, run `setup.sh` — it wires up the
 dependencies in one go:
 
 ```bash
@@ -39,12 +39,17 @@ GATEWAY_TOKEN=<your JD gateway token> bash setup.sh   # or just `bash setup.sh` 
 
 It: installs crew + claude-code-router (`npm i -g`) → **generates/merges** the CCR provider
 config with your token (leaves your existing providers untouched) → writes model presets +
-`keys.conf` → installs the joycode proxy → runs CCR (`:3456`) and joycode (`:8765`) as
-background services (**launchd on macOS / systemd --user on Linux**) → sets the default model.
+`keys.conf` + `key-policy.conf` → installs `crew-proxy` → runs CCR (`:3456`) and crew-proxy
+(`:8788`) as background services (**launchd on macOS / systemd --user on Linux**) → sets the
+default model.
 
-**Prerequisites (each person's own)**: Node.js, tmux, Claude Code CLI, python3; **your own JD
-llm-gw token** (can't share someone else's — it's tied to their account/quota); joycode models
-need you **logged in to JoyCode inside VS Code** (the proxy reads that session).
+**Prerequisites (each person's own)**: Node.js, tmux, Claude Code CLI, python3 (used by
+crew-proxy); **your own JD llm-gw token** (can't share someone else's — it's tied to their
+account/quota). The internal CCR template routes through `llm-gw.jd.local`.
+
+> **Want to ride your JoyCode quota?** joycode has been split out of the core into a separate
+> internal plugin repo `claude-crew-joycode` (on JD coding). After the core `setup.sh`, run that
+> plugin's `install.sh` — it adds the `joycode_*` presets + proxy.
 
 Then: `crew models` · `crew up` (ensure deps up) · `crew <name> --model GLM-5.2`. **Keys stay
 local** (`~/.claude-code-router/config.json`, `~/.config/claude-crew/keys.conf`) — never committed.
@@ -59,7 +64,7 @@ crew mysess --pick           # interactive menus: model → key → tmux (no fla
 crew ls                   # list sessions (name / status / model / key)
 crew models               # list model presets
 crew keys                 # list API key aliases (masked)
-crew up                   # ensure dependency services are up (CCR / joycode proxy)
+crew up                   # ensure dependency services (CCR / crew-proxy) are up
 crew attach mysess        # attach to observe
 crew kill mysess          # stop a session
 crew send bob "look at X" # drop a message in another session's mailbox (see "Talking between sessions")
@@ -87,10 +92,10 @@ lists them. Each defines how it routes (`BASE_URL` / `MODEL` / `TOKEN`) and its 
 
 | Key | Meaning |
 |-----|---------|
-| `BASE_URL` | `ANTHROPIC_BASE_URL` (usually CCR `:3456`) |
+| `BASE_URL` | `ANTHROPIC_BASE_URL` (defaults to crew-proxy `:8788`, which forwards to CCR `:3456`) |
 | `MODEL` | `claude --model <MODEL>`; for `ccr` mode written as `provider,realmodel` |
 | `TOKEN` / `TOKEN_CMD` / `TOKEN_ENV` | inbound auth token (literal / command stdout / env var name) |
-| `KEY_MODE` | `token` (default) / `ccr` / `litellm` — see below |
+| `KEY_MODE` | `token` (default) / `ccr` — see below |
 | `ENV_EXTRA` | extra `K=V` injected into the session (e.g. `MAX_THINKING_TOKENS=0`) |
 | `DANGEROUS` | `1` → force `--dangerously-skip-permissions` (bypass is now on by default) |
 
@@ -99,74 +104,92 @@ lists them. Each defines how it routes (`BASE_URL` / `MODEL` / `TOKEN`) and its 
 | KEY_MODE | Routing | `--key <alias>` effect |
 |---|---|---|
 | `token` (default) | direct to the gateway; the inbound token is the credential | replaces `ANTHROPIC_AUTH_TOKEN` with the key from `keys.conf` |
-| `ccr` | via [claude-code-router](https://github.com/musistudio/claude-code-router) `:3456`, `MODEL=provider,realmodel` | swaps to the CCR provider serving that model with that key (resolved live from CCR's config) |
-| `litellm` | via a local LiteLLM | starts a per-key upstream port (mainly for `claude -p` delegation) |
+| `ccr` | via [claude-code-router](https://github.com/musistudio/claude-code-router) `:3456` (through crew-proxy by default), `MODEL=provider,realmodel` | swaps to the CCR provider serving that model with that key (resolved live from CCR's config) |
 
 **Prefer `ccr`** — CCR's Anthropic↔OpenAI streaming translation is correct (usable for
-interactive sessions; LiteLLM's emits empty deltas), and keys live in one place (CCR config).
+interactive sessions), and keys live in one place (CCR config).
 `--key` aliases are in `~/.config/claude-crew/keys.conf` (`alias=key`); `crew keys` lists them
 masked. To make "any model × any key" switchable, give each model a provider for both keys in CCR.
 
-Preset names **are the CCR model names** (`crew models`); joycode-served models are prefixed
-`joycode_<model>`. joycode has **two routes**: Claude-family models go via `joycode,` (CCR
-Anthropic transformer → the proxy's anthropic endpoint), while non-Claude ones (kimi / glm /
-JoyAI-Code / MiniMax / DeepSeek …) go via `joycode-oai,` (CCR OpenAI transformer → the proxy's
-OpenAI endpoint) — the presets are set up, so you just `crew --model joycode_<name>`.
+Preset names **are the CCR model names** (`crew models`).
 
 ```bash
 crew mysess --model Claude-Opus-4.8-joybuilder             # Opus-4.8 (via CCR)
 crew mysess --model Claude-Opus-4.8-joybuilder --key k8b04 # switch key (→ the matching CCR provider)
 crew mysess --model GLM-5.2 --key k19aa
 crew mysess --model kimi-k3-joybuilder                     # kimi (via CCR)
-crew mysess --model joycode_Claude-Opus-4.7-hq            # joycode Claude family (via the :8765 proxy)
-crew mysess --model joycode_Kimi-K2.6                     # joycode non-Claude (kimi/glm/etc, same proxy)
 crew keys                                                  # see key aliases
 ```
 
-## Dependency services (CCR + joycode proxy)
+## Dependency services (CCR + crew-proxy)
 
-`ccr` presets need local proxies running:
+`ccr` presets need two local services running:
 
 - **CCR (claude-code-router) `:3456`** — the single entry point; translates/forwards Claude
-  Code's Anthropic requests to each gateway and **picks the upstream key per provider**.
-- **joycode proxy `:8765`** (only for `joycode_*` models) — reads the VS Code JoyCode login,
-  HMAC-signs, and forwards to JoyCode's SaaS gateway. That auth is custom, so CCR can't replace
-  it — it must run separately.
+  Code's Anthropic requests to each gateway and **picks the upstream key per provider**. Every
+  `ccr` preset goes through it.
+- **crew-proxy `:8788`** — a thin proxy sitting between claude and CCR, responsible for **key
+  priority + automatic failover**. For a model with no priority list in `key-policy.conf` it's
+  just a **transparent forwarder**, entirely invisible to single-key users.
 
-> **You must log in to the JoyCode extension in VS Code before using joycode.** The proxy holds no
-> long-lived key; it reads your VS Code login session live (`jdhLoginInfo` in `state.vscdb`) on every
-> request. Not logged in → `joycode_*` models return `Not logged in`.
-> - **Local**: the extension refreshes the session itself, so it works long-term as long as you stay
->   logged in — the proxy always reads the latest session.
-> - **Sharing with others**: each person just logs in with their own VS Code account; no credential sharing.
-> - **Cloud / container / CI**: there's no VS Code session, so this path won't work — setup auto-detects
->   and skips joycode. Even if you copy the session file over, its `ptKey` is a session token that
->   **expires and can't auto-refresh**, so it's short-term only. To use Claude in the cloud, go through
->   **GATEWAY_TOKEN** (the long-lived llm-gw token) instead — i.e. the non-joycode presets like `Claude-Opus-4.8-joybuilder`.
-
-Run both as **launchd agents** (background + auto-restart + start at login). crew auto-ensures
-deps when starting a `ccr` session, and `crew up` checks/starts them on demand:
+A preset's `BASE_URL` defaults to crew-proxy; it then forwards to CCR. Run both as **launchd
+agents** (background + auto-restart + start at login). crew auto-ensures deps when starting a
+`ccr` session, or run `crew up` manually:
 
 ```bash
-crew up   # ensure CCR :3456 + joycode :8765 (kickstarts the launchd agents as needed)
+crew up   # ensure CCR :3456 + crew-proxy :8788 are up (kickstarts the launchd agents as needed)
 ```
+
+### Automatic multi-key failover
+
+Give a model a priority-ordered (high → low) list of keys and `crew-proxy` forwards through the
+highest-priority healthy key. When that key fails consecutively up to the threshold (default 3,
+on status 401/403/429/5xx or a connection error) it **trips** the key, cools it down for a while
+(default 60s), and transparently switches to the next one **within the same request** — claude
+sees nothing. When all keys are tripped it hard-forwards through the top key, surfacing the real
+upstream error (never faking success).
+
+Configure in `~/.config/claude-crew/key-policy.conf`:
+
+```
+# <model> = <alias1> <alias2> ...   (highest priority first)
+Claude-Opus-4.8-joybuilder = k8b04 k8b05 k8b06
+```
+
+Prerequisite: each alias must be (a) in `keys.conf` and (b) backed by a CCR provider that serves
+that model with that key. Tunable via env vars: `CREW_PROXY_FAILS` (trip threshold),
+`CREW_PROXY_COOLDOWN` (cooldown seconds), `CREW_PROXY_PORT`, and `CREW_PROXY_DISABLE=1` (turn it
+off entirely and connect straight to CCR).
+
+### Control dashboard
+
+crew-proxy ships a local control panel — open **http://127.0.0.1:8788/dashboard** in a browser
+(zero deps, same process as the proxy, vanilla JS refreshing every 3s). It shows:
+
+- **Keys** — each key's healthy/tripped state, request count, ok/fail, consecutive failures, cooldown
+- **Sessions** — every crew session (name/status/model/key/dir); each row has **kill** and **edit** (change model/key)
+- **Recent requests** — a live request feed (model · key · status · whether it failed over)
+- **+ add key/provider** — fill in alias/key/model/base_url to write a new provider into your CCR
+  config (**config.json is backed up first**; run `crew up` afterwards to reload CCR)
+
+The panel binds `127.0.0.1` only. Every write op (kill / edit / add provider) validates input to
+prevent injection. This version does **not** track token/cost (request counts only) — token
+accounting is left for a later iteration.
 
 Install the launchd agents (macOS; plists are generated under `~/.claude-code-router/`):
 
 ```bash
-cp ~/.claude-code-router/com.claudecrew.ccr.plist     ~/Library/LaunchAgents/
-cp ~/.claude-code-router/com.claudecrew.joycode.plist ~/Library/LaunchAgents/
+cp ~/.claude-code-router/com.claudecrew.ccr.plist   ~/Library/LaunchAgents/
+cp ~/.claude-code-router/com.claudecrew.proxy.plist ~/Library/LaunchAgents/
 launchctl load -w ~/Library/LaunchAgents/com.claudecrew.ccr.plist
-launchctl load -w ~/Library/LaunchAgents/com.claudecrew.joycode.plist
+launchctl load -w ~/Library/LaunchAgents/com.claudecrew.proxy.plist
 # restart after editing CCR config (no terminal needed):
 launchctl kickstart -k gui/$(id -u)/com.claudecrew.ccr
 ```
 
 > **Don't run `ccr start` in the foreground** — it's a foreground process; let launchd manage it.
-> Override ports/labels with `CREW_CCR_PORT` / `CREW_CCR_LABEL` / `CREW_JOYCODE_PORT` /
-> `CREW_JOYCODE_LABEL` (handy for other environments like the cloud). Keep the joycode proxy
-> script outside TCC-protected dirs (e.g. `~/.config/claude-crew/`), else launchd reading
-> `~/Desktop` is denied by macOS.
+> Override ports/labels with `CREW_CCR_PORT` / `CREW_CCR_LABEL` / `CREW_PROXY_PORT` /
+> `CREW_PROXY_LABEL` (handy for adapting to other environments like the cloud).
 
 ## Programmatic one-shot delegation
 
