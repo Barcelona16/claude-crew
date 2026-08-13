@@ -553,30 +553,54 @@ set -- ${POS[@]+"${POS[@]}"}
 
 case "${1:-}" in
   ls)
-    echo "== crew sessions =="
     # List every session crew knows about from on-disk state (registry + .sid files),
     # NOT just the live tmux ones. tmux dies on host restart, but a session's id +
     # transcript persist on disk, so `crew <name>` still resumes it with full history.
     # Status: live = running in tmux now | resumable = dormant, has a saved transcript
     #         (`crew <name>` restores it) | new = has an id but no transcript yet.
+    # `crew ls --json` emits the same data as a JSON array (consumed by crew-proxy's
+    # dashboard) — one code path computes status, so CLI and dashboard never diverge.
+    ls_json=0; [ "${2:-}" = "--json" ] && ls_json=1
     names=$( { [ -f "$REG" ] && awk -F'\t' 'NF>=2{print $2}' "$REG"
                ls "$CREW_STATE"/*.sid 2>/dev/null | sed 's:.*/::;s:\.sid$::'
              } | sort -u )
-    if [ -z "$names" ]; then echo "  (none)"; else
-      printf '  %-20s %-9s %-14s %-10s %s\n' NAME STATUS MODEL KEY DIR
+    # emit one session's fields; sets globals nm/st/bk/ky/cwd for the caller to format
+    _ls_row(){
+      cwd=$(path_for_name "$nm"); [ -n "$cwd" ] || cwd="?"
+      local sidf="$CREW_STATE/$nm.sid"
+      if tmux has-session -t "$TMUX_PREFIX$nm" 2>/dev/null; then st="live"
+      elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$(cat "$sidf")".jsonl >/dev/null 2>&1; then st="resumable"
+      else st="new"; fi
+      bk=$(cat "$CREW_STATE/$nm.backend" 2>/dev/null || echo "${CREW_BACKEND:-default}")
+      ky=$(cat "$CREW_STATE/$nm.key" 2>/dev/null); [ -n "$ky" ] || ky="-"
+    }
+    if [ "$ls_json" = 1 ]; then
+      # JSON-escape a string (backslash, quote, control chars) for safe embedding.
+      _json_str(){ printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g'; }
+      printf '{"sessions":['
+      first=1
       while IFS= read -r nm; do
         [ -n "$nm" ] || continue
-        cwd=$(path_for_name "$nm"); [ -n "$cwd" ] || cwd="?"
-        sidf="$CREW_STATE/$nm.sid"
-        if tmux has-session -t "$TMUX_PREFIX$nm" 2>/dev/null; then st="live"
-        elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$(cat "$sidf")".jsonl >/dev/null 2>&1; then st="resumable"
-        else st="new"; fi
-        bk=$(cat "$CREW_STATE/$nm.backend" 2>/dev/null || echo "${CREW_BACKEND:-default}")
-        ky=$(cat "$CREW_STATE/$nm.key" 2>/dev/null); [ -n "$ky" ] || ky="-"
-        printf '  %-20s %-9s %-14s %-10s %s\n' "$nm" "$st" "$bk" "$ky" "$cwd"
+        _ls_row
+        [ "$first" = 1 ] && first=0 || printf ','
+        printf '{"name":"%s","status":"%s","model":"%s","key":"%s","dir":"%s"}' \
+          "$(_json_str "$nm")" "$st" "$(_json_str "$bk")" "$(_json_str "$ky")" "$(_json_str "$cwd")"
       done <<EOF
 $names
 EOF
+      printf ']}\n'
+    else
+      echo "== crew sessions =="
+      if [ -z "$names" ]; then echo "  (none)"; else
+        printf '  %-20s %-9s %-14s %-10s %s\n' NAME STATUS MODEL KEY DIR
+        while IFS= read -r nm; do
+          [ -n "$nm" ] || continue
+          _ls_row
+          printf '  %-20s %-9s %-14s %-10s %s\n' "$nm" "$st" "$bk" "$ky" "$cwd"
+        done <<EOF
+$names
+EOF
+      fi
     fi
     ;;
   stop) [ -n "${2:-}" ] || die "usage: crew stop <name>"
