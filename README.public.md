@@ -126,6 +126,20 @@ default = k1 k2 k3
 可用环境变量调:`CREW_PROXY_FAILS`(熔断阈值)、`CREW_PROXY_COOLDOWN`(冷却秒数)、`CREW_PROXY_PORT`、
 `CREW_PROXY_DISABLE=1`(整体关掉、直连 CCR)。
 
+### 控制面板(dashboard)
+
+crew-proxy 自带一个本地控制面板,浏览器打开 **http://127.0.0.1:8788/dashboard** 即可(零依赖、
+和 proxy 同进程,原生 JS 每 3s 刷新)。看到:
+
+- **Keys**:每把 key 的健康/熔断状态、请求数、成功/失败、连续失败数、冷却倒计时
+- **Sessions**:所有 crew 会话(名/状态/模型/key/目录),每行可**点 kill** 或 **edit 改 model/key**
+- **Recent requests**:近期请求流(模型 · key · 状态 · 是否 failover)
+- **+ add key/provider**:填别名/key/模型/base_url 一键写入 CCR config(**写前自动备份** config.json,
+  之后 `crew up` 重载 CCR 生效)
+
+面板只监听 `127.0.0.1`(本机),写操作(kill / 改配置 / 加 provider)都做了输入校验防注入。
+本版**不统计 token/成本**(只统计请求次数),token 计量留作后续。
+
 装 launchd agent(macOS;plist 由 setup 生成在 `~/.claude-code-router/`):
 
 ```bash

@@ -155,6 +155,21 @@ that model with that key. Tunable via env vars: `CREW_PROXY_FAILS` (trip thresho
 `CREW_PROXY_COOLDOWN` (cooldown seconds), `CREW_PROXY_PORT`, and `CREW_PROXY_DISABLE=1` (turn it
 off entirely and connect straight to CCR).
 
+### Control dashboard
+
+crew-proxy ships a local control panel — open **http://127.0.0.1:8788/dashboard** in a browser
+(zero deps, same process as the proxy, vanilla JS refreshing every 3s). It shows:
+
+- **Keys** — each key's healthy/tripped state, request count, ok/fail, consecutive failures, cooldown
+- **Sessions** — every crew session (name/status/model/key/dir); each row has **kill** and **edit** (change model/key)
+- **Recent requests** — a live request feed (model · key · status · whether it failed over)
+- **+ add key/provider** — fill in alias/key/model/base_url to write a new provider into your CCR
+  config (**config.json is backed up first**; run `crew up` afterwards to reload CCR)
+
+The panel binds `127.0.0.1` only. Every write op (kill / edit / add provider) validates input to
+prevent injection. This version does **not** track token/cost (request counts only) — token
+accounting is left for a later iteration.
+
 Install the launchd agents (macOS; plists are generated under `~/.claude-code-router/`):
 
 ```bash
