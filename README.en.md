@@ -69,7 +69,10 @@ collision). The directory↔name map and each session's id live under
 the same conversation.
 
 **Flags:** `--model <name>` pick a model preset (`--backend` is a hidden alias) · `--key <alias>`
-switch the API key (`--key -` clears) · `--fresh` start a new conversation (no `--resume`) ·
+switch the API key (`--key -` clears) · `--pick` (`-p`) **interactive menus for model → key → tmux**
+(uses fzf if installed, else a numbered prompt; any knob you also pass on the CLI is skipped;
+when the current dir already has a session, defaults preselect its last model/key/tmux) ·
+`--fresh` start a new conversation (no `--resume`) ·
 `--safe` drop the bypass (**bypass is ON by default**; `CREW_YOLO=0` disables globally). A
 `--model`/`--key` switch on an interactive TTY restarts (keeps history via `--resume`) and **auto-attaches**.
 
@@ -126,6 +129,17 @@ crew keys                                                  # see key aliases
 - **joycode proxy `:8765`** (only for `joycode_*` models) — reads the VS Code JoyCode login,
   HMAC-signs, and forwards to JoyCode's SaaS gateway. That auth is custom, so CCR can't replace
   it — it must run separately.
+
+> **You must log in to the JoyCode extension in VS Code before using joycode.** The proxy holds no
+> long-lived key; it reads your VS Code login session live (`jdhLoginInfo` in `state.vscdb`) on every
+> request. Not logged in → `joycode_*` models return `Not logged in`.
+> - **Local**: the extension refreshes the session itself, so it works long-term as long as you stay
+>   logged in — the proxy always reads the latest session.
+> - **Sharing with others**: each person just logs in with their own VS Code account; no credential sharing.
+> - **Cloud / container / CI**: there's no VS Code session, so this path won't work — setup auto-detects
+>   and skips joycode. Even if you copy the session file over, its `ptKey` is a session token that
+>   **expires and can't auto-refresh**, so it's short-term only. To use Claude in the cloud, go through
+>   **GATEWAY_TOKEN** (the long-lived llm-gw token) instead — i.e. the non-joycode presets like `Claude-Opus-4.8-joybuilder`.
 
 Run both as **launchd agents** (background + auto-restart + start at login). crew auto-ensures
 deps when starting a `ccr` session, and `crew up` checks/starts them on demand:

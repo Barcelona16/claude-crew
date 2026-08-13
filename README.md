@@ -55,7 +55,7 @@ crew inbox                # 读自己的信箱
 会话名缺省=当前目录名(重名自动加数字)。目录↔名字映射、每个会话的 session-id 存在
 `~/.local/share/claude-crew/`,所以在同一目录再敲 `crew` 会接回同一段对话。
 
-**Flags:** `--model <名>` 选模型预设(`--backend` 是隐藏别名)· `--key <别名>` 切 API key(`--key -` 清除)· `--fresh` 开全新对话(不 `--resume`)· `--safe` 不加 bypass(**bypass 现已默认开**;`CREW_YOLO=0` 全局关)。切 `--model`/`--key` 后在交互终端会**自动 attach**。
+**Flags:** `--model <名>` 选模型预设(`--backend` 是隐藏别名)· `--key <别名>` 切 API key(`--key -` 清除)· `--pick`(`-p`)**交互式菜单依次选 model → key → tmux**(装了 fzf 用 fzf 模糊搜索,否则数字菜单;命令行已给的那项自动跳过;当前目录已有会话时默认高亮它上次的配置,回车即沿用)· `--fresh` 开全新对话(不 `--resume`)· `--safe` 不加 bypass(**bypass 现已默认开**;`CREW_YOLO=0` 全局关)。切 `--model`/`--key` 后在交互终端会**自动 attach**。
 
 ## 模型预设(走 CCR)
 
@@ -104,6 +104,14 @@ crew keys                                                  # 看 key 别名
   并**按 provider 选上游 key**。所有 `ccr` 预设都经它。
 - **joycode 代理 `:8765`**(仅 `joycode_*` 模型需要)—— 读 VS Code 的 JoyCode 登录态、
   HMAC 签名后转发到 JoyCode SaaS 网关。因为这套鉴权是定制的,CCR 无法替代,所以它必须单独跑。
+
+> **用 joycode 前必须先在 VS Code 登录 JoyCode 插件。** 代理不持有任何长期 key,它每次实时读你 VS Code
+> 里那次登录的会话(`state.vscdb` 里的 `jdhLoginInfo`)。没登录 → `joycode_*` 模型会返回 `Not logged in`。
+> - **本地**:插件自己续期,只要保持登录就长期可用,代理每次读最新会话。
+> - **分给别人**:各人用自己的 VS Code 账号登录即可,无需共享凭证。
+> - **云端 / 容器 / CI**:没有 VS Code 会话,这条路走不通 —— setup 会自动检测并跳过 joycode。
+>   即便硬拷会话文件过去,里面的 `ptKey` 是会话令牌**会过期且无法自动续期**,只能短期用。
+>   云端要用 Claude,请走 **GATEWAY_TOKEN**(llm-gw 长期令牌)那条路,即 `Claude-Opus-4.8-joybuilder` 等非 joycode 预设。
 
 两者建议挂 **launchd 常驻**(后台 + 崩溃自拉起 + 开机自启)。crew 会在起 `ccr` 会话时自动 ensure 依赖,
 也可手动 `crew up` 检查并按需拉起:

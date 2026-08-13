@@ -12,7 +12,7 @@
 # The built-in "default" backend is just plain Claude (your ambient config).
 #
 # USAGE
-#   crew [--model M] [--key A] [--fresh] [--safe] [--no-tmux] [name] [task...]
+#   crew [--model M] [--key A] [--pick] [--fresh] [--safe] [--no-tmux] [name] [task...]
 #                         start/continue a session (auto-attaches when interactive)
 #   crew                  ensure + attach the session for the current directory
 #   crew <name>           ensure + attach the named session
@@ -42,6 +42,11 @@
 #   --key A       use api-key alias A (from ~/.config/claude-crew/keys.conf). Works for every
 #                 model (direct-gateway = inbound token; litellm = per-key upstream). Remembered
 #                 per session; a live switch restarts + attaches. `--key -` clears the pin.
+#   --pick, -p    interactively choose model, then key, then tmux mode from menus
+#                 (fzf if installed, else a numbered bash prompt). Any knob you also
+#                 pass explicitly (--model/--key/--tmux/--no-tmux) is skipped. Defaults
+#                 preselect the existing session's model/key/tmux when it already exists,
+#                 else CREW_BACKEND / no key / tmux. Saves typing three flags every time.
 #   --fresh       start a brand-new conversation (do not --resume old history)
 #   --yolo        add --dangerously-skip-permissions (ON by default; see --safe)
 #   --safe        DON'T add --dangerously-skip-permissions (opt out of the default
@@ -193,6 +198,62 @@ crew_dep_up(){
   for i in $(seq 1 12); do port_listening "$port" && { log "$name up"; return 0; }; sleep 1; done
   log "WARN: $name (:$port) still down after restart."
   return 0
+}
+
+# --- interactive picker (--pick) --------------------------------------------
+# One menu per knob (model -> key -> tmux), skipping any the user already gave on
+# the CLI. Defaults come from the session's remembered state when it exists
+# ($name.backend / $name.key), else from CREW_BACKEND / no-key / tmux. fzf if
+# present (fuzzy filter), else bash `select`. Reads/writes the global BACKEND,
+# BACKEND_EXPLICIT, KEY, KEY_EXPLICIT, NO_TMUX so the rest of the flow is unchanged.
+# All prompts go to stderr (fzf uses the tty); only the chosen value is captured.
+_pick_one(){  # _pick_one <title> <default_line>  (options on stdin, one per line) -> chosen line on stdout
+  local title="$1" def="$2" chosen=""
+  local opts=() line
+  while IFS= read -r line; do [ -n "$line" ] && opts+=("$line"); done
+  if command -v fzf >/dev/null 2>&1; then
+    # Put the default first so fzf's cursor starts on it — Enter keeps the default.
+    # Esc/no-match => empty => falls through to the default below.
+    local ordered; ordered=$( { [ -n "$def" ] && printf '%s\n' "$def"; local o; for o in "${opts[@]}"; do [ "$o" = "$def" ] || printf '%s\n' "$o"; done; } )
+    chosen=$(printf '%s\n' "$ordered" | fzf --height=40% --reverse --prompt="$title > " \
+            --header="Enter=select  Esc=keep default [$def]" 2>/dev/tty) || chosen=""
+  else
+    local i
+    printf '\n== %s ==  (number, or Enter to keep default: %s)\n' "$title" "$def" >&2
+    i=1; for line in "${opts[@]}"; do printf '  %2d) %s%s\n' "$i" "$line" "$([ "$line" = "$def" ] && printf '  (default)')" >&2; i=$((i+1)); done
+    local reply; printf '  choose > ' >&2; read -r reply </dev/tty
+    if [ -z "$reply" ]; then chosen="$def"
+    elif [ "$reply" -ge 1 ] 2>/dev/null && [ "$reply" -le "${#opts[@]}" ] 2>/dev/null; then chosen="${opts[$((reply-1))]}"
+    else chosen="$def"; fi
+  fi
+  [ -z "$chosen" ] && chosen="$def"
+  printf '%s' "$chosen"
+}
+interactive_pick(){  # interactive_pick <session-name>
+  local name="$1"
+  # Session-remembered defaults win over global defaults when this session already exists.
+  local def_bk="${CREW_BACKEND:-default}"; [ -f "$CREW_STATE/$name.backend" ] && def_bk=$(cat "$CREW_STATE/$name.backend")
+  local def_key=""; [ -f "$CREW_STATE/$name.key" ] && def_key=$(cat "$CREW_STATE/$name.key")
+  local def_key_disp; def_key_disp=$([ -n "$def_key" ] && [ "$def_key" != "-" ] && printf '%s' "$def_key" || printf '(backend default)')
+
+  # model — skip if --model was given on the CLI
+  if [ "${BACKEND_EXPLICIT:-0}" != 1 ]; then
+    local chosen; chosen=$(list_backends_inline | tr ' ' '\n' | awk 'NF' | _pick_one "pick model" "$def_bk")
+    BACKEND="$chosen"; BACKEND_EXPLICIT=1
+  fi
+  # key — skip if --key was given. First option "(backend default)" clears the pin.
+  if [ "${KEY_EXPLICIT:-0}" != 1 ]; then
+    local chosen; chosen=$( { echo "(backend default)"; list_key_aliases; } | awk 'NF' | _pick_one "pick key" "$def_key_disp")
+    case "$chosen" in "(backend default)"|"") KEY="-";; *) KEY="$chosen";; esac
+    KEY_EXPLICIT=1
+  fi
+  # tmux — skip if --tmux/--no-tmux was given
+  if [ "${NO_TMUX_EXPLICIT:-0}" != 1 ]; then
+    local def_tm; def_tm=$([ "$NO_TMUX" = 1 ] && printf 'no-tmux (foreground)' || printf 'tmux (background, default)')
+    local chosen; chosen=$(printf 'tmux (background, default)\nno-tmux (foreground)\n' | _pick_one "tmux mode" "$def_tm")
+    case "$chosen" in no-tmux*) NO_TMUX=1;; *) NO_TMUX=0;; esac
+  fi
+  log "picked -> model: $BACKEND, key: $([ "$KEY" = "-" ] && echo '<backend default>' || echo "$KEY"), tmux: $([ "$NO_TMUX" = 1 ] && echo off || echo on)"
 }
 
 # --- session lifecycle ------------------------------------------------------
@@ -419,7 +480,7 @@ crew_log(){
 }
 
 # --- arg parsing ------------------------------------------------------------
-BACKEND="${CREW_BACKEND:-default}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; NO_TMUX="${CREW_NO_TMUX:-0}"; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
+BACKEND="${CREW_BACKEND:-default}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; NO_TMUX="${CREW_NO_TMUX:-0}"; NO_TMUX_EXPLICIT=0; PICK=0; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --model|--backend) BACKEND="${2:?--model needs a value (see: crew models)}"; BACKEND_EXPLICIT=1; shift 2;;
@@ -429,8 +490,9 @@ while [ $# -gt 0 ]; do
     --fresh) FRESH=1; shift;;
     --yolo)  YOLO=1; shift;;
     --safe|--no-yolo) YOLO=0; shift;;
-    --no-tmux) NO_TMUX=1; shift;;
-    --tmux)    NO_TMUX=0; shift;;
+    --no-tmux) NO_TMUX=1; NO_TMUX_EXPLICIT=1; shift;;
+    --tmux)    NO_TMUX=0; NO_TMUX_EXPLICIT=1; shift;;
+    --pick|-p) PICK=1; shift;;
     --from) FROM="${2:?--from needs a value}"; shift 2;;
     --nudge) NUDGE=1; shift;;
     --peek) PEEK=1; shift;;
@@ -510,13 +572,17 @@ EOF
   inbox) shift; crew_inbox "$@";;
   log) shift; crew_log "$@";;
   ""|-h|--help)
-    if [ "${1:-}" = "" ]; then name=$(resolve_name_for_cwd "$PWD"); ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO" "$NO_TMUX"; exec tmux -u attach -t "$TMUX_PREFIX$name"; fi
+    if [ "${1:-}" = "" ]; then name=$(resolve_name_for_cwd "$PWD"); [ "$PICK" = 1 ] && interactive_pick "$name"; ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO" "$NO_TMUX"; exec tmux -u attach -t "$TMUX_PREFIX$name"; fi
     awk 'NR>=2{ if($0 !~ /^#/) exit; sub(/^# ?/,""); print }' "$0";;
   *)
     first="$1"; shift || true; rest="$*"
     if { [ -f "$REG" ] && awk -F'\t' -v m="$first" '$2==m{ok=1}END{exit !ok}' "$REG"; } || [[ "$first" =~ ^[A-Za-z0-9._-]{1,32}$ ]]; then
       name=$(resolve_explicit_name "$first" "$PWD"); task="$rest"
     else name=$(resolve_name_for_cwd "$PWD"); task="$first${rest:+ $rest}"; fi
+    # --pick: interactive model/key/tmux menus (skips any knob already on the CLI).
+    # Must run AFTER name resolution (defaults read from the session's saved state)
+    # and BEFORE the --no-tmux+task reconciliation below.
+    [ "$PICK" = 1 ] && interactive_pick "$name"
     # A queued task needs tmux + send-keys to deliver, so --no-tmux + task can't coexist:
     # fall back to tmux for this launch and note it.
     if [ "$NO_TMUX" = 1 ] && [ -n "$task" ]; then

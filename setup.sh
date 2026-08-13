@@ -27,7 +27,8 @@ for a in "$@"; do [ "$a" = "--no-joycode" ] && WANT_JOYCODE=0; done
 if [ "$WANT_JOYCODE" = 1 ] \
    && [ ! -f "$HOME/Library/Application Support/Code/User/globalStorage/state.vscdb" ] \
    && [ ! -f "$HOME/.config/Code/User/globalStorage/state.vscdb" ]; then
-  WANT_JOYCODE=0; JOYCODE_OFF="no VS Code JoyCode login found (headless?) — skipping joycode models"
+  WANT_JOYCODE=0
+  JOYCODE_OFF="no VS Code found (headless?) — skipping joycode models. To enable: install VS Code, log in to the JoyCode extension, then re-run setup.sh"
 fi
 
 say(){ printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -98,6 +99,8 @@ mkpreset "kimi-k3-joybuilder"         "kimi,kimi-k3-joybuilder"
 if [ "$WANT_JOYCODE" = 1 ]; then
   for m in Claude-Opus-4.8-hq Claude-Opus-4.7-hq Claude-Sonnet-4.6-hq Claude-Opus-4.6-hq; do mkpreset "joycode_$m" "joycode,$m"; done
   for m in JoyAI-Code-1.5 Kimi-K2.6 GLM-5.2 GLM-5.2-jcloud GLM-5.1 GLM-5 GLM-5-jcloud MiniMax-M3 MiniMax-M2.7 DeepSeek-V4-Pro Doubao-Seed-2.0-pro; do mkpreset "joycode_$m" "joycode-oai,$m"; done
+  info "joycode enabled — IMPORTANT: open VS Code and log in to the JoyCode extension"
+  info "  the proxy reads that live session; without a login, joycode_* models return 'Not logged in'"
 else
   info "joycode disabled${JOYCODE_OFF:+ — $JOYCODE_OFF}"
 fi
