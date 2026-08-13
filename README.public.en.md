@@ -170,27 +170,19 @@ launchctl kickstart -k gui/$(id -u)/com.claudecrew.ccr
 > Override ports/labels with `CREW_CCR_PORT` / `CREW_CCR_LABEL` / `CREW_PROXY_PORT` /
 > `CREW_PROXY_LABEL` (handy for adapting to other environments like the cloud).
 
-## Optional extension: GKD programmatic delegation
+## Programmatic one-shot delegation
 
-Core crew = tmux + CCR model/key switching. Optional add-ons live as `ext/*.sh`, sourced at
-startup from `$CREW_HOME/ext/` (loaded if present; pure core otherwise). `crew delegate` uses
-crew's **own** one-shot `claude -p` delegation logic by default and **depends on no external
-tool**:
-
-```bash
-crew delegate --model default "rewrite these 50 files to X"   # programmatic one-shot delegation, result returned
-```
-
-[GKD](https://github.com/alvis-HaoH/gkd) is an optional extension for more complex multi-agent
-orchestration; it's enabled only once installed:
+`crew delegate` spawns a `claude -p --model X` sub-process to do the work and prints just the
+**result** to stdout — no tmux, no session, no `--resume`. Handy in scripts for "run a one-shot
+task on some model and hand back the result":
 
 ```bash
-cp ext/gkd.sh ~/.config/claude-crew/ext/       # install the extension
-export GKD_DIR=/path/to/gkd                     # point at your GKD checkout
-crew gkd-sync                                    # sync crew presets into GKD's models.json
+crew delegate --model default "rewrite these 50 files to X"   # one-shot delegation, result to stdout
 ```
 
-Core session management depends on neither GKD nor any particular project.
+It reuses crew's model presets + `--key` logic and depends on no external tool. Core session
+management depends on no particular project. For heavier multi-agent orchestration, write your
+own `ext/*.sh` extension (sourced at startup from `$CREW_HOME/ext/` if present).
 
 ## Talking between sessions (async mailbox)
 

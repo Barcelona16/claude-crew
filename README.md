@@ -138,20 +138,17 @@ launchctl kickstart -k gui/$(id -u)/com.claudecrew.ccr
 > `CREW_CCR_LABEL` / `CREW_JOYCODE_PORT` / `CREW_JOYCODE_LABEL` 覆盖(便于云端等其它环境适配)。
 > joycode 代理脚本放在非 TCC 目录(如 `~/.config/claude-crew/`),否则 launchd 读 `~/Desktop` 会被 macOS 拒。
 
-## 可选扩展:GKD 程序化委派
+## 程序化一次性委派
 
-核心 crew = tmux + CCR 切模型/key。可选扩展放在 `ext/*.sh`,crew 启动时从 `$CREW_HOME/ext/` 加载
-(有就加载,没有就是纯核心)。[GKD](https://github.com/alvis-HaoH/gkd)(搞快点)做**程序化一次性委派**:
-起一个 `claude -p --model X` 子进程干活、只把**结果**回传。启用:
+`crew delegate` 起一个 `claude -p --model X` 子进程干活、只把**结果**打到 stdout ——
+没有 tmux、没有会话、不 `--resume`。适合脚本里"让某个模型跑个一次性任务、拿结果回来":
 
 ```bash
-cp ext/gkd.sh ~/.config/claude-crew/ext/       # 装扩展
-export GKD_DIR=/path/to/gkd                     # 指向你的 GKD checkout
-crew delegate --model GLM-5.2 "把这50个文件改成 X"  # 程序化委派,拿结果回来
-crew gkd-sync                                    # 把 crew 预设同步进 GKD models.json
+crew delegate --model GLM-5.2 "把这50个文件改成 X"   # 一次性委派,结果回 stdout
 ```
 
-没装扩展时,`delegate`/`gkd-sync` 会提示如何安装。核心会话管理不依赖 GKD,也不依赖任何具体项目。
+它复用 crew 的模型预设 + `--key` 逻辑,不依赖任何外部工具。核心会话管理不依赖任何具体项目。
+需要更复杂的多 agent 编排,可自己写 `ext/*.sh` 扩展(crew 启动时从 `$CREW_HOME/ext/` 加载,有就加载)。
 
 ## 会话间通信(异步信箱)
 

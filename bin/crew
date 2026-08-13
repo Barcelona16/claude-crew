@@ -26,8 +26,7 @@
 #   crew models           list available model presets (opus / kimi / glm / ...)
 #   crew up               ensure dependency services are up (CCR :3456, + any extension services)
 #   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
-#   crew delegate --model B "task"   one-shot `claude -p` delegation (core; GKD optional)
-#   crew gkd-sync         export crew models into GKD's config/models.json (needs ext/gkd.sh)
+#   crew delegate --model B "task"   one-shot `claude -p` delegation (result to stdout)
 #   crew send [--from X] [--nudge] <name> "msg"   drop a message in <name>'s mailbox
 #   crew send --all [--nudge] "msg"               broadcast to all running sessions
 #   crew inbox [--peek] [<name>]                  read (and consume) your mailbox
@@ -60,10 +59,8 @@
 #                 task (tasks need tmux + send-keys). Alias to opt back in: --tmux.
 #                 Set CREW_NO_TMUX=1 to make foreground the default.
 #
-# GKD is an OPTIONAL extension: copy ext/gkd.sh into $CREW_HOME/ext/ and set GKD_DIR to your
-# GKD checkout (https://github.com/alvis-HaoH/gkd) for `gkd-sync` and GKD's multi-agent
-# orchestration (CREW_DELEGATE_GKD=1 routes `delegate` through it). Plain `delegate` and all
-# core crew (tmux + CCR) work without it.
+# Optional extensions live in $CREW_HOME/ext/*.sh (sourced if present). Core crew
+# (tmux + CCR/proxy-routed presets) works with none installed.
 # See README.md / README.en.md.
 set -uo pipefail
 
@@ -406,11 +403,10 @@ ensure_session(){
 }
 send_task(){ tmux send-keys -t "$TMUX_PREFIX$1" -l "$2"; sleep 1; tmux send-keys -t "$TMUX_PREFIX$1" Enter; log "fed task to '$1'; watch: crew attach $1"; }
 
-# --- one-shot delegation (core; no GKD needed) ------------------------------
+# --- one-shot delegation -----------------------------------------------------
 # `crew delegate --model X "task"` runs a one-shot `claude -p` sub-agent on a crew
 # backend and prints its result to stdout — no tmux, no session, no --resume. Reuses
-# load_backend + the same env assembly as ensure_session. GKD (ext/gkd.sh) is only
-# needed for its multi-agent orchestration; plain delegation lives here in core.
+# load_backend + the same env assembly as ensure_session.
 crew_delegate_core(){
   local backend="$1"; shift; local task="$*"
   [ "$backend" = default ] && die "delegate needs a backend with a base URL (e.g. --model glm); 'default' is plain Claude."
@@ -437,10 +433,9 @@ crew_delegate_core(){
 }
 
 # --- optional extensions -----------------------------------------------------
-# Core crew = tmux + a CCR/proxy-routed model preset. Optional add-ons (GKD delegation,
-# etc.) live as ext/*.sh that define extra subcommand functions and are sourced if present
-# from $CREW_HOME/ext. Nothing in core depends on them; a fresh install with no ext/ is
-# pure tmux + CCR. To enable GKD: copy this repo's ext/gkd.sh into $CREW_HOME/ext/.
+# Core crew = tmux + a CCR/proxy-routed model preset. Optional add-ons live as ext/*.sh that
+# define extra subcommand functions and are sourced if present from $CREW_HOME/ext. Nothing
+# in core depends on them; a fresh install with no ext/ is pure tmux + CCR.
 for _ext in "$CREW_HOME"/ext/*.sh; do [ -e "$_ext" ] && . "$_ext"; done
 
 # --- inter-session mailbox (async) -----------------------------------------
@@ -609,12 +604,7 @@ EOF
     if [ -f "$REG" ]; then t=$(mktemp) && awk -F'\t' -v m="$nm" '$2!=m' "$REG" > "$t" && mv "$t" "$REG"; fi
     log "deleted session '$nm' (tmux + sid + registry$( [ "$purge" = 1 ] && printf ' + transcript' ))"
     ;;
-  gkd-sync) command -v crew_gkd_sync >/dev/null 2>&1 || die "GKD extension not installed — copy ext/gkd.sh into $CREW_HOME/ext/ (and set GKD_DIR)."; crew_gkd_sync;;
-  delegate) shift
-    # Default: core one-shot delegation (claude -p), no GKD needed. Use GKD's multi-agent
-    # orchestration only when explicitly asked (CREW_DELEGATE_GKD=1) and it's installed.
-    if [ "${CREW_DELEGATE_GKD:-0}" = 1 ] && command -v crew_delegate >/dev/null 2>&1; then crew_delegate "$BACKEND" "$@"
-    else crew_delegate_core "$BACKEND" "$@"; fi;;
+  delegate) shift; crew_delegate_core "$BACKEND" "$@";;
   send) shift; if [ "$ALLTGT" = 1 ]; then crew_broadcast "$@"; else crew_send "$@"; fi;;
   inbox) shift; crew_inbox "$@";;
   log) shift; crew_log "$@";;

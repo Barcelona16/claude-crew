@@ -168,22 +168,19 @@ launchctl kickstart -k gui/$(id -u)/com.claudecrew.ccr
 > script outside TCC-protected dirs (e.g. `~/.config/claude-crew/`), else launchd reading
 > `~/Desktop` is denied by macOS.
 
-## Optional extension: GKD programmatic delegation
+## Programmatic one-shot delegation
 
-Core crew = tmux + CCR model/key switching. Optional add-ons live as `ext/*.sh`, sourced at
-startup from `$CREW_HOME/ext/` (loaded if present; pure core otherwise).
-[GKD](https://github.com/alvis-HaoH/gkd) does **programmatic one-shot delegation**: spawn a
-`claude -p --model X` sub-process and return just the **result**. Enable it:
+`crew delegate` spawns a `claude -p --model X` sub-process to do the work and prints just the
+**result** to stdout — no tmux, no session, no `--resume`. Handy in scripts for "run a one-shot
+task on some model and hand back the result":
 
 ```bash
-cp ext/gkd.sh ~/.config/claude-crew/ext/       # install the extension
-export GKD_DIR=/path/to/gkd                      # point at your GKD checkout
-crew delegate --model GLM-5.2 "rewrite these 50 files to X"  # programmatic delegation, result returned
-crew gkd-sync                                    # sync crew presets into GKD's models.json
+crew delegate --model GLM-5.2 "rewrite these 50 files to X"   # one-shot delegation, result to stdout
 ```
 
-Without the extension, `delegate`/`gkd-sync` print how to install it. Core session management
-depends on neither GKD nor any particular project.
+It reuses crew's model presets + `--key` logic and depends on no external tool. Core session
+management depends on no particular project. For heavier multi-agent orchestration, write your
+own `ext/*.sh` extension (sourced at startup from `$CREW_HOME/ext/` if present).
 
 ## Talking between sessions (async mailbox)
 
