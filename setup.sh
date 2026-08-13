@@ -2,7 +2,7 @@
 # setup.sh — one-command onboarding for claude-crew's CCR-based multi-model switching.
 #
 # Cross-platform: macOS (launchd) and Linux (systemd --user). It NEVER embeds your keys —
-# you supply your own JD llm-gw token (prompted or via $GATEWAY_TOKEN), and it stays local
+# you supply your own gateway/API token (prompted or via $GATEWAY_TOKEN), and it stays local
 # in ~/.claude-code-router/config.json + ~/.config/claude-crew/keys.conf.
 #
 # What it does:
@@ -25,6 +25,10 @@ info(){ printf '   %s\n' "$*"; }
 die(){ printf '\n[setup] ERROR: %s\n' "$*" >&2; exit 1; }
 have(){ command -v "$1" >/dev/null 2>&1; }
 
+# Branding: internal (JD) vs open-source values live in setup/branding.sh. make-public.sh
+# swaps in branding.public.sh for the GitHub build so this one script serves both versions.
+. "$HERE/setup/branding.sh"
+
 say "1) install crew onto PATH"
 bash "$HERE/install.sh"
 
@@ -45,14 +49,14 @@ CCR_CLI="$(npm root -g 2>/dev/null)/@musistudio/claude-code-router/dist/cli.js"
 [ -f "$CCR_CLI" ] || die "can't locate claude-code-router cli.js (looked in npm global root)"
 info "node=$NODE_BIN"; info "ccr cli=$CCR_CLI"
 
-say "4) JD gateway token (your own; stays local)"
+say "4) $TOKEN_DESC"
 TOKEN="${GATEWAY_TOKEN:-}"
-if [ -z "$TOKEN" ]; then printf "   Enter your JD llm-gw token: "; read -r TOKEN; fi
+if [ -z "$TOKEN" ]; then printf "   %s" "$TOKEN_PROMPT"; read -r TOKEN; fi
 [ -n "$TOKEN" ] || die "no token provided"
 
 say "5) merge CCR provider config -> $CCRCFG"
 mkdir -p "$CCRDIR"
-FILLED="$(mktemp)"; sed "s|__GATEWAY_TOKEN__|$TOKEN|g" "$HERE/setup/ccr-config.template.json" > "$FILLED"
+FILLED="$(mktemp)"; sed "s|__GATEWAY_TOKEN__|$TOKEN|g" "$HERE/setup/$CCR_TEMPLATE" > "$FILLED"
 [ -f "$CCRCFG" ] && { cp "$CCRCFG" "$CCRCFG.bak.$$"; info "backed up existing config -> $CCRCFG.bak.$$"; }
 CCR_CFG="$CCRCFG" CCR_ADD="$FILLED" node - <<'NODE'
 const fs=require("fs");
@@ -95,9 +99,7 @@ ENV_EXTRA=MAX_THINKING_TOKENS=0
 KEY_MODE=ccr
 EOF
 }
-mkpreset "Claude-Opus-4.8-joybuilder" "opus,Claude-Opus-4.8-joybuilder"
-mkpreset "GLM-5.2"                    "glm,GLM-5.2"
-mkpreset "kimi-k3-joybuilder"         "kimi,kimi-k3-joybuilder"
+for _p in "${PRESETS[@]}"; do mkpreset "${_p%%|*}" "${_p#*|}"; done
 info "wrote $(ls "$CFG"/backends/*.conf 2>/dev/null | wc -l | tr -d ' ') model presets"
 
 say "7) run background services ($OS)"
@@ -134,15 +136,15 @@ fi
 
 say "8) default model preset"
 case "${SHELL:-}" in */zsh) RC="$HOME/.zshrc";; */bash) RC="$HOME/.bashrc";; *) RC="$HOME/.profile";; esac
-grep -q "CREW_BACKEND" "$RC" 2>/dev/null || echo 'export CREW_BACKEND=Claude-Opus-4.8-joybuilder' >> "$RC"
-info "default CREW_BACKEND=Claude-Opus-4.8-joybuilder (in $RC)"
+grep -q "CREW_BACKEND" "$RC" 2>/dev/null || echo "export CREW_BACKEND=$DEFAULT_BACKEND" >> "$RC"
+info "default CREW_BACKEND=$DEFAULT_BACKEND (in $RC)"
 
 say "done ✅"
 cat <<EOF
 
   crew models                        # list all model presets
   crew up                            # ensure CCR (:3456) + crew-proxy (:8788) are up
-  crew myproj --model GLM-5.2        # start a session on a model (auto-attaches)
+  crew myproj --model $DEFAULT_BACKEND   # start a session on a model (auto-attaches)
 
   Notes:
    • Open a new shell (or: source $RC) so CREW_BACKEND takes effect.
