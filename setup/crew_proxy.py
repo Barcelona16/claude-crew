@@ -10,7 +10,7 @@ fallback is not used). On an upstream failure status (401/403/429/5xx or a conne
 observed *before* the body starts streaming, it trips that key and transparently retries the
 SAME request with the next healthy key. Claude never sees the switch.
 
-Zero third-party deps (stdlib http.server + urllib), same stack as joycode_proxy.
+Zero third-party deps (stdlib http.server + urllib).
 
 Config (all under ~/.config/claude-crew unless overridden):
   keys.conf        <alias>=<api-key>                          (existing crew keys file)

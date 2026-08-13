@@ -5,6 +5,6 @@ proxy.log
 *.out
 .DS_Store
 
-# Python bytecode (joycode proxy)
+# Python bytecode
 __pycache__/
 *.pyc

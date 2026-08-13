@@ -86,7 +86,7 @@ else cat > "$CFG/key-policy.conf" <<'EOF'
 # A model with NO line here just passes through to CCR unchanged (single-key default).
 # Each alias must (a) exist in keys.conf and (b) have a CCR provider serving that model
 # with that key. Example (after adding gw2 to keys.conf + a CCR provider):
-#   GLM-5.2 = gw gw2
+#   default = gw gw2
 EOF
   info "wrote key-policy.conf (empty — single-key passthrough by default)"; fi
 # BASE_URL points at crew-proxy (:8788), which routes to CCR (:3456). With no policy line
