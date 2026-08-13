@@ -1,0 +1,10 @@
+[Unit]
+Description=crew-proxy (claude-crew key failover proxy)
+After=network-online.target claudecrew-ccr.service
+[Service]
+ExecStart=__PY__ __PROXY_SCRIPT__
+Restart=always
+RestartSec=5
+Environment=HOME=__HOME__
+[Install]
+WantedBy=default.target

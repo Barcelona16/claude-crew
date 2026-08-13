@@ -6,9 +6,9 @@
 # in ~/.claude-code-router/config.json + ~/.config/claude-crew/keys.conf.
 #
 # What it does:
-#   1. put `crew` on PATH            5. keys.conf + model presets
-#   2. check deps (node/tmux)        6. merge CCR provider config
-#   3. install claude-code-router    7. run CCR as launchd/systemd service
+#   1. put `crew` on PATH            5. keys.conf + policy + presets
+#   2. check deps (node/tmux/py3)    6. merge CCR provider config
+#   3. install claude-code-router    7. run CCR + crew-proxy as services
 #   4. JD gateway token (local)      8. set the default model preset
 #
 # Re-runnable (idempotent-ish): merges providers, backs up existing CCR config, skips keys.conf if present.
@@ -32,6 +32,7 @@ say "2) check dependencies"
 have tmux    || info "MISSING tmux — brew install tmux  /  apt install tmux"
 have claude  || info "MISSING claude (Claude Code CLI) — https://claude.com/claude-code"
 have node    || die  "node is required (for claude-code-router). Install Node.js first."
+have python3 || info "MISSING python3 — needed for crew-proxy (key failover). Core still works without it."
 
 say "3) claude-code-router (CCR)"
 if ! have ccr; then
@@ -68,12 +69,26 @@ console.log("   merged "+n+" new provider(s); existing providers left untouched"
 NODE
 rm -f "$FILLED"
 
-say "6) keys.conf + model presets"
+say "6) keys.conf + key-policy + model presets"
 mkdir -p "$CFG/backends"
 if [ -f "$CFG/keys.conf" ]; then info "keys.conf exists — leaving as is"
 else { echo "# crew api keys — <alias>=<key>. Use: crew --key <alias> <session>"; echo "gw=$TOKEN"; } > "$CFG/keys.conf"; chmod 600 "$CFG/keys.conf"; info "wrote keys.conf (gw=<your token>)"; fi
+if [ -f "$CFG/key-policy.conf" ]; then info "key-policy.conf exists — leaving as is"
+else cat > "$CFG/key-policy.conf" <<'EOF'
+# crew-proxy key failover policy — one line per model, keys high->low priority.
+#   <model> = <alias1> <alias2> ...
+# crew-proxy tries the highest-priority healthy key; on repeated upstream failure
+# (401/403/429/5xx) it trips that key and transparently retries the next one.
+# A model with NO line here just passes through to CCR unchanged (single-key default).
+# Each alias must (a) exist in keys.conf and (b) have a CCR provider serving that model
+# with that key. Example (after adding gw2 to keys.conf + a CCR provider):
+#   GLM-5.2 = gw gw2
+EOF
+  info "wrote key-policy.conf (empty — single-key passthrough by default)"; fi
+# BASE_URL points at crew-proxy (:8788), which routes to CCR (:3456). With no policy line
+# for a model, crew-proxy is a transparent passthrough, so single-key users are unaffected.
 mkpreset(){ cat > "$CFG/backends/$1.conf" <<EOF
-BASE_URL=http://127.0.0.1:3456
+BASE_URL=http://127.0.0.1:8788
 MODEL=$2
 TOKEN=test
 ENV_EXTRA=MAX_THINKING_TOKENS=0
@@ -86,8 +101,11 @@ mkpreset "kimi-k3-joybuilder"         "kimi,kimi-k3-joybuilder"
 info "wrote $(ls "$CFG"/backends/*.conf 2>/dev/null | wc -l | tr -d ' ') model presets"
 
 say "7) run background services ($OS)"
-SVCS="ccr"
-fill(){ sed -e "s|__NODE__|$NODE_BIN|g" -e "s|__NODE_DIR__|$NODE_DIR|g" -e "s|__CCR_CLI__|$CCR_CLI|g" -e "s|__HOME__|$HOME|g" "$1"; }
+PY="$(command -v python3 || echo /usr/bin/python3)"
+PROXY_SCRIPT="$CFG/crew_proxy.py"
+cp "$HERE/setup/crew_proxy.py" "$PROXY_SCRIPT" && info "installed crew-proxy -> $PROXY_SCRIPT"
+SVCS="ccr"; have python3 && SVCS="ccr proxy"
+fill(){ sed -e "s|__NODE__|$NODE_BIN|g" -e "s|__NODE_DIR__|$NODE_DIR|g" -e "s|__CCR_CLI__|$CCR_CLI|g" -e "s|__PY__|$PY|g" -e "s|__PROXY_SCRIPT__|$PROXY_SCRIPT|g" -e "s|__HOME__|$HOME|g" "$1"; }
 port_up(){ (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&- 3<&-; return 0; }; return 1; }
 if [ "$OS" = Darwin ] && command -v launchctl >/dev/null 2>&1; then
   LA="$HOME/Library/LaunchAgents"; mkdir -p "$LA"; uid="$(id -u)"
@@ -111,6 +129,7 @@ else
   info "no launchd/systemd user session — launching detached (nohup, container mode)"
   nsvc(){ local n="$1" p="$2"; shift 2; port_up "$p" && { info "  $n already up (:$p)"; return; }; nohup "$@" >>"$CCRDIR/$n.nohup.log" 2>&1 & disown 2>/dev/null || true; info "  started $n (:$p, pid $!)"; }
   nsvc ccr 3456 "$NODE_BIN" "$CCR_CLI" start
+  have python3 && nsvc proxy 8788 "$PY" "$PROXY_SCRIPT"
 fi
 
 say "8) default model preset"
@@ -122,11 +141,12 @@ say "done ✅"
 cat <<EOF
 
   crew models                        # list all model presets
-  crew up                            # ensure CCR (:3456) is up
+  crew up                            # ensure CCR (:3456) + crew-proxy (:8788) are up
   crew myproj --model GLM-5.2        # start a session on a model (auto-attaches)
 
   Notes:
    • Open a new shell (or: source $RC) so CREW_BACKEND takes effect.
-   • Only ONE gateway token is wired by default; add more keys in $CFG/keys.conf and
-     extra CCR providers if you want per-model key switching (crew --key ...).
+   • crew-proxy (:8788) sits in front of CCR and does key failover. With one key it's a
+     transparent passthrough. To enable failover: add more keys to $CFG/keys.conf, add a
+     matching CCR provider per key, and list them (high->low) in $CFG/key-policy.conf.
 EOF

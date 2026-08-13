@@ -223,6 +223,16 @@ crew_dep_up(){
 # reuse crew_dep_up for the actual launchd/systemd kickstart.
 crew_ext_dep_up(){ :; }
 
+# crew-proxy (:8788) sits between claude and CCR for key failover. It's optional: if it was
+# never installed (no python3 at setup, or no service/port), we silently skip it — presets
+# still point at :8788, so this only helps if the proxy is actually running. Callers ensure
+# CCR first, then this. With no key-policy line for a model the proxy is a pure passthrough.
+crew_proxy_up(){
+  [ "${CREW_PROXY_DISABLE:-0}" = 1 ] && return 0
+  crew_dep_up "crew-proxy" "${CREW_PROXY_PORT:-8788}" \
+    "${CREW_PROXY_LABEL:-com.claudecrew.proxy}" "${CREW_PROXY_UNIT:-claudecrew-proxy}"
+}
+
 # --- interactive picker (--pick) --------------------------------------------
 # One menu per knob (model -> key -> tmux), skipping any the user already gave on
 # the CLI. Defaults come from the session's remembered state when it exists
@@ -325,6 +335,7 @@ ensure_session(){
   # ccr-routed presets need CCR (:3456) up; extensions may need their own service (hook).
   if [ "${BK_KEY_MODE:-}" = ccr ]; then
     crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}"
+    crew_proxy_up
     crew_ext_dep_up "$BK_MODEL"
   fi
 
@@ -409,6 +420,7 @@ crew_delegate_core(){
   [ -n "$BK_ENSURE_CMD" ] && { log "ensuring backend '$backend' is up..."; bash -c "$BK_ENSURE_CMD" >&2 || log "WARN: ENSURE_CMD failed (continuing)"; }
   if [ "${BK_KEY_MODE:-}" = ccr ]; then
     crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}" >&2
+    crew_proxy_up >&2
     crew_ext_dep_up "$BK_MODEL"
   fi
   local tok="$BK_TOKEN"
@@ -571,7 +583,7 @@ EOF
     if tmux kill-session -t "$TMUX_PREFIX$2" 2>/dev/null; then log "stopped $2 (state kept; resume with: crew $2)"; else log "no live tmux session '$2' (nothing to stop)"; fi
     ;;
   models|backends) echo "== models =="; for b in $(list_backends_inline); do echo "  $b"; done;;
-  up) crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}"; crew_ext_dep_up "";;
+  up) crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}"; crew_proxy_up; crew_ext_dep_up "";;
   keys) echo "== api keys ($KEYS_FILE) =="
     if [ ! -f "$KEYS_FILE" ]; then echo "  (no keys file; create it with lines: <alias>=<api-key>)";
     else
