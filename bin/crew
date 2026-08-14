@@ -25,11 +25,17 @@
 #   crew attach <name>    attach to observe a session
 #   crew stop <name>      stop a session's tmux but KEEP its state (resume/switch later)
 #   crew kill <name> [--purge]   delete a session for good (tmux + id + registry; --purge also transcript)
+#   crew adopt <name> <tmux-session> [--sid U] [--model M]   register an EXTERNAL tmux session
+#                         (e.g. the main `work` session) into crew: shows in ls, attach/send/log
+#                         reach it, but crew never spawns/stops/kills it (stop/kill/prune refuse it)
 #
 # CONFIG
 #   crew models           list available model presets
 #   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
 #   crew up               ensure dependency services are up (CCR :3456 + crew-proxy :8788)
+#   crew prune [--days N] [--dry-run] [--purge]   auto-release sessions idle > N days (default 7);
+#                         never touches a live or adopted session; keeps transcripts unless --purge.
+#                         Runs itself opportunistically (throttled) on spawn/up; CREW_PRUNE_AUTO=0 disables
 #   crew doctor           read-only health check (services, keys.conf, key-policy resolvable)
 #   crew stats            crew-proxy usage in the terminal (key health + token totals)
 #   crew sync-models [--key A]   discover a key's upstream models; pick which new ones to add to CCR
@@ -108,6 +114,29 @@ port_listening(){
   return 1
 }
 sanitize(){ printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//;s/-*$//'; }
+# Portable mtime (epoch seconds): GNU coreutils `stat -c`, else BSD/macOS `stat -f`.
+mtime(){ stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+# The tmux session name for a crew session. Normal sessions crew spawns are "crew-<name>".
+# An ADOPTED/external session (a `<name>.tmux` override file exists — e.g. the main `work`
+# session that bootstrap/start.sh manages, not crew) uses that recorded name verbatim, so
+# `crew attach/ls/send` reach the real tmux while crew never owns its lifecycle.
+tmux_name_for(){ if [ -f "$CREW_STATE/$1.tmux" ]; then cat "$CREW_STATE/$1.tmux"; else printf '%s' "$TMUX_PREFIX$1"; fi; }
+is_adopted(){ [ -f "$CREW_STATE/$1.tmux" ]; }
+
+# Opportunistic, throttled auto-release: at most once per CREW_PRUNE_EVERY seconds (default
+# 1 day) fire `crew prune` in the background to release sessions idle > CREW_PRUNE_DAYS
+# (default 7). No cron needed — piggybacks on spawn/up. Disable with CREW_PRUNE_AUTO=0.
+# NEVER reaps a live or adopted session (prune enforces that); backgrounded so it can't
+# delay a spawn/attach.
+crew_autoprune(){
+  [ "${CREW_PRUNE_AUTO:-1}" = 1 ] || return 0
+  local every="${CREW_PRUNE_EVERY:-86400}" stamp="$CREW_STATE/.last-prune" last now
+  last=$(cat "$stamp" 2>/dev/null || echo 0); case "$last" in ''|*[!0-9]*) last=0;; esac
+  now=$(date +%s 2>/dev/null || echo 0); [ "$now" = 0 ] && return 0
+  [ $((now - last)) -ge "$every" ] || return 0
+  printf '%s' "$now" > "$stamp" 2>/dev/null || true
+  ( "$0" prune >/dev/null 2>&1 & ) 2>/dev/null || true
+}
 
 # --- registry: current dir <-> session name --------------------------------
 resolve_name_for_cwd(){
@@ -431,6 +460,14 @@ interactive_pick(){  # interactive_pick <session-name>
 # --- session lifecycle ------------------------------------------------------
 ensure_session(){
   local name="$1" backend="$2" fresh="$3" yolo="$4" no_tmux="${5:-0}" tmux_s="$TMUX_PREFIX$1"
+  crew_autoprune   # opportunistic, throttled, backgrounded — never blocks this spawn
+  # Adopted/external session (e.g. the main `work` session managed by bootstrap/start.sh):
+  # crew doesn't spawn or own its lifecycle — the caller just attaches to the live tmux.
+  if is_adopted "$name"; then
+    tmux has-session -t "$(tmux_name_for "$name")" 2>/dev/null \
+      || log "adopted '$name': tmux '$(tmux_name_for "$name")' not live (start it where it's managed)"
+    return 0
+  fi
   local bkf="$CREW_STATE/$name.backend"
   local keyf="$CREW_STATE/$name.key"
   # If the session is already live, just re-attach — UNLESS the caller explicitly
@@ -543,7 +580,7 @@ ensure_session(){
   log "session '$name' ready (tmux: $tmux_s, backend: $backend, model: ${BK_MODEL:-<default>}, key: $keydisp); watch: crew attach $name"
   sleep 5
 }
-send_task(){ tmux send-keys -t "$TMUX_PREFIX$1" -l "$2"; sleep 1; tmux send-keys -t "$TMUX_PREFIX$1" Enter; log "fed task to '$1'; watch: crew attach $1"; }
+send_task(){ local t; t=$(tmux_name_for "$1"); tmux send-keys -t "$t" -l "$2"; sleep 1; tmux send-keys -t "$t" Enter; log "fed task to '$1'; watch: crew attach $1"; }
 
 # --- one-shot delegation -----------------------------------------------------
 # `crew delegate --model X "task"` runs a one-shot `claude -p` sub-agent on a crew
@@ -595,8 +632,9 @@ deliver(){   # deliver <to> <from> <msg>
   { printf '%s\t%s\n' "$from" "$(date '+%Y-%m-%d %H:%M:%S')"; printf '%s\n' "$msg"; } > "$dir/$(date +%Y%m%d-%H%M%S)-$$-${RANDOM}.msg"
 }
 nudge(){     # nudge <to> <from>
-  tmux has-session -t "$TMUX_PREFIX$1" 2>/dev/null || return 0
-  tmux send-keys -t "$TMUX_PREFIX$1" -l "[crew] new mail from $2 — run: crew inbox"; sleep 1; tmux send-keys -t "$TMUX_PREFIX$1" Enter
+  local t; t=$(tmux_name_for "$1")
+  tmux has-session -t "$t" 2>/dev/null || return 0
+  tmux send-keys -t "$t" -l "[crew] new mail from $2 — run: crew inbox"; sleep 1; tmux send-keys -t "$t" Enter
 }
 crew_send(){
   local to="$1"; shift 2>/dev/null || true; local msg="$*"
@@ -702,7 +740,7 @@ case "${1:-}" in
     _ls_row(){
       cwd=$(path_for_name "$nm"); [ -n "$cwd" ] || cwd="?"
       local sidf="$CREW_STATE/$nm.sid"
-      if tmux has-session -t "$TMUX_PREFIX$nm" 2>/dev/null; then st="live"
+      if tmux has-session -t "$(tmux_name_for "$nm")" 2>/dev/null; then st="live"
       elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$(cat "$sidf")".jsonl >/dev/null 2>&1; then st="resumable"
       else st="new"; fi
       bk=$(cat "$CREW_STATE/$nm.backend" 2>/dev/null || echo "${CREW_BACKEND:-default}")
@@ -741,10 +779,76 @@ EOF
     # Stop the running tmux session but KEEP its on-disk state (.sid + transcript),
     # so `crew [--backend X] <name>` resumes it later with full history. This is how
     # you switch a session's model: `crew stop <name>` then `crew --backend Y <name>`.
-    if tmux kill-session -t "$TMUX_PREFIX$2" 2>/dev/null; then log "stopped $2 (state kept; resume with: crew $2)"; else log "no live tmux session '$2' (nothing to stop)"; fi
+    if is_adopted "$2"; then die "'$2' is adopted/external (tmux '$(tmux_name_for "$2")') — crew won't stop it; manage it where it was started"; fi
+    if tmux kill-session -t "$(tmux_name_for "$2")" 2>/dev/null; then log "stopped $2 (state kept; resume with: crew $2)"; else log "no live tmux session '$2' (nothing to stop)"; fi
     ;;
   models|backends) echo "== models =="; for b in $(list_backends_inline); do echo "  $b"; done;;
-  up) crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}"; crew_proxy_up; crew_ext_dep_up "";;
+  adopt) [ -n "${2:-}" ] && [ -n "${3:-}" ] || die "usage: crew adopt <name> <tmux-session> [--sid <uuid>] [--dir <path>] [--model <label>]"
+    # Register an EXTERNALLY-managed tmux session (e.g. the main `work` session that
+    # bootstrap/start.sh owns) into crew: it then shows in `crew ls`, and `crew attach/
+    # send/log <name>` reach it — but crew never spawns/stops/kills it (stop/kill/prune
+    # all refuse an adopted session). --sid links its Claude transcript for `crew log`.
+    # NB: the tmux name is POSITIONAL (not --tmux) because --tmux is already a global
+    # flag; --model is read from the global parser ($BACKEND when given explicitly).
+    a_name="$2"; a_tmux="$3"; a_sid=""; a_dir="$PWD"
+    a_model=""; [ "${BACKEND_EXPLICIT:-0}" = 1 ] && a_model="$BACKEND"
+    shift 3
+    while [ $# -gt 0 ]; do case "$1" in
+      --sid) a_sid="$2"; shift 2;;
+      --dir) a_dir="$2"; shift 2;;
+      *) shift;;
+    esac; done
+    tmux has-session -t "$a_tmux" 2>/dev/null || log "warn: tmux session '$a_tmux' not live right now (adopting anyway)"
+    printf '%s' "$a_tmux" > "$CREW_STATE/$a_name.tmux"
+    [ -n "$a_sid" ]   && printf '%s\n' "$a_sid"   > "$CREW_STATE/$a_name.sid"
+    [ -n "$a_model" ] && printf '%s\n' "$a_model" > "$CREW_STATE/$a_name.backend"
+    if [ -f "$REG" ] && awk -F'\t' -v m="$a_name" '$2==m{ok=1}END{exit !ok}' "$REG"; then :; else printf '%s\t%s\n' "$a_dir" "$a_name" >> "$REG"; fi
+    log "adopted '$a_name' -> tmux '$a_tmux'${a_sid:+ (sid $a_sid)}; now in crew ls / attach. stop/kill/prune will refuse it. Un-adopt: rm $CREW_STATE/$a_name.tmux"
+    ;;
+  prune)
+    # Auto-release sessions idle > N days (default 7): kill their (usually already dead)
+    # tmux and remove on-disk state so `crew ls` stops showing them. NEVER touches a live
+    # session (tmux running now) or an adopted/external one. Transcripts are KEPT by
+    # default (recoverable); --purge also deletes them.  crew prune [--days N] [--dry-run] [--purge]
+    p_days="${CREW_PRUNE_DAYS:-7}"; p_dry=0; p_purge=0
+    shift || true
+    while [ $# -gt 0 ]; do case "$1" in
+      --days)     p_days="$2"; shift 2;;
+      --days=*)   p_days="${1#*=}"; shift;;
+      --dry-run|-n) p_dry=1; shift;;
+      --purge)    p_purge=1; shift;;
+      *) shift;;
+    esac; done
+    now=$(date +%s 2>/dev/null || echo 0); cutoff=$(( now - p_days*86400 ))
+    p_names=$( { [ -f "$REG" ] && awk -F'\t' 'NF>=2{print $2}' "$REG"
+                 ls "$CREW_STATE"/*.sid 2>/dev/null | sed 's:.*/::;s:\.sid$::'
+               } | sort -u )
+    reaped=0; kept=0
+    while IFS= read -r nm; do
+      [ -n "$nm" ] || continue
+      if tmux has-session -t "$(tmux_name_for "$nm")" 2>/dev/null; then kept=$((kept+1)); continue; fi   # live -> keep
+      if is_adopted "$nm"; then kept=$((kept+1)); continue; fi                                            # external -> keep
+      sidf="$CREW_STATE/$nm.sid"; last=0
+      if [ -f "$sidf" ]; then s=$(cat "$sidf" 2>/dev/null)
+        for j in "$HOME"/.claude/projects/*/"$s".jsonl; do [ -f "$j" ] || continue; m=$(mtime "$j"); [ "$m" -gt "$last" ] && last=$m; done
+      fi
+      for f in "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key"; do [ -f "$f" ] || continue; m=$(mtime "$f"); [ "$m" -gt "$last" ] && last=$m; done
+      if [ "$last" = 0 ] || [ "$now" = 0 ] || [ "$last" -ge "$cutoff" ]; then kept=$((kept+1)); continue; fi  # indeterminate/fresh -> keep
+      age_d=$(( (now-last)/86400 ))
+      if [ "$p_dry" = 1 ]; then echo "  would release '$nm' (idle ${age_d}d)"; reaped=$((reaped+1)); continue; fi
+      tmux kill-session -t "$(tmux_name_for "$nm")" 2>/dev/null || true
+      if [ "$p_purge" = 1 ] && [ -f "$sidf" ]; then s=$(cat "$sidf" 2>/dev/null); rm -f "$HOME"/.claude/projects/*/"$s".jsonl 2>/dev/null || true; fi
+      rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key"
+      if [ -f "$REG" ]; then t=$(mktemp) && awk -F'\t' -v m="$nm" '$2!=m' "$REG" > "$t" && mv "$t" "$REG"; fi
+      echo "  released '$nm' (idle ${age_d}d$( [ "$p_purge" = 1 ] && printf ', transcript purged'))"
+      reaped=$((reaped+1))
+    done <<EOF
+$p_names
+EOF
+    [ "$p_dry" = 1 ] || { [ "$now" = 0 ] || printf '%s' "$now" > "$CREW_STATE/.last-prune" 2>/dev/null || true; }
+    echo "== prune: released $reaped, kept $kept (threshold ${p_days}d$( [ "$p_dry" = 1 ] && printf ', dry-run'))"
+    ;;
+  up) crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}"; crew_proxy_up; crew_ext_dep_up ""; crew_autoprune;;
   doctor)
     # Read-only health check: services up? config sane? every key-policy alias resolvable?
     echo "== crew doctor =="
@@ -910,13 +1014,14 @@ EOF
       elif command -v systemctl >/dev/null 2>&1; then systemctl --user restart "${CREW_CCR_UNIT:-claudecrew-ccr}" >/dev/null 2>&1 || true; fi
       echo "  restarted CCR — new models are live (crew, pick '$sm_key')"
     fi;;
-  attach) [ -n "${2:-}" ] || die "usage: crew attach <name>"; exec tmux -u attach -t "$TMUX_PREFIX$2";;
+  attach) [ -n "${2:-}" ] || die "usage: crew attach <name>"; exec tmux -u attach -t "$(tmux_name_for "$2")";;
   kill) [ -n "${2:-}" ] || die "usage: crew kill <name> [--purge]"
     nm="$2"; purge=0; [ "${3:-}" = "--purge" ] && purge=1
     # Fully delete the session so it stops showing in `crew ls`: kill the tmux
     # session (if any) AND remove its on-disk state (.sid + registry line).
     # --purge additionally deletes the saved Claude transcript (irreversible).
-    tmux kill-session -t "$TMUX_PREFIX$nm" 2>/dev/null && log "killed tmux session $nm" || true
+    if is_adopted "$nm"; then die "'$nm' is adopted/external (tmux '$(tmux_name_for "$nm")') — crew won't kill it. Un-adopt: rm $CREW_STATE/$nm.tmux"; fi
+    tmux kill-session -t "$(tmux_name_for "$nm")" 2>/dev/null && log "killed tmux session $nm" || true
     sidf="$CREW_STATE/$nm.sid"
     if [ "$purge" = 1 ] && [ -f "$sidf" ]; then
       psid=$(cat "$sidf"); rm -f "$HOME"/.claude/projects/*/"$psid".jsonl 2>/dev/null && log "purged transcript $psid" || true
@@ -951,7 +1056,7 @@ EOF
         name="$chosen"   # attach an existing session as-is (its remembered model/key stick)
       fi
       ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO" "$NO_TMUX"
-      [ "$NO_TMUX" = 1 ] || exec tmux -u attach -t "$TMUX_PREFIX$name"
+      [ "$NO_TMUX" = 1 ] || exec tmux -u attach -t "$(tmux_name_for "$name")"
       exit 0
     fi
     awk 'NR>=2{ if($0 !~ /^#/) exit; sub(/^# ?/,""); print }' "$0";;
@@ -976,6 +1081,6 @@ EOF
     # A task means "queue work, don't attach". Otherwise attach when interactive (a TTY) —
     # so `crew <name>`, and any `--model`/`--key` switch, drops you straight into the session.
     if [ -n "$task" ]; then send_task "$name" "$task"
-    elif [ -t 1 ]; then exec tmux -u attach -t "$TMUX_PREFIX$name"
+    elif [ -t 1 ]; then exec tmux -u attach -t "$(tmux_name_for "$name")"
     else log "session '$name' ready (no task); crew attach $name"; fi;;
 esac
