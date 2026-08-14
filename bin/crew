@@ -146,6 +146,9 @@ model_for_backend(){
   printf '%s' "${m:-<default>}"
 }
 # Sets BK_* globals from $BACKEND_DIR/<backend>.conf. "default" needs no file.
+# A backend given as "provider,realmodel" (comma) with no matching .conf is a synthesized
+# ccr backend — the key-first --pick menu produces these for models that have no preset file
+# (e.g. joycode models). It routes through crew-proxy (:8788) -> CCR just like the ccr presets.
 load_backend(){
   local b="$1" f="$BACKEND_DIR/$1.conf"
   BK_BASE_URL=""; BK_MODEL=""; BK_TOKEN=""; BK_TOKEN_CMD=""; BK_TOKEN_ENV=""; BK_ENSURE_CMD=""; BK_ENV_EXTRA=""; BK_DANGEROUS=""; BK_CLAUDE_FLAGS=""; BK_KEY_MODE=""
@@ -155,6 +158,10 @@ load_backend(){
     . "$f"
     BK_BASE_URL="$BASE_URL"; BK_MODEL="$MODEL"; BK_TOKEN="$TOKEN"; BK_TOKEN_CMD="$TOKEN_CMD"; BK_TOKEN_ENV="$TOKEN_ENV"
     BK_ENSURE_CMD="$ENSURE_CMD"; BK_ENV_EXTRA="$ENV_EXTRA"; BK_DANGEROUS="$DANGEROUS"; BK_CLAUDE_FLAGS="$CLAUDE_FLAGS"; BK_KEY_MODE="$KEY_MODE"
+  elif [ "$b" != "default" ] && case "$b" in *,*) true;; *) false;; esac; then
+    # synthesized ccr backend "provider,realmodel" (no preset file)
+    BK_BASE_URL="http://127.0.0.1:${CREW_PROXY_PORT:-8788}"; BK_MODEL="$b"; BK_TOKEN="test"
+    BK_ENV_EXTRA="MAX_THINKING_TOKENS=0 CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1"; BK_KEY_MODE="ccr"
   elif [ "$b" != "default" ]; then
     die "backend '$b' not found ($f); available: $(list_backends_inline)"
   fi
