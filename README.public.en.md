@@ -67,6 +67,7 @@ crew keys                 # list API key aliases (masked)
 crew up                   # ensure dependency services (CCR / crew-proxy) are up
 crew stats                # crew-proxy usage in the terminal (key health + token totals)
 crew doctor               # read-only health check (services up, keys/key-policy resolvable)
+crew sync-models          # pick a key, discover its gateway's models, add the new ones to CCR
 crew attach mysess        # attach to observe
 crew kill mysess          # stop a session
 crew send bob "look at X" # drop a message in another session's mailbox (see "Talking between sessions")

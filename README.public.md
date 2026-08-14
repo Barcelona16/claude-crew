@@ -53,6 +53,7 @@ crew keys                 # 列出 API key 别名(掩码)
 crew up                   # 确保依赖服务(CCR / crew-proxy)在跑
 crew stats                # 终端看 crew-proxy 用量(key 健康 + token 统计)
 crew doctor               # 只读自检(服务是否在、keys/key-policy 是否可解析)
+crew sync-models          # 先选 key,拉它网关支持的模型,勾选本地还没有的加进 CCR
 crew attach mysess        # attach 观察
 crew kill mysess          # 关掉
 crew send bob "看下这段"  # 给另一个会话的信箱投消息(见下「会话间通信」)
