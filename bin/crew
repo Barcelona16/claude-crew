@@ -283,6 +283,7 @@ apply_key_pin(){
 # via the crew_ext_dep_up hook below.
 crew_dep_up(){
   local name="$1" port="$2" mac_label="$3" linux_unit="$4" i
+  shift 4  # any remaining args are a detached fallback launch command (see the elif below)
   port_listening "$port" && return 0
   if command -v launchctl >/dev/null 2>&1 && { launchctl print "gui/$(id -u)/$mac_label" >/dev/null 2>&1 || [ -f "$HOME/Library/LaunchAgents/$mac_label.plist" ]; }; then
     log "$name (:$port) down — kickstarting launchd $mac_label"
@@ -290,6 +291,13 @@ crew_dep_up(){
   elif command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$linux_unit" >/dev/null 2>&1; then
     log "$name (:$port) down — restarting systemd --user $linux_unit"
     systemctl --user restart "$linux_unit" >/dev/null 2>&1 || true
+  elif [ "$#" -gt 0 ]; then
+    # No launchd/systemd unit is installed, but the caller told us how to launch this service,
+    # so start it detached (nohup) — same as setup.sh's container mode. This keeps `crew up`
+    # (and session start) working with no manual step; crew relaunches it on demand when down.
+    log "$name (:$port) down — launching detached: $*"
+    mkdir -p "$CREW_STATE" 2>/dev/null || true
+    nohup "$@" >>"$CREW_STATE/$name.nohup.log" 2>&1 & disown 2>/dev/null || true
   else
     log "WARN: $name (:$port) down; no launchd/systemd unit — start it manually (see setup.sh)."; return 0
   fi
@@ -305,14 +313,25 @@ crew_dep_up(){
 # reuse crew_dep_up for the actual launchd/systemd kickstart.
 crew_ext_dep_up(){ :; }
 
-# crew-proxy (:8788) sits between claude and CCR for key failover. It's optional: if it was
-# never installed (no python3 at setup, or no service/port), we silently skip it — presets
-# still point at :8788, so this only helps if the proxy is actually running. Callers ensure
-# CCR first, then this. With no key-policy line for a model the proxy is a pure passthrough.
+# crew-proxy (:8788) sits between claude and CCR for key failover. Callers ensure CCR first,
+# then this. With no key-policy line for a model the proxy is a pure passthrough. If no
+# launchd/systemd unit is installed (e.g. setup.sh never ran, or ran before python3 was
+# present), crew_dep_up still auto-starts it detached via `python3 crew_proxy.py` so `crew up`
+# just works — provided python3 and the installed proxy script are both available.
 crew_proxy_up(){
   [ "${CREW_PROXY_DISABLE:-0}" = 1 ] && return 0
-  crew_dep_up "crew-proxy" "${CREW_PROXY_PORT:-8788}" \
-    "${CREW_PROXY_LABEL:-com.claudecrew.proxy}" "${CREW_PROXY_UNIT:-claudecrew-proxy}"
+  local port="${CREW_PROXY_PORT:-8788}" label="${CREW_PROXY_LABEL:-com.claudecrew.proxy}"
+  local unit="${CREW_PROXY_UNIT:-claudecrew-proxy}"
+  local script="${CREW_PROXY_SCRIPT:-$CREW_HOME/crew_proxy.py}" py
+  py="$(command -v python3 2>/dev/null || true)"
+  if [ -n "$py" ] && [ -f "$script" ]; then
+    crew_dep_up "crew-proxy" "$port" "$label" "$unit" "$py" "$script"
+  else
+    crew_dep_up "crew-proxy" "$port" "$label" "$unit"  # kickstarts a unit if one exists
+    port_listening "$port" && return 0
+    [ -z "$py" ] && log "WARN: crew-proxy can't auto-start — no python3 on PATH (set CREW_PROXY_DISABLE=1 to silence)."
+    [ -n "$py" ] && [ ! -f "$script" ] && log "WARN: crew-proxy can't auto-start — $script missing (run setup.sh to install it)."
+  fi
 }
 
 # --- interactive picker (--pick) --------------------------------------------
