@@ -764,14 +764,31 @@ EOF
     else
       echo "== crew sessions =="
       if [ -z "$names" ]; then echo "  (none)"; else
-        printf '  %-20s %-9s %-14s %-10s %s\n' NAME STATUS MODEL KEY DIR
-        while IFS= read -r nm; do
-          [ -n "$nm" ] || continue
-          _ls_row
-          printf '  %-20s %-9s %-14s %-10s %s\n' "$nm" "$st" "$bk" "$ky" "$cwd"
-        done <<EOF
+        # Dynamic column widths: collect every row (header + sessions) and let
+        # awk size each column to its widest cell. Fixed widths used to overflow
+        # when a MODEL name (e.g. kimi-k3-joybuilder) or long session name beat
+        # the hard-coded %-14s/%-20s, shoving KEY/DIR out of alignment — which
+        # reads badly in chat clients (咚咚) that render the table monospaced.
+        {
+          printf '%s\t%s\t%s\t%s\t%s\n' NAME STATUS MODEL KEY DIR
+          while IFS= read -r nm; do
+            [ -n "$nm" ] || continue
+            _ls_row
+            printf '%s\t%s\t%s\t%s\t%s\n' "$nm" "$st" "$bk" "$ky" "$cwd"
+          done <<EOF
 $names
 EOF
+        } | awk -F'\t' '
+          { rows[NR]=$0; if (NR==1) ncols=NF; for (i=1;i<=NF;i++) if (length($i)+1 > W[i]) W[i]=length($i)+1 }
+          END {
+            for (r=1;r<=NR;r++) {
+              n=split(rows[r], a, "\t")
+              line="  "
+              for (i=1;i<=n;i++) line=line sprintf("%-*s", W[i], a[i])
+              sub(/[ \t]+$/, "", line); print line
+            }
+          }
+        '
       fi
     fi
     ;;
