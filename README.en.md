@@ -5,6 +5,8 @@
 Named, attachable, persistent **tmux sessions for [Claude Code](https://claude.com/claude-code)**,
 with pluggable model backends.
 
+![demo](docs/crew-demo.gif)
+
 A *crew session* is a tmux session running `claude`, pinned to a **name**, a **backend**
 (base URL + model + token + env), and a **stable session-id**. That gives you:
 

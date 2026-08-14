@@ -4,6 +4,8 @@
 
 给 [Claude Code](https://claude.com/claude-code) 的**命名、可 attach、可持久化的 tmux 会话管理器**,后端可插拔。
 
+![demo](docs/crew-demo.gif)
+
 一个 *crew 会话* = 一个跑着 `claude` 的具名 tmux 会话,绑定一个**名字**、一个**后端**(base URL + 模型 + token + 环境变量)和一个**固定的 session-id**。于是你能:
 
 - **按名字指挥长活 agent** —— `crew api "加限流"`、`crew docs "更新 changelog"`
