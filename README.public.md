@@ -51,6 +51,8 @@ crew ls                   # 列出会话(名字 / 状态 / 模型 / key)
 crew models               # 列出模型预设
 crew keys                 # 列出 API key 别名(掩码)
 crew up                   # 确保依赖服务(CCR / crew-proxy)在跑
+crew stats                # 终端看 crew-proxy 用量(key 健康 + token 统计)
+crew doctor               # 只读自检(服务是否在、keys/key-policy 是否可解析)
 crew attach mysess        # attach 观察
 crew kill mysess          # 关掉
 crew send bob "看下这段"  # 给另一个会话的信箱投消息(见下「会话间通信」)
@@ -134,7 +136,7 @@ crew-proxy 自带一个本地控制面板,浏览器打开 **http://127.0.0.1:878
 和 proxy 同进程,原生 JS 每 3s 刷新)。看到:
 
 - **Keys**:每把 key 的健康/熔断状态、请求数、成功/失败、连续失败数、冷却倒计时
-- **Sessions**:所有 crew 会话(名/状态/模型/key/目录),每行可**点 kill** 或 **edit 改 model/key**
+- **Sessions**:所有 crew 会话(名/状态/模型/key/目录),每行可 **copy**(复制 `crew <名> --model ...` 命令)、**kill**、**edit 改 model/key**
 - **Recent requests**:近期请求流(模型 · key · 状态 · 是否 failover)
 - **+ add key/provider**:填别名/key/模型/base_url 一键写入 CCR config(**写前自动备份** config.json,
   之后 `crew up` 重载 CCR 生效)

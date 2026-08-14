@@ -31,6 +31,7 @@
 #   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
 #   crew up               ensure dependency services are up (CCR :3456 + crew-proxy :8788)
 #   crew doctor           read-only health check (services, keys.conf, key-policy resolvable)
+#   crew stats            crew-proxy usage in the terminal (key health + token totals)
 #
 # MESSAGING (between sessions)
 #   crew send [--from X] [--nudge] <name> "msg"   drop a message in <name>'s mailbox
@@ -635,6 +636,38 @@ EOF
         done
       done < "$pol"
     fi;;
+  stats)
+    # Show crew-proxy usage (key health + token totals) in the terminal — reads the same
+    # /api/status the dashboard uses. Needs crew-proxy running (crew up).
+    prxp="${CREW_PROXY_PORT:-8788}"; url="http://127.0.0.1:$prxp/api/status"
+    if command -v curl >/dev/null 2>&1; then raw=$(curl -fsS "$url" 2>/dev/null)
+    elif command -v python3 >/dev/null 2>&1; then raw=$(python3 -c 'import sys,urllib.request;sys.stdout.write(urllib.request.urlopen(sys.argv[1],timeout=3).read().decode())' "$url" 2>/dev/null)
+    else die "need curl or python3 to fetch $url"; fi
+    [ -n "$raw" ] || die "crew-proxy not reachable on :$prxp (crew up first?)"
+    command -v python3 >/dev/null 2>&1 || die "crew stats needs python3 to format output"
+    printf '%s' "$raw" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+t = d.get("totals", {})
+def k(n):
+    n = n or 0
+    return "%.1fM" % (n/1e6) if n>=1e6 else "%.1fk" % (n/1e3) if n>=1e3 else str(n)
+print("== crew-proxy stats ==")
+print("  :%s  ->  %s   trip@%s cooldown %ss" % (d.get("port"), d.get("ccr_url"), d.get("fail_n"), d.get("cooldown")))
+print("  totals: req %s  ok %s  fail %s  tok %sin / %sout" % (t.get("requests",0), t.get("ok",0), t.get("fail",0), k(t.get("in_tokens")), k(t.get("out_tokens"))))
+ks = d.get("keys", [])
+if ks:
+    print("  keys:")
+    print("    %-14s %-9s %8s %6s %6s %8s %8s" % ("ALIAS","STATE","REQ","OK","FAIL","IN","OUT"))
+    for x in ks:
+        print("    %-14s %-9s %8s %6s %6s %8s %8s" % (x.get("alias",""), x.get("state",""), x.get("requests",0), x.get("ok",0), x.get("fail",0), k(x.get("in_tokens")), k(x.get("out_tokens"))))
+ms = d.get("models", [])
+if ms:
+    print("  models:")
+    print("    %-28s %8s %8s %8s" % ("MODEL","REQ","IN","OUT"))
+    for x in ms:
+        print("    %-28s %8s %8s %8s" % (x.get("model",""), x.get("requests",0), k(x.get("in_tokens")), k(x.get("out_tokens"))))
+' || die "failed to parse crew-proxy response";;
   keys) echo "== api keys ($KEYS_FILE) =="
     if [ ! -f "$KEYS_FILE" ]; then echo "  (no keys file; create it with lines: <alias>=<api-key>)";
     else

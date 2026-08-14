@@ -65,6 +65,8 @@ crew ls                   # list sessions (name / status / model / key)
 crew models               # list model presets
 crew keys                 # list API key aliases (masked)
 crew up                   # ensure dependency services (CCR / crew-proxy) are up
+crew stats                # crew-proxy usage in the terminal (key health + token totals)
+crew doctor               # read-only health check (services up, keys/key-policy resolvable)
 crew attach mysess        # attach to observe
 crew kill mysess          # stop a session
 crew send bob "look at X" # drop a message in another session's mailbox (see "Talking between sessions")
@@ -163,7 +165,7 @@ crew-proxy ships a local control panel — open **http://127.0.0.1:8788/dashboar
 (zero deps, same process as the proxy, vanilla JS refreshing every 3s). It shows:
 
 - **Keys** — each key's healthy/tripped state, request count, ok/fail, consecutive failures, cooldown
-- **Sessions** — every crew session (name/status/model/key/dir); each row has **kill** and **edit** (change model/key)
+- **Sessions** — every crew session (name/status/model/key/dir); each row has **copy** (copies the `crew <name> --model ...` command), **kill**, and **edit** (change model/key)
 - **Recent requests** — a live request feed (model · key · status · whether it failed over)
 - **+ add key/provider** — fill in alias/key/model/base_url to write a new provider into your CCR
   config (**config.json is backed up first**; run `crew up` afterwards to reload CCR)

@@ -476,7 +476,8 @@ async function refresh(){
     tb('#sessions').innerHTML=(d.sessions||[]).map(x=>`<tr>
       <td>${esc(x.name)}</td><td>${pill(x.status)}</td><td>${esc(x.model)}</td><td>${esc(x.key)}</td>
       <td class=dir title="${esc(x.dir)}">${esc(x.dir)}</td>
-      <td><button onclick="editSess('${esc(x.name)}','${esc(x.model)}','${esc(x.key)}')">edit</button>
+      <td><button onclick="copyCmd('${esc(x.name)}','${esc(x.model)}','${esc(x.key)}')">copy</button>
+          <button onclick="editSess('${esc(x.name)}','${esc(x.model)}','${esc(x.key)}')">edit</button>
           <button class=danger onclick="killSess('${esc(x.name)}')">kill</button></td></tr>`).join('')
       ||'<tr><td class=dim colspan=6>no sessions</td></tr>';
   }catch(e){$('#sess-err').textContent='sessions unavailable'}
@@ -494,6 +495,14 @@ async function refresh(){
 }
 
 let editName=null;
+function copyCmd(name,model,key){
+  let cmd='crew '+name;
+  if(model && model!=='-' && model!=='default') cmd+=' --model '+model;
+  if(key && key!=='-') cmd+=' --key '+key;
+  navigator.clipboard.writeText(cmd).then(()=>{
+    const el=$('#tick'); el.textContent='copied: '+cmd;
+  }).catch(()=>{ prompt('copy this command:', cmd); });
+}
 function editSess(name,model,key){editName=name;$('#edittitle').textContent='edit '+name;
   $('#edit-model').value=model==='-'?'':model;$('#edit-key').value=key==='-'?'':key;$('#editdlg').showModal()}
 $('#edit-save').onclick=async()=>{await jpost('/api/session/config',
