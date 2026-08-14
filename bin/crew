@@ -193,6 +193,21 @@ ccr_provider_for(){
     process.stdout.write(hit?hit.name:"");
   ' "$cfg" 2>/dev/null
 }
+# Which realmodels can a given raw gateway key serve? Union of models[] across every ccr
+# provider whose api_key matches. Drives the key->model interactive menu: pick a key first,
+# then choose from exactly what that key can route (joycode/personal/prod treated the same).
+ccr_models_for_key(){
+  local key="$1" cfg="$HOME/.claude-code-router/config.json"
+  [ -f "$cfg" ] || return 0; command -v node >/dev/null 2>&1 || return 0
+  KEY="$key" node -e '
+    const fs=require("fs");
+    const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    const ps=c.Providers||c.providers||[];
+    const out=[];
+    for(const p of ps){ if((p.api_key||p.apiKey)===process.env.KEY) for(const m of (p.models||[])) if(!out.includes(m)) out.push(m); }
+    process.stdout.write(out.join("\n"));
+  ' "$cfg" 2>/dev/null
+}
 # Resolve a pinned --key alias per the loaded backend's KEY_MODE. Shared by ensure_session
 # and crew_delegate_core so both honor --key identically. token mode: sets KEY_INBOUND_OVERRIDE
 # to the raw key (becomes ANTHROPIC_AUTH_TOKEN). ccr mode: rewrites BK_MODEL to the provider
@@ -289,16 +304,31 @@ interactive_pick(){  # interactive_pick <session-name>
   local def_key=""; [ -f "$CREW_STATE/$name.key" ] && def_key=$(cat "$CREW_STATE/$name.key")
   local def_key_disp; def_key_disp=$([ -n "$def_key" ] && [ "$def_key" != "-" ] && printf '%s' "$def_key" || printf '(backend default)')
 
-  # model — skip if --model was given on the CLI
-  if [ "${BACKEND_EXPLICIT:-0}" != 1 ]; then
-    local chosen; chosen=$(list_backends_inline | tr ' ' '\n' | awk 'NF' | _pick_one "pick model" "$def_bk")
-    BACKEND="$chosen"; BACKEND_EXPLICIT=1
-  fi
-  # key — skip if --key was given. First option "(backend default)" clears the pin.
+  # key FIRST — skip if --key was given. "(backend default)" clears the pin (old preset-name flow).
+  # A concrete key's value then drives the model menu (only models that key can route).
   if [ "${KEY_EXPLICIT:-0}" != 1 ]; then
     local chosen; chosen=$( { echo "(backend default)"; list_key_aliases; } | awk 'NF' | _pick_one "pick key" "$def_key_disp")
     case "$chosen" in "(backend default)"|"") KEY="-";; *) KEY="$chosen";; esac
     KEY_EXPLICIT=1
+  fi
+  # model — skip if --model was given. If a concrete key is chosen, list exactly the realmodels
+  # that key serves (from CCR) and set BACKEND=provider,realmodel. Else fall back to preset names.
+  if [ "${BACKEND_EXPLICIT:-0}" != 1 ]; then
+    if [ -n "$KEY" ] && [ "$KEY" != "-" ]; then
+      local _kv; _kv=$(lookup_key "$KEY")
+      local _models; _models=$(ccr_models_for_key "$_kv")
+      if [ -n "$_models" ]; then
+        local _real; _real=$(printf '%s\n' "$_models" | awk 'NF' | _pick_one "pick model (key: $KEY)" "${def_bk##*,}")
+        local _prov; _prov=$(ccr_provider_for "$_real" "$_kv")
+        BACKEND=$([ -n "$_prov" ] && printf '%s,%s' "$_prov" "$_real" || printf '%s' "$_real")
+      else
+        log "WARN: key '$KEY' has no CCR provider/models; falling back to preset list"
+        BACKEND=$(list_backends_inline | tr ' ' '\n' | awk 'NF' | _pick_one "pick model" "$def_bk")
+      fi
+    else
+      BACKEND=$(list_backends_inline | tr ' ' '\n' | awk 'NF' | _pick_one "pick model" "$def_bk")
+    fi
+    BACKEND_EXPLICIT=1
   fi
   # tmux — skip if --tmux/--no-tmux was given
   if [ "${NO_TMUX_EXPLICIT:-0}" != 1 ]; then
