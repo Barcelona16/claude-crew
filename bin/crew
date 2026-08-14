@@ -120,6 +120,19 @@ resolve_name_for_cwd(){
 resolve_explicit_name(){ local name="$1" cwd="$2"; if [ -f "$REG" ] && awk -F'\t' -v m="$name" '$2==m{ok=1}END{exit !ok}' "$REG"; then :; else printf '%s\t%s\n' "$cwd" "$name" >> "$REG"; fi; echo "$name"; }
 path_for_name(){ awk -F'\t' -v m="$1" '$2==m{print $1}' "$REG" 2>/dev/null | head -1; }
 
+# All session names registered for a directory (a path may have several). One per line.
+sessions_for_cwd(){ local cwd="$1"; [ -f "$REG" ] && awk -F'\t' -v p="$cwd" '$1==p{print $2}' "$REG" | awk 'NF'; }
+
+# Always mint a NEW deduped session name for a directory and register it (unlike
+# resolve_name_for_cwd, which reuses the first existing name). Used by the "+ new" menu path.
+fresh_name_for_cwd(){
+  local cwd="$1" base name n
+  base=$(sanitize "$(basename "$cwd")"); [ -z "$base" ] && base="root"
+  name="$base"; n=2
+  while [ -f "$REG" ] && awk -F'\t' -v m="$name" '$2==m{ok=1}END{exit !ok}' "$REG"; do name="${base}${n}"; n=$((n+1)); done
+  printf '%s\t%s\n' "$cwd" "$name" >> "$REG"; echo "$name"
+}
+
 # --- backend presets --------------------------------------------------------
 list_backends_inline(){ { echo default; ls "$BACKEND_DIR"/*.conf 2>/dev/null | sed 's:.*/::;s:\.conf$::'; } | sort -u | tr '\n' ' '; }
 # Echo the model a backend runs, WITHOUT sourcing the conf (sourcing can fire a backend's
@@ -698,7 +711,30 @@ EOF
   inbox) shift; crew_inbox "$@";;
   log) shift; crew_log "$@";;
   ""|-h|--help)
-    if [ "${1:-}" = "" ]; then name=$(resolve_name_for_cwd "$PWD"); [ "$PICK" = 1 ] && interactive_pick "$name"; ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO" "$NO_TMUX"; exec tmux -u attach -t "$TMUX_PREFIX$name"; fi
+    if [ "${1:-}" = "" ]; then
+      # No args: prefer this directory's existing session(s). With one or more, show a menu
+      # of them plus a "+ new session" entry; picking a session attaches it, picking new runs
+      # the --pick flow for a fresh session. With none, go straight to --pick for a new one.
+      existing=$(sessions_for_cwd "$PWD")
+      NEW_LABEL="+ new session"
+      if [ -n "$existing" ]; then
+        chosen=$(printf '%s\n%s\n' "$existing" "$NEW_LABEL" | _pick_one "session" "$(printf '%s' "$existing" | head -1)")
+        [ -z "$chosen" ] && chosen="$(printf '%s' "$existing" | head -1)"
+      else
+        chosen="$NEW_LABEL"
+      fi
+      if [ "$chosen" = "$NEW_LABEL" ]; then
+        # first session for this dir -> take the dir's base name; a further "+ new" when
+        # sessions already exist -> mint a deduped fresh name.
+        if [ -n "$existing" ]; then name=$(fresh_name_for_cwd "$PWD"); else name=$(resolve_name_for_cwd "$PWD"); fi
+        PICK=1; interactive_pick "$name"
+      else
+        name="$chosen"   # attach an existing session as-is (its remembered model/key stick)
+      fi
+      ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO" "$NO_TMUX"
+      [ "$NO_TMUX" = 1 ] || exec tmux -u attach -t "$TMUX_PREFIX$name"
+      exit 0
+    fi
     awk 'NR>=2{ if($0 !~ /^#/) exit; sub(/^# ?/,""); print }' "$0";;
   *)
     first="$1"; shift || true; rest="$*"
