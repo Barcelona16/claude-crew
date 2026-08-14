@@ -30,6 +30,7 @@
 #   crew models           list available model presets
 #   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
 #   crew up               ensure dependency services are up (CCR :3456 + crew-proxy :8788)
+#   crew doctor           read-only health check (services, keys.conf, key-policy resolvable)
 #
 # MESSAGING (between sessions)
 #   crew send [--from X] [--nudge] <name> "msg"   drop a message in <name>'s mailbox
@@ -611,6 +612,29 @@ EOF
     ;;
   models|backends) echo "== models =="; for b in $(list_backends_inline); do echo "  $b"; done;;
   up) crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}"; crew_proxy_up; crew_ext_dep_up "";;
+  doctor)
+    # Read-only health check: services up? config sane? every key-policy alias resolvable?
+    echo "== crew doctor =="
+    ccrp="${CREW_CCR_PORT:-3456}"; prxp="${CREW_PROXY_PORT:-8788}"
+    if port_listening "$ccrp"; then echo "  [ok]   CCR listening on :$ccrp"; else echo "  [WARN] CCR not listening on :$ccrp (crew up, or check launchd/systemd)"; fi
+    if port_listening "$prxp"; then echo "  [ok]   crew-proxy listening on :$prxp"; else echo "  [WARN] crew-proxy not listening on :$prxp (optional; presets point here)"; fi
+    if [ -f "$KEYS_FILE" ]; then echo "  [ok]   keys.conf present ($(list_key_aliases | grep -c . ) alias(es))"; else echo "  [WARN] no keys.conf at $KEYS_FILE"; fi
+    pol="$CREW_HOME/key-policy.conf"
+    if [ ! -f "$pol" ]; then echo "  [ok]   no key-policy.conf (single-key passthrough — nothing to check)"
+    else
+      echo "  key-policy.conf:"
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue;; esac
+        m="${line%%=*}"; m="$(printf '%s' "$m" | tr -d '[:space:]')"; rest="${line#*=}"
+        [ -n "$m" ] || continue
+        for al in $rest; do
+          kv=$(lookup_key "$al")
+          if [ -z "$kv" ]; then echo "    [ERR]  $m: alias '$al' not in keys.conf"
+          elif [ -z "$(ccr_provider_for "$m" "$kv")" ]; then echo "    [ERR]  $m: no CCR provider serves '$m' with key '$al'"
+          else echo "    [ok]   $m ← $al"; fi
+        done
+      done < "$pol"
+    fi;;
   keys) echo "== api keys ($KEYS_FILE) =="
     if [ ! -f "$KEYS_FILE" ]; then echo "  (no keys file; create it with lines: <alias>=<api-key>)";
     else

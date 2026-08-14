@@ -421,7 +421,7 @@ label{font-size:12px;color:#8b949e}
   </section>
 
   <section><h2>Recent requests</h2><div id="logs"><table><thead><tr>
-    <th>t</th><th>model</th><th>key</th><th>status</th><th></th>
+    <th>t</th><th>model</th><th>key</th><th>status</th><th>latency</th><th>tokens</th><th></th>
   </tr></thead><tbody></tbody></table></div></section>
 
   <section><button id="addbtn">+ add key / provider (writes CCR config)</button></section>
@@ -485,8 +485,10 @@ async function refresh(){
     const l=await jget('/api/logs?n=100');
     tb('#logs table').innerHTML=(l.logs||[]).map(x=>`<tr><td class=dim>${x.t}s</td><td>${esc(x.model)}</td>
       <td>${esc(x.alias)}</td><td>${x.ok?pill('healthy'):'<span class=err>'+esc(x.status)+'</span>'}</td>
+      <td class=dim>${x.ms!=null?x.ms+'ms':'-'}</td>
+      <td class=dim>${(x.in_tok!=null||x.out_tok!=null)?kfmt(x.in_tok)+'/'+kfmt(x.out_tok):'-'}</td>
       <td class=dim>${x.failover?'failover':''}${x.forced?' forced':''}</td></tr>`).join('')
-      ||'<tr><td class=dim colspan=5>no requests yet</td></tr>';
+      ||'<tr><td class=dim colspan=7>no requests yet</td></tr>';
   }catch(e){}
   $('#tick').textContent='updated '+new Date().toLocaleTimeString();
 }
@@ -826,6 +828,7 @@ class Handler(BaseHTTPRequestHandler):
                 method="POST",
             )
             try:
+                _t_send = time.time()
                 resp = urllib.request.urlopen(req, timeout=300)
             except urllib.error.HTTPError as e:
                 if _is_fail(e.code) and not forced:
@@ -858,7 +861,7 @@ class Handler(BaseHTTPRequestHandler):
             # header phase reached with a good status -> commit to this key, relay body.
             BREAKER.record_ok(alias)
             STATS.record(alias, realmodel, getattr(resp, "status", 200), ok=True,
-                         forced=forced, failover=bool(tried))
+                         forced=forced, failover=bool(tried), latency=time.time() - _t_send)
             captured = self._relay(resp, streaming=stream, capture=True)
             # Token accounting happens HERE — after the body is fully relayed to the
             # client — so parsing never adds latency to the forward path. Best-effort.
