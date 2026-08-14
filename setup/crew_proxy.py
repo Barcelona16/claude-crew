@@ -761,19 +761,37 @@ class Handler(BaseHTTPRequestHandler):
         log.info("added CCR provider '%s' + key '%s' (backup %s)", pname, alias, backup)
         return self._send_json({"ok": True, "provider": pname, "backup_path": backup})
 
-    # -- plain reverse proxy (no key logic): health, /v1/models, unknown paths --
-    def _passthrough(self, body):
+    # -- plain reverse proxy (no key logic): health, /v1/models, unknown paths, and
+    #    policy-less model calls. When model is given (a real completion call), the request
+    #    is counted under the synthetic "direct" key so the dashboard shows all traffic. --
+    def _passthrough(self, body, model=None, stream=False):
         url = CCR_URL + self.path
         req = urllib.request.Request(url, data=body or None, headers=self._fwd_headers(),
                                      method=self.command)
+        _t = time.time()
         try:
-            resp = urllib.request.urlopen(req, timeout=120)
+            resp = urllib.request.urlopen(req, timeout=300 if model else 120)
         except urllib.error.HTTPError as e:
+            if model:
+                STATS.record("direct", model, e.code, ok=not _is_fail(e.code), forced=False, failover=False)
             self._relay(e, streaming=False)
         except Exception as e:
+            if model:
+                STATS.record("direct", model, "ERR", ok=False, forced=False, failover=False)
             self._send_err(502, f"crew-proxy: CCR unreachable: {e}")
         else:
-            self._relay(resp, streaming=False)
+            if model:
+                STATS.record("direct", model, getattr(resp, "status", 200), ok=True,
+                             forced=False, failover=False, latency=time.time() - _t)
+                captured = self._relay(resp, streaming=stream, capture=True)
+                if captured:
+                    try:
+                        it, ot = parse_usage(captured)
+                        STATS.record_usage("direct", model, it, ot)
+                    except Exception:
+                        pass
+            else:
+                self._relay(resp, streaming=False)
 
     # -- key-aware routing with failover --
     def _route(self, body):
@@ -789,8 +807,10 @@ class Handler(BaseHTTPRequestHandler):
 
         policy = load_policy().get(realmodel, [])
         if not policy:
-            # No priority policy for this model -> behave as a plain proxy (CCR routes as configured).
-            self._passthrough(body)
+            # No priority policy for this model -> plain forward to CCR (CCR routes as
+            # configured). Still counted, so the dashboard reflects ALL traffic — the key
+            # column shows "direct" since no crew-proxy key selection happened here.
+            self._passthrough(body, model=realmodel, stream=stream)
             return
 
         keys = load_keys()
