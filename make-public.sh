@@ -57,8 +57,10 @@ for d in "${DROP[@]}"; do
 done
 
 say "4) boundary check (must be zero)"
-# The public build must not mention joycode, the JD internal gateway, or JD-only model names.
-PATTERNS='joycode|llm-gw|jd\.local|joybuilder|GLM-5\.2|kimi-k3|coding\.jd\.com'
+# The public build must not mention joycode, the JD internal gateway, or JD-only
+# identifiers. Note: GLM / Kimi are *public* models (Zhipu / Moonshot), so their names
+# are fine in the open-source build — only genuinely-internal markers are forbidden here.
+PATTERNS='joycode|llm-gw|jd\.local|joybuilder|coding\.jd\.com'
 if grep -rInE "$PATTERNS" "$BUILD" 2>/dev/null; then
   die "boundary check FAILED — internal references above must not reach the public build"
 fi
