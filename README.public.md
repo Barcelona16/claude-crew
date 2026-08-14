@@ -140,7 +140,8 @@ crew-proxy 自带一个本地控制面板,浏览器打开 **http://127.0.0.1:878
   之后 `crew up` 重载 CCR 生效)
 
 面板只监听 `127.0.0.1`(本机),写操作(kill / 改配置 / 加 provider)都做了输入校验防注入。
-本版**不统计 token/成本**(只统计请求次数),token 计量留作后续。
+**token 用量**按 key/模型累计(input/output tokens,从上游响应的 usage 字段解析,**在响应转发完
+之后**做,不拖慢转发;流式也支持),面板显示;本版只统计 token 数,不折算成本。
 
 装 launchd agent(macOS;plist 由 setup 生成在 `~/.claude-code-router/`):
 

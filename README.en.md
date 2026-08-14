@@ -175,8 +175,10 @@ crew-proxy ships a local control panel — open **http://127.0.0.1:8788/dashboar
   config (**config.json is backed up first**; run `crew up` afterwards to reload CCR)
 
 The panel binds `127.0.0.1` only. Every write op (kill / edit / add provider) validates input to
-prevent injection. This version does **not** track token/cost (request counts only) — token
-accounting is left for a later iteration.
+prevent injection. **Token usage** is tallied per key and per model (input/output tokens, parsed
+from the upstream response's usage field **after** the body is relayed — so it never slows
+forwarding; streaming supported too) and shown on the panel. This version counts tokens only, not
+cost.
 
 Install the launchd agents (macOS; plists are generated under `~/.claude-code-router/`):
 

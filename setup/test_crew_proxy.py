@@ -59,7 +59,8 @@ class MockCCR(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload)
         else:
-            payload = json.dumps({"ok": True, "provider": provider}).encode()
+            payload = json.dumps({"ok": True, "provider": provider,
+                                  "usage": {"input_tokens": 10, "output_tokens": 20}}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -232,6 +233,32 @@ check("bad alias rejected", code == 400 and not r.get("ok"))
 code, r = jpost("/api/ccr/provider", {"alias": "k5", "key": "x", "model": "MODEL_X",
                                        "base_url": "ftp://nope", "transformer": "OpenAI"})
 check("non-http base_url rejected", code == 400 and not r.get("ok"))
+
+# ── usage parsing (unit) ──────────────────────────────────────────────────────────
+print("Usage parsing (unit):")
+check("anthropic non-stream", cp.parse_usage(
+    json.dumps({"usage": {"input_tokens": 12, "output_tokens": 34}}).encode()) == (12, 34))
+check("openai non-stream", cp.parse_usage(
+    json.dumps({"usage": {"prompt_tokens": 5, "completion_tokens": 7}}).encode()) == (5, 7))
+_sse = (b'data: {"type":"message_start","message":{"usage":{"input_tokens":100,"output_tokens":1}}}\n\n'
+        b'data: {"type":"content_block_delta"}\n\n'
+        b'data: {"type":"message_delta","usage":{"output_tokens":250}}\n\n'
+        b'data: [DONE]\n\n')
+check("anthropic SSE (max in, max out)", cp.parse_usage(_sse) == (100, 250))
+check("garbage -> (0,0)", cp.parse_usage(b"not json at all") == (0, 0))
+check("empty -> (0,0)", cp.parse_usage(b"") == (0, 0))
+check("no usage field -> (0,0)", cp.parse_usage(json.dumps({"ok": 1}).encode()) == (0, 0))
+
+# ── usage end-to-end: a successful request counts tokens ──────────────────────────
+print("Usage end-to-end:")
+reset(); cp.STATS.__init__(); MOCK["fail_providers"] = set()
+code, body = post()
+check("request ok", code == 200)
+time.sleep(0.1)  # usage recorded after relay
+_stat = cp.STATS.status()
+check("totals count tokens", _stat["totals"]["in_tokens"] == 10 and _stat["totals"]["out_tokens"] == 20)
+check("per-key k1 tokens", _stat["per_key"].get("k1", {}).get("out_tokens") == 20)
+check("per-model MODEL_X tokens", _stat["per_model"].get("MODEL_X", {}).get("in_tokens") == 10)
 
 print()
 if FAILS:

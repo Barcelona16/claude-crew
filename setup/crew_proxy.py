@@ -231,41 +231,70 @@ BREAKER = Breaker()
 
 
 class Stats:
-    """Request-level counters + a bounded in-memory log ring buffer for the dashboard.
-    Deliberately NOT persisted (keeps proxy-state.json small; "recent activity" resets on
-    restart) and NOT parsing response bodies (no token/cost accounting this version)."""
+    """Request-level counters + token usage + a bounded in-memory log ring buffer.
+    Token usage is BEST-EFFORT and parsed strictly OFF the forward path (see _relay):
+    a missing/garbled usage just means that request isn't counted — it never blocks or
+    slows the proxying. Counts only (tokens + request counts), never prompt/response text."""
 
     LOG_MAX = 200
 
     def __init__(self):
         self._lock = threading.Lock()
-        self.totals = {"requests": 0, "ok": 0, "fail": 0}
-        self.per_key = {}   # alias -> {requests, ok, fail}
-        self._logs = []     # list of dicts, newest last, capped at LOG_MAX
+        self.totals = {"requests": 0, "ok": 0, "fail": 0, "in_tokens": 0, "out_tokens": 0}
+        self.per_key = {}    # alias -> {requests, ok, fail, in_tokens, out_tokens}
+        self.per_model = {}  # model -> {requests, in_tokens, out_tokens}
+        self._logs = []      # list of dicts, newest last, capped at LOG_MAX
         self._t0 = time.time()
 
     def _key(self, alias):
-        return self.per_key.setdefault(alias, {"requests": 0, "ok": 0, "fail": 0})
+        return self.per_key.setdefault(
+            alias, {"requests": 0, "ok": 0, "fail": 0, "in_tokens": 0, "out_tokens": 0})
 
-    def record(self, alias, model, status, ok, forced, failover):
+    def _model(self, model):
+        return self.per_model.setdefault(model, {"requests": 0, "in_tokens": 0, "out_tokens": 0})
+
+    def record(self, alias, model, status, ok, forced, failover, latency=None):
         with self._lock:
             self.totals["requests"] += 1
             self.totals["ok" if ok else "fail"] += 1
             k = self._key(alias)
             k["requests"] += 1
             k["ok" if ok else "fail"] += 1
-            self._logs.append({
+            self._model(model)["requests"] += 1
+            entry = {
                 "t": round(time.time() - self._t0, 1),
                 "model": model, "alias": alias, "status": status,
                 "ok": ok, "forced": forced, "failover": failover,
-            })
+            }
+            if latency is not None:
+                entry["ms"] = round(latency * 1000)
+            self._logs.append(entry)
             if len(self._logs) > self.LOG_MAX:
                 del self._logs[:-self.LOG_MAX]
+
+    def record_usage(self, alias, model, in_tok, out_tok):
+        """Add token usage to the last-recorded request's key/model. Best-effort; called
+        AFTER the response body has been relayed to the client (never on the hot path)."""
+        if not in_tok and not out_tok:
+            return
+        with self._lock:
+            self.totals["in_tokens"] += in_tok
+            self.totals["out_tokens"] += out_tok
+            k = self._key(alias)
+            k["in_tokens"] += in_tok
+            k["out_tokens"] += out_tok
+            m = self._model(model)
+            m["in_tokens"] += in_tok
+            m["out_tokens"] += out_tok
+            if self._logs and self._logs[-1]["alias"] == alias:
+                self._logs[-1]["in_tok"] = in_tok
+                self._logs[-1]["out_tok"] = out_tok
 
     def status(self):
         with self._lock:
             return {"totals": dict(self.totals),
-                    "per_key": {a: dict(v) for a, v in self.per_key.items()}}
+                    "per_key": {a: dict(v) for a, v in self.per_key.items()},
+                    "per_model": {m: dict(v) for m, v in self.per_model.items()}}
 
     def logs(self, n):
         with self._lock:
@@ -273,6 +302,68 @@ class Stats:
 
 
 STATS = Stats()
+
+
+# ── usage parsing (best-effort, OFF the forward path) ─────────────────────────────
+USAGE_STREAM_CAP = 256 * 1024  # cap the bytes we retain for stream usage scanning
+
+
+def parse_usage(body_bytes):
+    """Extract (input_tokens, output_tokens) from a captured response body. Handles both
+    the non-streaming JSON shape and SSE streams. Returns (0, 0) on anything unexpected —
+    this is best-effort accounting, never a hard dependency. Supports Anthropic
+    (input_tokens/output_tokens) and OpenAI (prompt_tokens/completion_tokens) shapes."""
+    if not body_bytes:
+        return 0, 0
+    try:
+        text = body_bytes.decode("utf-8", "replace")
+    except Exception:
+        return 0, 0
+
+    def _from_usage(u):
+        if not isinstance(u, dict):
+            return None
+        it = u.get("input_tokens", u.get("prompt_tokens"))
+        ot = u.get("output_tokens", u.get("completion_tokens"))
+        if it is None and ot is None:
+            return None
+        return int(it or 0), int(ot or 0)
+
+    # Non-streaming: a single JSON object with a top-level "usage".
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        try:
+            obj = json.loads(stripped)
+            r = _from_usage(obj.get("usage"))
+            if r:
+                return r
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    # Streaming (SSE): scan `data:` lines for usage. Anthropic reports input_tokens in
+    # message_start and the final output_tokens in message_delta; OpenAI puts a usage
+    # object in the last chunk when stream_options.include_usage is set. We take the max
+    # input seen and the max output seen (final cumulative value).
+    in_tok = out_tok = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            evt = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        # Anthropic: usage nested under the event or under message
+        for u in (evt.get("usage"), (evt.get("message") or {}).get("usage")):
+            r = _from_usage(u)
+            if r:
+                in_tok = max(in_tok, r[0])
+                out_tok = max(out_tok, r[1])
+    return in_tok, out_tok
+
 
 
 # ── dashboard (single self-contained page; vanilla JS polling, no build step) ─────
@@ -315,7 +406,11 @@ label{font-size:12px;color:#8b949e}
 </header>
 <main>
   <section><h2>Keys</h2><table id="keys"><thead><tr>
-    <th>alias</th><th>state</th><th>requests</th><th>ok</th><th>fail</th><th>consec</th><th>cooldown</th>
+    <th>alias</th><th>state</th><th>requests</th><th>ok</th><th>fail</th><th>in tok</th><th>out tok</th><th>consec</th><th>cooldown</th>
+  </tr></thead><tbody></tbody></table></section>
+
+  <section><h2>Usage by model</h2><table id="models"><thead><tr>
+    <th>model</th><th>requests</th><th>in tok</th><th>out tok</th><th>total tok</th>
   </tr></thead><tbody></tbody></table></section>
 
   <section><h2>Sessions</h2>
@@ -357,6 +452,7 @@ label{font-size:12px;color:#8b949e}
 const $=s=>document.querySelector(s), tb=s=>document.querySelector(s+' tbody');
 function pill(s){return `<span class="pill ${s}">${s}</span>`}
 function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function kfmt(n){n=n||0;return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n)}
 
 async function jget(u){const r=await fetch(u);if(!r.ok)throw new Error(r.status);return r.json()}
 async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}
@@ -365,10 +461,13 @@ async function refresh(){
   try{
     const s=await jget('/api/status');
     $('#meta').textContent=`:${s.port} -> ${s.ccr_url}  ·  trip@${s.fail_n} cooldown ${s.cooldown}s`;
-    $('#totals').textContent=`req ${s.totals.requests}  ok ${s.totals.ok}  fail ${s.totals.fail}`;
+    $('#totals').textContent=`req ${s.totals.requests}  ok ${s.totals.ok}  fail ${s.totals.fail}  ·  tok ${kfmt(s.totals.in_tokens)}in / ${kfmt(s.totals.out_tokens)}out`;
     tb('#keys').innerHTML=s.keys.map(k=>`<tr><td>${esc(k.alias)}</td><td>${pill(k.state)}</td>
-      <td>${k.requests}</td><td>${k.ok}</td><td>${k.fail}</td><td>${k.consec_fails}</td>
-      <td>${k.cooldown_left?k.cooldown_left+'s':'-'}</td></tr>`).join('')||'<tr><td class=dim colspan=7>no key activity yet</td></tr>';
+      <td>${k.requests}</td><td>${k.ok}</td><td>${k.fail}</td><td>${kfmt(k.in_tokens)}</td><td>${kfmt(k.out_tokens)}</td>
+      <td>${k.consec_fails}</td><td>${k.cooldown_left?k.cooldown_left+'s':'-'}</td></tr>`).join('')||'<tr><td class=dim colspan=9>no key activity yet</td></tr>';
+    tb('#models').innerHTML=(s.models||[]).map(m=>`<tr><td>${esc(m.model)}</td><td>${m.requests}</td>
+      <td>${kfmt(m.in_tokens)}</td><td>${kfmt(m.out_tokens)}</td><td>${kfmt((m.in_tokens||0)+(m.out_tokens||0))}</td></tr>`).join('')
+      ||'<tr><td class=dim colspan=5>no usage yet</td></tr>';
   }catch(e){$('#meta').innerHTML='<span class=err>proxy status unavailable</span>'}
 
   try{
@@ -473,11 +572,12 @@ class Handler(BaseHTTPRequestHandler):
         brk = BREAKER.snapshot(aliases, now)
         keys = []
         for a in sorted(set(st["per_key"]) | set(brk)):
-            pk = st["per_key"].get(a, {"requests": 0, "ok": 0, "fail": 0})
+            pk = st["per_key"].get(a, {"requests": 0, "ok": 0, "fail": 0, "in_tokens": 0, "out_tokens": 0})
             b = brk.get(a, {"consec_fails": 0, "state": "healthy", "cooldown_left": 0})
             keys.append({"alias": a, **pk, **b})
+        models = [{"model": m, **v} for m, v in sorted(st["per_model"].items())]
         return {"port": PORT, "ccr_url": CCR_URL, "fail_n": FAIL_N, "cooldown": COOLDOWN,
-                "totals": st["totals"], "keys": keys}
+                "totals": st["totals"], "keys": keys, "models": models}
 
     def _api_sessions(self):
         out, err = run_crew(["ls", "--json"])
@@ -759,11 +859,22 @@ class Handler(BaseHTTPRequestHandler):
             BREAKER.record_ok(alias)
             STATS.record(alias, realmodel, getattr(resp, "status", 200), ok=True,
                          forced=forced, failover=bool(tried))
-            self._relay(resp, streaming=stream)
+            captured = self._relay(resp, streaming=stream, capture=True)
+            # Token accounting happens HERE — after the body is fully relayed to the
+            # client — so parsing never adds latency to the forward path. Best-effort.
+            if captured:
+                try:
+                    it, ot = parse_usage(captured)
+                    STATS.record_usage(alias, realmodel, it, ot)
+                except Exception:
+                    pass
             return
 
     # -- relay an upstream response (or HTTPError) back to the client --
-    def _relay(self, resp, streaming):
+    # capture=True tees the body into a capped buffer and returns it (for off-path usage
+    # parsing by the caller). Streaming still forwards chunk-by-chunk in real time; we only
+    # retain up to USAGE_STREAM_CAP bytes for the post-hoc usage scan, then stop retaining.
+    def _relay(self, resp, streaming, capture=False):
         code = getattr(resp, "status", None) or getattr(resp, "code", 200)
         headers = resp.headers
         ct = headers.get("Content-Type", "application/json")
@@ -773,6 +884,7 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in headers.items():
             if k.lower() not in hop:
                 self.send_header(k, v)
+        buf = bytearray() if capture else None
         if streaming:
             self.send_header("Connection", "close")
             self.end_headers()
@@ -783,6 +895,8 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     self.wfile.flush()
+                    if buf is not None and len(buf) < USAGE_STREAM_CAP:
+                        buf.extend(chunk)  # retain (capped) for post-relay usage scan
             except (BrokenPipeError, ConnectionResetError):
                 pass
         else:
@@ -793,6 +907,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+            if buf is not None:
+                buf.extend(data)
+        return bytes(buf) if buf is not None else None
 
 
 def main():
