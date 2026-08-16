@@ -21,9 +21,11 @@
 
 ```bash
 git clone <this repo> && cd claude-crew
-bash install.sh          # 把 `crew` 软链到 ~/.local/bin
+bash install.sh          # 把 `crew` 软链到 ~/.local/bin + 接线会话 statusLine
 crew --help
 ```
+
+`install.sh` 顺带把 Claude Code 的 statusLine 指向本仓自带的 `bin/crew-statusline.sh`,会话底部常显 `⬡ 会话名 · 模型 · 🔑key`。幂等且非破坏:只动 `~/.claude/settings.json` 的 `statusLine` 键,且仅当它为空或本就指向某个 `crew-statusline.sh`;第三方 statusLine 原样保留只给提示。加 `--no-statusline` 完全跳过。
 
 ## 一键 `setup.sh`(mac / Linux 通用)
 

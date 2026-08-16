@@ -24,9 +24,11 @@ It's a thin, dependency-light bash script (just tmux + Claude Code). No daemon, 
 
 ```bash
 git clone <this repo> && cd claude-crew
-bash install.sh          # symlinks `crew` into ~/.local/bin
+bash install.sh          # symlinks `crew` into ~/.local/bin + wires the session statusLine
 crew --help
 ```
+
+`install.sh` also points Claude Code's statusLine at this repo's bundled `bin/crew-statusline.sh`, so every session shows `⬡ name · model · 🔑key` at the bottom. Idempotent and non-destructive: it only touches the `statusLine` key in `~/.claude/settings.json`, and only when that key is empty or already points at some `crew-statusline.sh`; a third-party statusLine is left as-is with a hint. Pass `--no-statusline` to skip it.
 
 ## One-shot `setup.sh` (macOS / Linux)
 
