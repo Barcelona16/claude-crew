@@ -9,7 +9,8 @@
 #   * point different sessions at different model backends
 #
 # Backends are presets you drop in ~/.config/claude-crew/backends/<name>.conf.
-# The built-in "default" backend is just plain Claude (your ambient config).
+# There is NO implicit "default" backend — a backend must be chosen explicitly
+# (--model <name>, CREW_BACKEND, a session's remembered .backend, or --pick).
 #
 # USAGE
 #   crew [--model M] [--key A] [--pick] [--fresh] [--safe] [--no-tmux] [name] [task...]
@@ -176,18 +177,18 @@ fresh_name_for_cwd(){
 }
 
 # --- backend presets --------------------------------------------------------
-list_backends_inline(){ { echo default; ls "$BACKEND_DIR"/*.conf 2>/dev/null | sed 's:.*/::;s:\.conf$::'; } | sort -u | tr '\n' ' '; }
+list_backends_inline(){ ls "$BACKEND_DIR"/*.conf 2>/dev/null | sed 's:.*/::;s:\.conf$::' | sort -u | tr '\n' ' '; }
 # Echo the model a backend runs, WITHOUT sourcing the conf (sourcing can fire a backend's
-# ENSURE_CMD side effects; read-only paths like `ls` must not). "-" = plain default Claude.
+# ENSURE_CMD side effects; read-only paths like `ls` must not).
 model_for_backend(){
   local b="$1" f="$BACKEND_DIR/$1.conf" m=""
-  [ "$b" = default ] && { printf -- '-'; return; }
   [ -f "$f" ] || { printf '?'; return; }
   m=$(grep -E '^[[:space:]]*MODEL=' "$f" 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*MODEL=//')
   m="${m%\"}"; m="${m#\"}"; m="${m%\'}"; m="${m#\'}"
   printf '%s' "${m:-<default>}"
 }
-# Sets BK_* globals from $BACKEND_DIR/<backend>.conf. "default" needs no file.
+# Sets BK_* globals from $BACKEND_DIR/<backend>.conf. There is no "default" backend;
+# an unknown/empty name (that isn't a synthesized ccr "provider,realmodel") dies.
 # A backend given as "provider,realmodel" (comma) with no matching .conf is a synthesized
 # ccr backend — the key-first --pick menu produces these for models that have no preset file
 # (e.g. joycode models). It routes through crew-proxy (:8788) -> CCR just like the ccr presets.
@@ -200,12 +201,12 @@ load_backend(){
     . "$f"
     BK_BASE_URL="$BASE_URL"; BK_MODEL="$MODEL"; BK_TOKEN="$TOKEN"; BK_TOKEN_CMD="$TOKEN_CMD"; BK_TOKEN_ENV="$TOKEN_ENV"
     BK_ENSURE_CMD="$ENSURE_CMD"; BK_ENV_EXTRA="$ENV_EXTRA"; BK_DANGEROUS="$DANGEROUS"; BK_CLAUDE_FLAGS="$CLAUDE_FLAGS"; BK_KEY_MODE="$KEY_MODE"
-  elif [ "$b" != "default" ] && case "$b" in *,*) true;; *) false;; esac; then
+  elif case "$b" in *,*) true;; *) false;; esac; then
     # synthesized ccr backend "provider,realmodel" (no preset file)
     BK_BASE_URL="http://127.0.0.1:${CREW_PROXY_PORT:-8788}"; BK_MODEL="$b"; BK_TOKEN="test"
     BK_ENV_EXTRA="MAX_THINKING_TOKENS=0 CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1"; BK_KEY_MODE="ccr"
-  elif [ "$b" != "default" ]; then
-    die "backend '$b' not found ($f); available: $(list_backends_inline)"
+  else
+    die "backend '$b' not found ($f); pass --model <backend> or --pick. available: $(list_backends_inline)"
   fi
 }
 
@@ -430,7 +431,7 @@ _pick_multi(){  # _pick_multi <title>  (options on stdin) -> chosen lines on std
 interactive_pick(){  # interactive_pick <session-name>
   local name="$1"
   # Session-remembered defaults win over global defaults when this session already exists.
-  local def_bk="${CREW_BACKEND:-default}"; [ -f "$CREW_STATE/$name.backend" ] && def_bk=$(cat "$CREW_STATE/$name.backend")
+  local def_bk="${CREW_BACKEND:-}"; [ -f "$CREW_STATE/$name.backend" ] && def_bk=$(cat "$CREW_STATE/$name.backend")
   local def_key=""; [ -f "$CREW_STATE/$name.key" ] && def_key=$(cat "$CREW_STATE/$name.key")
   local def_key_disp; def_key_disp=$([ -n "$def_key" ] && [ "$def_key" != "-" ] && printf '%s' "$def_key" || printf '(backend default)')
 
@@ -489,7 +490,7 @@ ensure_session(){
   # In --no-tmux mode there's no tmux session to inspect or re-attach to, so skip
   # this block entirely and always (re)launch in the foreground below.
   if [ "$no_tmux" != 1 ] && tmux has-session -t "$tmux_s" 2>/dev/null; then
-    local running="default"; [ -f "$bkf" ] && running=$(cat "$bkf")
+    local running=""; [ -f "$bkf" ] && running=$(cat "$bkf")
     local running_key=""; [ -f "$keyf" ] && running_key=$(cat "$keyf")
     local want_restart=0
     if [ "${BACKEND_EXPLICIT:-0}" = 1 ] && [ "$backend" != "$running" ]; then
@@ -501,11 +502,14 @@ ensure_session(){
     if [ "$want_restart" = 1 ]; then tmux kill-session -t "$tmux_s" 2>/dev/null || true; else return; fi
   fi
   # Per-session backend memory: an explicit --backend wins and is remembered for
-  # next time; otherwise reuse whatever backend this session last started with;
-  # otherwise fall back to the default ($CREW_BACKEND or "default"). So switching a
-  # session's model once (crew --backend kimi <name>) sticks without re-passing it.
+  # next time; otherwise reuse whatever backend this session last started with.
+  # There is NO implicit default — if neither applies, the guard below refuses to spawn.
   if [ "${BACKEND_EXPLICIT:-0}" = 1 ]; then printf '%s\n' "$backend" > "$bkf"
   elif [ -f "$bkf" ]; then backend=$(cat "$bkf"); fi
+  # Enforce explicit backend selection (option B, 2026-08-17): no plain-ambient "default".
+  if [ -z "$backend" ] || [ "$backend" = default ]; then
+    die "no backend selected for '$name' — pass --model <backend>, set CREW_BACKEND, or use --pick. available: $(list_backends_inline)"
+  fi
   # Per-session key memory (mirrors backend memory): an explicit --key wins and sticks;
   # otherwise reuse the last pinned alias; empty/"-" alias => fall back to backend token.
   local keyalias="${KEY:-}"
@@ -604,7 +608,7 @@ send_task(){ local t; t=$(tmux_name_for "$1"); tmux send-keys -t "$t" -l "$2"; s
 # load_backend + the same env assembly as ensure_session.
 crew_delegate_core(){
   local backend="$1"; shift; local task="$*"
-  [ "$backend" = default ] && die "delegate needs a backend with a base URL (e.g. --model glm); 'default' is plain Claude."
+  { [ -z "$backend" ] || [ "$backend" = default ]; } && die "delegate needs an explicit backend with a base URL (e.g. --model glm). available: $(list_backends_inline)"
   [ -n "$task" ] || die "usage: crew delegate --model <name> \"<task>\""
   load_backend "$backend"
   apply_key_pin "${KEY:-}"   # honor --key (ccr: swaps provider; token: overrides inbound below)
@@ -714,7 +718,7 @@ crew_log(){
 }
 
 # --- arg parsing ------------------------------------------------------------
-BACKEND="${CREW_BACKEND:-default}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; NO_TMUX="${CREW_NO_TMUX:-0}"; NO_TMUX_EXPLICIT=0; PICK=0; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
+BACKEND="${CREW_BACKEND:-}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; NO_TMUX="${CREW_NO_TMUX:-0}"; NO_TMUX_EXPLICIT=0; PICK=0; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --model|--backend) BACKEND="${2:?--model needs a value (see: crew models)}"; BACKEND_EXPLICIT=1; shift 2;;
@@ -769,7 +773,7 @@ case "${1:-}" in
       if tmux has-session -t "$(tmux_name_for "$nm")" 2>/dev/null; then st="live"
       elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$(cat "$sidf")".jsonl >/dev/null 2>&1; then st="resumable"
       else st="new"; fi
-      bk=$(cat "$CREW_STATE/$nm.backend" 2>/dev/null || echo "${CREW_BACKEND:-default}")
+      bk=$(cat "$CREW_STATE/$nm.backend" 2>/dev/null || echo "?")
       ky=$(cat "$CREW_STATE/$nm.key" 2>/dev/null); [ -n "$ky" ] || ky="-"
     }
     if [ "$ls_json" = 1 ]; then
