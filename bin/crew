@@ -22,6 +22,8 @@
 #   crew <name> --key A             switch key, then attach
 #   crew <name> --model M --key A   switch both, then attach
 #   crew ls               list all known crew sessions (live + resumable, survives restart)
+#                         (main session pinned first, then most-recently-active)
+#   crew whoami [<name>]  show this session's params (model preset + real model, key, sid, base url)
 #   crew attach <name>    attach to observe a session
 #   crew stop <name>      stop a session's tmux but KEEP its state (resume/switch later)
 #   crew kill <name> [--purge]   delete a session for good (tmux + id + registry; --purge also transcript)
@@ -122,6 +124,17 @@ mtime(){ stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 # `crew attach/ls/send` reach the real tmux while crew never owns its lifecycle.
 tmux_name_for(){ if [ -f "$CREW_STATE/$1.tmux" ]; then cat "$CREW_STATE/$1.tmux"; else printf '%s' "$TMUX_PREFIX$1"; fi; }
 is_adopted(){ [ -f "$CREW_STATE/$1.tmux" ]; }
+# Most-recent-activity epoch for a session: max mtime across its transcript JSONL and its
+# .sid/.backend/.key state. Used to sort `crew ls` so the sessions you're working in float
+# up. Mirrors prune's staleness math (kept in sync). 0 when nothing on disk yet.
+session_activity(){
+  local nm="$1" sidf="$CREW_STATE/$nm.sid" last=0 s j m f
+  if [ -f "$sidf" ]; then s=$(cat "$sidf" 2>/dev/null)
+    for j in "$HOME"/.claude/projects/*/"$s".jsonl; do [ -f "$j" ] || continue; m=$(mtime "$j"); [ "$m" -gt "$last" ] && last=$m; done
+  fi
+  for f in "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key"; do [ -f "$f" ] || continue; m=$(mtime "$f"); [ "$m" -gt "$last" ] && last=$m; done
+  echo "$last"
+}
 
 # Opportunistic, throttled auto-release: at most once per CREW_PRUNE_EVERY seconds (default
 # 1 day) fire `crew prune` in the background to release sessions idle > CREW_PRUNE_DAYS
@@ -533,7 +546,11 @@ ensure_session(){
   [ -n "$BK_ENV_EXTRA" ] && envp="$envp $BK_ENV_EXTRA"
   # Let the agent inside know its own name + where crew's state lives, so `crew send/inbox`
   # from within the session addresses the right mailbox and auto-tags the sender.
+  # CREW_MODEL/CREW_KEY expose the session's current backend + key alias ("-" = backend
+  # default) so `crew whoami` / a statusline can report params without shelling out to state.
+  local keyexport="$keyalias"; [ -z "$keyexport" ] && keyexport="-"
   envp="$envp CREW_SESSION=$(printf %q "$name") CREW_HOME=$(printf %q "$CREW_HOME") CREW_STATE=$(printf %q "$CREW_STATE")"
+  envp="$envp CREW_MODEL=$(printf %q "$backend") CREW_KEY=$(printf %q "$keyexport")"
 
   local flags="${BK_CLAUDE_FLAGS:-${CREW_CLAUDE_FLAGS:-}}"
   if [ "$yolo" = 1 ] || [ "$BK_DANGEROUS" = 1 ]; then
@@ -736,6 +753,16 @@ case "${1:-}" in
     names=$( { [ -f "$REG" ] && awk -F'\t' 'NF>=2{print $2}' "$REG"
                ls "$CREW_STATE"/*.sid 2>/dev/null | sed 's:.*/::;s:\.sid$::'
              } | sort -u )
+    # Reorder so the sessions you care about come first: the main/primary session
+    # (CREW_MAIN_SESSION, default "main") pinned to the very top, then everything else by
+    # most-recent activity (session_activity) descending. Both the human table and --json
+    # read from $names, so the dashboard gets the same friendly order for free.
+    _main_name="${CREW_MAIN_SESSION:-main}"
+    names=$( printf '%s\n' "$names" | while IFS= read -r nm; do
+               [ -n "$nm" ] || continue
+               if [ "$nm" = "$_main_name" ]; then rank=99999999999; else rank=$(session_activity "$nm"); fi
+               printf '%s\t%s\n' "$rank" "$nm"
+             done | sort -t$'\t' -k1,1nr | cut -f2- )
     # emit one session's fields; sets globals nm/st/bk/ky/cwd for the caller to format
     _ls_row(){
       cwd=$(path_for_name "$nm"); [ -n "$cwd" ] || cwd="?"
@@ -791,6 +818,33 @@ EOF
         '
       fi
     fi
+    ;;
+  whoami|me|current)
+    # Report the CURRENT session's crew params — which model preset (+ real model), which
+    # key alias, sid, status, base URL, dir. Resolves the session from $CREW_SESSION (set
+    # inside every crew session) or cwd->registry; or pass one explicitly: crew whoami <name>.
+    w="${2:-$(whoami_session)}"
+    [ -n "$w" ] || die "not in a crew session (no CREW_SESSION; cwd not registered). Pass a name: crew whoami <name>"
+    bkf="$CREW_STATE/$w.backend"; keyf="$CREW_STATE/$w.key"; sidf="$CREW_STATE/$w.sid"
+    bk=$(cat "$bkf" 2>/dev/null); [ -n "$bk" ] || bk="${CREW_BACKEND:-default}"
+    ky=$(cat "$keyf" 2>/dev/null); kd="<backend default>"; [ -n "$ky" ] && [ "$ky" != "-" ] && kd="$ky"
+    sid=$(cat "$sidf" 2>/dev/null); [ -n "$sid" ] || sid="-"
+    if is_adopted "$w"; then st="adopted (tmux $(tmux_name_for "$w"))"
+    elif tmux has-session -t "$(tmux_name_for "$w")" 2>/dev/null; then st="live"
+    elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$sid".jsonl >/dev/null 2>&1; then st="resumable"
+    else st="new"; fi
+    # load_backend is pure (reads the preset, no service start) but `die`s on an unknown
+    # preset — run it in a subshell so a stale backend name can't abort whoami.
+    { read -r bkmodel; read -r bkurl; } < <( load_backend "$bk" >/dev/null 2>&1; printf '%s\n%s\n' "${BK_MODEL:-}" "${BK_BASE_URL:-}" )
+    cwd=$(path_for_name "$w"); [ -n "$cwd" ] || cwd="?"
+    echo "== crew whoami =="
+    printf '  session  : %s\n' "$w"
+    printf '  status   : %s\n' "$st"
+    printf '  model    : %s%s\n' "$bk" "$( [ -n "$bkmodel" ] && printf '  (%s)' "$bkmodel" )"
+    printf '  key      : %s\n' "$kd"
+    printf '  base url : %s\n' "${bkurl:-<ambient>}"
+    printf '  sid      : %s\n' "$sid"
+    printf '  dir      : %s\n' "$cwd"
     ;;
   stop) [ -n "${2:-}" ] || die "usage: crew stop <name>"
     # Stop the running tmux session but KEEP its on-disk state (.sid + transcript),
