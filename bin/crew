@@ -23,7 +23,6 @@
 #   crew <name> --model M --key A   switch both, then attach
 #   crew ls               list all known crew sessions (live + resumable, survives restart)
 #                         (main session pinned first, then most-recently-active)
-#   crew whoami [<name>]  show this session's params (model preset + real model, key, sid, base url)
 #   crew attach <name>    attach to observe a session
 #   crew stop <name>      stop a session's tmux but KEEP its state (resume/switch later)
 #   crew kill <name> [--purge]   delete a session for good (tmux + id + registry; --purge also transcript)
@@ -547,7 +546,7 @@ ensure_session(){
   # Let the agent inside know its own name + where crew's state lives, so `crew send/inbox`
   # from within the session addresses the right mailbox and auto-tags the sender.
   # CREW_MODEL/CREW_KEY expose the session's current backend + key alias ("-" = backend
-  # default) so `crew whoami` / a statusline can report params without shelling out to state.
+  # default) so the statusline can report params without shelling out to state.
   local keyexport="$keyalias"; [ -z "$keyexport" ] && keyexport="-"
   envp="$envp CREW_SESSION=$(printf %q "$name") CREW_HOME=$(printf %q "$CREW_HOME") CREW_STATE=$(printf %q "$CREW_STATE")"
   envp="$envp CREW_MODEL=$(printf %q "$backend") CREW_KEY=$(printf %q "$keyexport")"
@@ -819,33 +818,7 @@ EOF
       fi
     fi
     ;;
-  whoami|me|current)
-    # Report the CURRENT session's crew params — which model preset (+ real model), which
-    # key alias, sid, status, base URL, dir. Resolves the session from $CREW_SESSION (set
-    # inside every crew session) or cwd->registry; or pass one explicitly: crew whoami <name>.
-    w="${2:-$(whoami_session)}"
-    [ -n "$w" ] || die "not in a crew session (no CREW_SESSION; cwd not registered). Pass a name: crew whoami <name>"
-    bkf="$CREW_STATE/$w.backend"; keyf="$CREW_STATE/$w.key"; sidf="$CREW_STATE/$w.sid"
-    bk=$(cat "$bkf" 2>/dev/null); [ -n "$bk" ] || bk="${CREW_BACKEND:-default}"
-    ky=$(cat "$keyf" 2>/dev/null); kd="<backend default>"; [ -n "$ky" ] && [ "$ky" != "-" ] && kd="$ky"
-    sid=$(cat "$sidf" 2>/dev/null); [ -n "$sid" ] || sid="-"
-    if is_adopted "$w"; then st="adopted (tmux $(tmux_name_for "$w"))"
-    elif tmux has-session -t "$(tmux_name_for "$w")" 2>/dev/null; then st="live"
-    elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$sid".jsonl >/dev/null 2>&1; then st="resumable"
-    else st="new"; fi
-    # load_backend is pure (reads the preset, no service start) but `die`s on an unknown
-    # preset — run it in a subshell so a stale backend name can't abort whoami.
-    { read -r bkmodel; read -r bkurl; } < <( load_backend "$bk" >/dev/null 2>&1; printf '%s\n%s\n' "${BK_MODEL:-}" "${BK_BASE_URL:-}" )
-    cwd=$(path_for_name "$w"); [ -n "$cwd" ] || cwd="?"
-    echo "== crew whoami =="
-    printf '  session  : %s\n' "$w"
-    printf '  status   : %s\n' "$st"
-    printf '  model    : %s%s\n' "$bk" "$( [ -n "$bkmodel" ] && printf '  (%s)' "$bkmodel" )"
-    printf '  key      : %s\n' "$kd"
-    printf '  base url : %s\n' "${bkurl:-<ambient>}"
-    printf '  sid      : %s\n' "$sid"
-    printf '  dir      : %s\n' "$cwd"
-    ;;
+  whoami|me|current) die "crew whoami was removed — session params now live in the statusline (⬡ <session> · <model> · 🔑<key>)";;
   stop) [ -n "${2:-}" ] || die "usage: crew stop <name>"
     # Stop the running tmux session but KEEP its on-disk state (.sid + transcript),
     # so `crew [--backend X] <name>` resumes it later with full history. This is how
