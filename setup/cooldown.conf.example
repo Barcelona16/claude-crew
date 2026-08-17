@@ -1,0 +1,10 @@
+# crew-proxy tiered cooldown — optional. Absent -> crew-proxy uses the single
+# CREW_PROXY_COOLDOWN value for every trip (behavior identical to before this file existed).
+# When present, a tripped key's cooldown is chosen by the failure reason:
+#   daily_quota    seconds to park a key on quota exhaustion (429 w/ large or no Retry-After)
+#   transient      seconds for 401/403/5xx/connection errors (short backoff)
+#   retryafter_max threshold: a 429 with Retry-After <= this uses that Retry-After verbatim;
+#                  larger (or missing) Retry-After falls to daily_quota.
+daily_quota    = 86400
+transient      = 300
+retryafter_max = 300

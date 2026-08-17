@@ -1,0 +1,4 @@
+{
+  "personal": { "maps_to": "personal", "allow_models": [], "erp": "wangqiwang1" },
+  "jimdbtest": { "maps_to": "personal", "allow_models": ["GLM-5.2"], "erp": "wangqiwang1" }
+}
