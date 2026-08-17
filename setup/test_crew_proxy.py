@@ -552,6 +552,8 @@ r = urllib.request.urlopen(req, timeout=10)
 html = r.read().decode()
 check("/usage returns html", r.status == 200 and "<canvas" in html and "tokenChart" in html)
 check("/usage references /api/usage", "/api/usage" in html)
+check("/usage has health strip + admin panel", "id=health" in html and "id=admin" in html)
+check("/usage admin panel references mgmt endpoints", "/api/keys" in html and "/api/policy" in html)
 
 print()
 if FAILS:

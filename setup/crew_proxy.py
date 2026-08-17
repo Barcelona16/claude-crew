@@ -53,6 +53,12 @@ CFG_DIR   = _cfg_dir()
 KEYS_FILE = os.path.join(CFG_DIR, "keys.conf")
 POLICY    = os.path.join(CFG_DIR, "key-policy.conf")
 USAGE_FILE = os.path.join(CFG_DIR, "usage.json")
+# crew demo gif for the /usage intro. Env override, else next to this script, else the
+# repo's docs/ (dev). Absent -> the <img> just 404s, harmless.
+CREW_DEMO_GIF = os.environ.get("CREW_DEMO_GIF") or next(
+    (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-demo.gif"),
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "crew-demo.gif"))
+     if os.path.exists(p)), os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-demo.gif"))
 GATEWAY_AUTH = os.environ.get("GATEWAY_AUTH") or os.path.join(CFG_DIR, "gateway-auth.json")
 CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.expanduser("~/.claude-code-router/config.json")
 CCR_URL   = (os.environ.get("CREW_CCR_URL") or "http://127.0.0.1:3456").rstrip("/")
@@ -850,16 +856,55 @@ USAGE_HTML = """<!doctype html><html><head><meta charset=utf-8>
  .dbarwrap{display:flex;align-items:flex-end;height:82px} .dbar{width:16px;background:#3b6ea5;border-radius:2px 2px 0 0}
  .dday{color:#6b7684} #chartWrap{position:relative} canvas{width:100%;height:220px;display:block}
  #tokenTip{position:absolute;display:none;background:#0b0e13;border:1px solid #30363d;border-radius:6px;padding:6px 8px;font-size:11px;pointer-events:none}
+ #health{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+ .hk{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:5px 9px;font-size:12px}
+ .hk .st{font-weight:600} .hk.ok .st{color:#4ec98a} .hk.bad .st{color:#e5534b}
+ #admin{margin-top:26px;border-top:1px solid #21262d;padding-top:16px;display:none}
+ #admin h3{margin:16px 0 6px;font-size:13px;color:#8b95a3}
+ table{border-collapse:collapse;width:100%;font-size:12px} th,td{text-align:left;padding:4px 8px;border-bottom:1px solid #1a1e26}
+ th{color:#6b7684;font-weight:500} .danger{color:#e5534b;border-color:#5a2620}
+ .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}
+ h1{font-size:22px;margin:0 0 2px;letter-spacing:.5px} h1 .sub{font-size:12px;color:#6b7684;font-weight:400}
+ #intro{margin:18px 0;max-width:720px} #intro img{max-width:100%;border:1px solid #21262d;border-radius:8px}
+ #intro .feat{color:#9aa4af;margin:8px 0} #intro code{background:#161b22;border:1px solid #21262d;border-radius:4px;padding:1px 6px}
+ #intro a{color:#6cf}
 </style></head><body>
+<h1>crew-proxy <span class=sub>· 共享 key 网关 & 用量看板</span></h1>
 <div class=bar>
  <input id=key type=password placeholder="输入你的 key 登录" size=32>
  <input id=viewas placeholder="(admin) 查看某 login / __all__" size=26 style=display:none>
  <button id=login>登录</button>
  <span id=meta class=dim></span>
 </div>
+<div id=intro>
+ <img src="/crew-demo.gif" alt="crew demo" loading=lazy>
+ <p class=feat><b>crew</b> —— 一个人同时开多个 Claude Code 会话、随时切换模型、让不同模型互相对话协作。共享 key 池自动故障切换、限额自动摘除恢复。</p>
+ <p class=feat>接入:仓库 <code>git@coding.jd.com:olsd/claude-crew.git</code>(内网) / <code>git@github.com:Barcelona16/claude-crew.git</code>(外网),装好后配一个 backend 指向本网关即可。</p>
+</div>
 <div id=totals></div>
+<div id=health></div>
 <div id=daily></div>
 <div id=chartWrap><canvas id=tokenChart></canvas><div id=tokenTip></div></div>
+<div id=admin>
+ <h3>Key 池(真实后端 key)</h3>
+ <div id=pool></div>
+ <div class=row>
+  <input id=ak-key placeholder="新 key" size=20><input id=ak-model placeholder="模型名" size=16>
+  <input id=ak-base placeholder="base_url (https://…)" size=30>
+  <input id=ak-alias placeholder="alias(内部名)" size=12>
+  <button id=ak-add>加 key</button>
+ </div>
+ <h3>模型策略(优先级顺序)</h3>
+ <div id=policy></div>
+ <h3>登录表(门票)</h3>
+ <div id=logins></div>
+ <div class=row>
+  <input id=lg-login placeholder="login key" size=16><input id=lg-maps placeholder="maps_to alias" size=12>
+  <input id=lg-models placeholder="allow_models(空格分隔,空=全部)" size=24>
+  <input id=lg-erp placeholder="erp" size=10><label><input id=lg-admin type=checkbox> admin</label>
+  <button id=lg-add>加/改登录</button>
+ </div>
+</div>
 <script>
 let KEY=sessionStorage.getItem('crewKey')||'', VIEW='', _d=null, _geom=null;
 const $=s=>document.querySelector(s);
@@ -872,9 +917,56 @@ async function load(){
   let r;try{r=await fetch(url,{headers:{'x-api-key':KEY}});}catch(e){$('#meta').textContent='网络错误';return;}
   if(r.status===401){$('#meta').textContent='key 无效';return;}
   const d=await r.json();_d=d;
+  $('#intro').style.display='none';
   $('#meta').textContent='登录: '+d.login+' · 近 '+(d.windowH/24)+' 天 · '+d.buckets.length+' 点';
   renderTotals(d);renderDaily(d);draw();
+  loadHealth();
+  $('#admin').style.display=d.isAdmin?'block':'none';
+  if(d.isAdmin)loadAdmin();
 }
+async function loadHealth(){
+  let r;try{r=await fetch('/api/health',{headers:{'x-api-key':KEY}});}catch(e){return;}
+  if(!r.ok)return;const d=await r.json();
+  $('#health').innerHTML=(d.pool||[]).map(p=>{const bad=p.state!=='healthy';
+    return '<div class="hk '+(bad?'bad':'ok')+'"><span class=dim>'+esc(p.key_masked)+'</span> <span class=st>'+(bad?('异常'+(p.cooldown_left?' '+p.cooldown_left+'s':'')):'正常')+'</span></div>';
+  }).join('')||'<span class=dim>池子为空</span>';
+}
+async function aget(path){const r=await fetch(path,{headers:{'x-api-key':KEY}});return r.ok?r.json():null;}
+async function apost(path,obj){const r=await fetch(path,{method:'POST',headers:{'x-api-key':KEY,'Content-Type':'application/json'},body:JSON.stringify(obj)});return {ok:r.ok,body:await r.json().catch(()=>({}))};}
+async function loadAdmin(){
+  const kd=await aget('/api/keys');
+  if(kd){$('#pool').innerHTML='<table><tr><th>key</th><th>模型</th><th>策略</th><th>状态</th><th></th></tr>'+
+    (kd.pool||[]).map(p=>'<tr><td>'+esc(p.key_masked)+'</td><td>'+esc((p.models||[]).join(', '))+
+      '</td><td>'+esc(Object.keys(p.in_policy||{}).join(', '))+'</td><td>'+(p.state!=='healthy'?'<span style=color:#e5534b>异常'+(p.cooldown_left?' '+p.cooldown_left+'s':'')+'</span>':'<span style=color:#4ec98a>正常</span>')+
+      '</td><td><button class=danger data-del="'+esc(p.alias)+'">删</button></td></tr>').join('')+'</table>';
+    document.querySelectorAll('#pool [data-del]').forEach(b=>b.onclick=async()=>{
+      if(!confirm('删除 key '+b.dataset.del+'?'))return;
+      const r=await apost('/api/ccr/provider',{alias:b.dataset.del,delete:true});
+      if(!r.ok&&r.body.error){if(confirm(r.body.error+'\\n强制删除?')){await apost('/api/ccr/provider',{alias:b.dataset.del,delete:true,force:true});}}
+      loadAdmin();loadHealth();});}
+  const pd=await aget('/api/policy');
+  if(pd){$('#policy').innerHTML='<table><tr><th>模型</th><th>key 顺序(alias)</th><th></th></tr>'+
+    Object.entries(pd.policy||{}).map(([m,al])=>'<tr><td>'+esc(m)+'</td><td><input data-pm="'+esc(m)+'" value="'+esc(al.join(' '))+'" size=30></td><td><button data-ps="'+esc(m)+'">存</button></td></tr>').join('')+'</table>';
+    document.querySelectorAll('#policy [data-ps]').forEach(b=>b.onclick=async()=>{
+      const inp=document.querySelector('#policy [data-pm="'+CSS.escape(b.dataset.ps)+'"]');
+      await apost('/api/policy',{model:b.dataset.ps,aliases:inp.value.trim().split(/\\s+/).filter(Boolean)});
+      loadAdmin();});}
+  const sd=await aget('/api/status');
+  if(sd){$('#logins').innerHTML='<table><tr><th>login</th><th>maps_to</th><th>allow_models</th><th>erp</th><th>admin</th><th></th></tr>'+
+    (sd.auth||[]).map(a=>'<tr><td>'+esc(a.login)+'</td><td>'+esc(a.maps_to)+'</td><td>'+esc((a.allow_models||[]).join(' '))+'</td><td>'+esc(a.erp||'')+'</td><td>'+(a.admin?'✓':'')+'</td><td><button class=danger data-dl="'+esc(a.login)+'">删</button></td></tr>').join('')+'</table>';
+    document.querySelectorAll('#logins [data-dl]').forEach(b=>b.onclick=async()=>{
+      if(!confirm('删除登录 '+b.dataset.dl+'?'))return;
+      await apost('/api/gateway/auth',{login:b.dataset.dl,delete:true});loadAdmin();});}
+}
+$('#ak-add').onclick=async()=>{
+  const r=await apost('/api/ccr/provider',{alias:$('#ak-alias').value.trim(),key:$('#ak-key').value.trim(),model:$('#ak-model').value.trim(),base_url:$('#ak-base').value.trim()});
+  if(!r.ok)alert(r.body.error||'失败');else{$('#ak-key').value=$('#ak-alias').value='';loadAdmin();}
+};
+$('#lg-add').onclick=async()=>{
+  const models=$('#lg-models').value.trim().split(/\\s+/).filter(Boolean);
+  const r=await apost('/api/gateway/auth',{login:$('#lg-login').value.trim(),maps_to:$('#lg-maps').value.trim(),allow_models:models,erp:$('#lg-erp').value.trim(),admin:$('#lg-admin').checked});
+  if(!r.ok)alert(r.body.error||'失败');else{$('#lg-login').value='';loadAdmin();}
+};
 function renderTotals(d){const T=d.totals||{};$('#totals').innerHTML=[
   {v:fmtK(T.newTokens),k:'新增消耗(近7天)'},{v:fmtK(T.turns),k:'请求数'},
   {v:fmtK(T.perReqNew),k:'单次均 token'},{v:(T.days!=null?T.days:'—'),k:'天数'}
@@ -955,6 +1047,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_gif(self):
+        try:
+            with open(CREW_DEMO_GIF, "rb") as f:
+                body = f.read()
+        except OSError:
+            return self._send_json({"error": "not found"}, 404)
+        self.send_response(200)
+        self.send_header("Content-Type", "image/gif")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=86400")
         self.send_header("Connection", "close")
         self.end_headers()
         try:
@@ -1099,6 +1208,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(DASHBOARD_HTML)
         elif path in ("/usage", "/usage/"):
             self._send_html(USAGE_HTML)
+        elif path == "/crew-demo.gif":
+            self._send_gif()
         elif path == "/api/status":
             self._send_json(self._api_status())
         elif path == "/api/sessions":
