@@ -387,6 +387,23 @@ us4.load()
 check("garbled file loads empty (default-harmless)", us4._buckets == {})
 os.remove(cp.USAGE_FILE)
 
+# ── usage attributed to X-Crew-Login (falls back to alias) ────────────────────────
+print("Usage login attribution:")
+reset(); cp.STATS.__init__(); cp.USAGE.__init__(); MOCK["fail_providers"] = set()
+code, body = post(headers={"X-Crew-Login": "jimdbtest"})
+check("request ok", code == 200)
+time.sleep(0.1)
+check("usage bucketed under login 'jimdbtest'", "jimdbtest" in cp.USAGE._buckets)
+check("not bucketed under alias k1", "k1" not in cp.USAGE._buckets)
+_bt = cp.USAGE._bucket_ts(time.time())
+_b = cp.USAGE._buckets["jimdbtest"][_bt]
+check("login bucket has in=10 out=20", _b["inTok"] == 10 and _b["outTok"] == 20)
+
+reset(); cp.STATS.__init__(); cp.USAGE.__init__(); MOCK["fail_providers"] = set()
+code, body = post()  # no X-Crew-Login header
+time.sleep(0.1)
+check("no header -> falls back to alias k1 (default-harmless)", "k1" in cp.USAGE._buckets)
+
 print()
 if FAILS:
     print(f"{FAILS} check(s) FAILED")

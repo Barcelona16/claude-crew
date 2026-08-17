@@ -1108,6 +1108,7 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         it, ot = parse_usage(captured)
                         STATS.record_usage("direct", model, it, ot)
+                        USAGE.add(self.headers.get("X-Crew-Login") or "direct", it, ot)
                     except Exception:
                         pass
             else:
@@ -1227,6 +1228,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     it, ot = parse_usage(captured)
                     STATS.record_usage(alias, realmodel, it, ot)
+                    USAGE.add(self.headers.get("X-Crew-Login") or alias, it, ot)
                 except Exception:
                     pass
             return
