@@ -441,6 +441,14 @@ code, d = get_usage("personal", "?key=__all__")
 check("admin __all__ sums all logins", d["login"] == "__all__" and d["totals"]["newTokens"] == 32)
 check("buckets carry perReqNew", d["buckets"][0].get("perReqNew") is not None)
 
+# ── /usage page serves HTML with the chart canvas ─────────────────────────────────
+print("/usage page:")
+req = urllib.request.Request(PROXY + "/usage")
+r = urllib.request.urlopen(req, timeout=10)
+html = r.read().decode()
+check("/usage returns html", r.status == 200 and "<canvas" in html and "tokenChart" in html)
+check("/usage references /api/usage", "/api/usage" in html)
+
 print()
 if FAILS:
     print(f"{FAILS} check(s) FAILED")

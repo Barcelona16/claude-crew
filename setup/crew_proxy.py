@@ -825,6 +825,82 @@ refresh();setInterval(refresh,3000);
 </script></body></html>"""
 
 
+# ── /usage self-service page (per-key token usage; pure-canvas chart, no libs) ─────
+USAGE_HTML = """<!doctype html><html><head><meta charset=utf-8>
+<title>crew · 我的 token 用量</title>
+<style>
+ body{background:#0e1116;color:#c7d0da;font:13px/1.5 -apple-system,Segoe UI,monospace;margin:0;padding:20px}
+ .bar{display:flex;gap:8px;align-items:center;margin-bottom:16px}
+ input,button{background:#161b22;color:#c7d0da;border:1px solid #30363d;border-radius:6px;padding:6px 10px;font:inherit}
+ button{cursor:pointer} .dim{color:#6b7684}
+ #totals{display:flex;gap:14px;margin:14px 0} .tk{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:10px 14px}
+ .tk .v{font-size:20px;font-weight:600} .tk .k{color:#6b7684;font-size:11px}
+ #daily{display:flex;gap:6px;align-items:flex-end;height:110px;margin:12px 0}
+ .dcol{display:flex;flex-direction:column;align-items:center;font-size:10px}
+ .dbarwrap{display:flex;align-items:flex-end;height:82px} .dbar{width:16px;background:#3b6ea5;border-radius:2px 2px 0 0}
+ .dday{color:#6b7684} #chartWrap{position:relative} canvas{width:100%;height:220px;display:block}
+ #tokenTip{position:absolute;display:none;background:#0b0e13;border:1px solid #30363d;border-radius:6px;padding:6px 8px;font-size:11px;pointer-events:none}
+</style></head><body>
+<div class=bar>
+ <input id=key type=password placeholder="输入你的 key 登录" size=32>
+ <input id=viewas placeholder="(admin) 查看某 login / __all__" size=26 style=display:none>
+ <button id=login>登录</button>
+ <span id=meta class=dim></span>
+</div>
+<div id=totals></div>
+<div id=daily></div>
+<div id=chartWrap><canvas id=tokenChart></canvas><div id=tokenTip></div></div>
+<script>
+let KEY=sessionStorage.getItem('crewKey')||'', VIEW='', _d=null, _geom=null;
+const $=s=>document.querySelector(s);
+function fmtK(n){if(n==null)return '—';if(n>=1e6)return (n/1e6).toFixed(2)+'M';if(n>=1e3)return (n/1e3).toFixed(0)+'k';return String(Math.round(n));}
+function fmtClock(ms){const d=new Date(ms),p=x=>String(x).padStart(2,'0');return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());}
+function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+async function load(){
+  if(!KEY)return;
+  let url='/api/usage?days=7'+(VIEW?('&key='+encodeURIComponent(VIEW)):'');
+  let r;try{r=await fetch(url,{headers:{'x-api-key':KEY}});}catch(e){$('#meta').textContent='网络错误';return;}
+  if(r.status===401){$('#meta').textContent='key 无效';return;}
+  const d=await r.json();_d=d;
+  $('#meta').textContent='登录: '+d.login+' · 近 '+(d.windowH/24)+' 天 · '+d.buckets.length+' 点';
+  renderTotals(d);renderDaily(d);draw();
+}
+function renderTotals(d){const T=d.totals||{};$('#totals').innerHTML=[
+  {v:fmtK(T.newTokens),k:'新增消耗(近7天)'},{v:fmtK(T.turns),k:'请求数'},
+  {v:fmtK(T.perReqNew),k:'单次均 token'},{v:(T.days!=null?T.days:'—'),k:'天数'}
+].map(c=>'<div class=tk><div class=v>'+c.v+'</div><div class=k>'+c.k+'</div></div>').join('');}
+function renderDaily(d){const days=d.daily||[];if(!days.length){$('#daily').innerHTML='<span class=dim>暂无数据</span>';return;}
+  const mx=Math.max.apply(null,days.map(x=>x.newTokens||0).concat([1]));
+  $('#daily').innerHTML=days.map(x=>{const h=Math.max(2,Math.round((x.newTokens||0)/mx*80));
+    return '<div class=dcol title="'+esc(x.day)+' 新增 '+fmtK(x.newTokens)+' · '+fmtK(x.turns)+' 请求"><div>'+fmtK(x.newTokens)+'</div><div class=dbarwrap><div class=dbar style=height:'+h+'px></div></div><div class=dday>'+esc(x.day.slice(5))+'</div></div>';
+  }).join('');}
+function draw(){
+  const d=_d;if(!d||!d.buckets.length)return;const cv=$('#tokenChart');const dpr=window.devicePixelRatio||1;
+  const W0=cv.clientWidth||800,H0=220;cv.width=W0*dpr;cv.height=H0*dpr;const g=cv.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W0,H0);
+  const padL=52,padR=16,padT=10,padB=22,W=W0-padL-padR,H=H0-padT-padB,bs=d.buckets;
+  const t0=bs[0].t,t1=bs[bs.length-1].t+(d.bucketMin||10)*60000,tspan=Math.max(1,t1-t0);
+  let mx=1;bs.forEach(b=>{mx=Math.max(mx,b.newTokens||0);});
+  const x=ms=>padL+(ms-t0)/tspan*W,y=v=>padT+H-(v/mx)*H;
+  g.strokeStyle='#20252e';g.font='10px monospace';g.lineWidth=1;
+  for(let i=0;i<=4;i++){const yy=padT+H-(i/4)*H;g.beginPath();g.moveTo(padL,yy);g.lineTo(padL+W,yy);g.stroke();g.textAlign='right';g.fillStyle='#7fa8c9';g.fillText(fmtK(mx*i/4),padL-4,yy+3);}
+  g.fillStyle='#8b95a3';g.textAlign='center';for(let i=0;i<=5;i++){const tm=t0+tspan*i/5,xx=x(tm);g.strokeStyle='#1a1e26';g.beginPath();g.moveTo(xx,padT);g.lineTo(xx,padT+H);g.stroke();g.fillText(fmtClock(tm),xx,padT+H+14);}
+  function line(color,key,w){g.strokeStyle=color;g.lineWidth=w;g.beginPath();bs.forEach((b,i)=>{const xx=x(b.t+(d.bucketMin||10)*30000),yy=y(b[key]||0);i?g.lineTo(xx,yy):g.moveTo(xx,yy);});g.stroke();}
+  line('#6cf','inputSum',1.4);line('#e0a94f','outputSum',1.4);line('#8f8','newTokens',2);
+  _geom={padL,W,t0,tspan};
+}
+document.addEventListener('mousemove',ev=>{const cv=$('#tokenChart'),tip=$('#tokenTip');if(!_d||!_geom)return;const r=cv.getBoundingClientRect();
+  if(ev.clientX<r.left||ev.clientX>r.right||ev.clientY<r.top||ev.clientY>r.bottom){tip.style.display='none';return;}
+  const tm=_geom.t0+(ev.clientX-r.left-_geom.padL)/_geom.W*_geom.tspan;let best=null,bd=1e18;
+  _d.buckets.forEach(b=>{const dd=Math.abs(b.t-tm);if(dd<bd){bd=dd;best=b;}});if(!best){tip.style.display='none';return;}
+  tip.innerHTML='<b>'+fmtClock(best.t)+'</b><br><span style=color:#8f8>新增</span> '+fmtK(best.newTokens)+'<br><span style=color:#6cf>in</span> '+fmtK(best.inputSum)+' · <span style=color:#e0a94f>out</span> '+fmtK(best.outputSum)+'<br>turns '+best.turns+' · 均 '+fmtK(best.perReqNew);
+  tip.style.display='block';tip.style.left=(ev.clientX-r.left+12)+'px';tip.style.top=(ev.clientY-r.top+8)+'px';});
+window.addEventListener('resize',()=>{if(_d)draw();});
+$('#login').onclick=()=>{KEY=$('#key').value.trim();VIEW=$('#viewas').value.trim();sessionStorage.setItem('crewKey',KEY);load();};
+if(KEY){$('#key').value=KEY;$('#viewas').style.display='inline-block';load();}
+setInterval(()=>{if(KEY)load();},30000);
+</script></body></html>"""
+
+
 # ── HTTP handler ──────────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -949,6 +1025,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path in ("/dashboard", "/dashboard/"):
             self._send_html(DASHBOARD_HTML)
+        elif path in ("/usage", "/usage/"):
+            self._send_html(USAGE_HTML)
         elif path == "/api/status":
             self._send_json(self._api_status())
         elif path == "/api/sessions":
