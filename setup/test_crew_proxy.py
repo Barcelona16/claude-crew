@@ -367,6 +367,26 @@ us.add("personal", 9, 9, now=t + 8 * 86400)   # 8 days later
 us.prune(now=t + 8 * 86400)
 check("prune drops >7d-old buckets", all(bts >= (t + 8 * 86400) - 7 * 86400 for bts in us._buckets["personal"]))
 
+# ── UsageSeries persistence: flush → load round-trip ──────────────────────────────
+print("UsageSeries persistence:")
+us2 = cp.UsageSeries()
+us2.add("personal", 100, 200, now=1_000_000.0)
+us2.flush(force=True)
+check("usage.json written", os.path.exists(cp.USAGE_FILE))
+import stat as _stat_mod
+check("usage.json is 0600", (os.stat(cp.USAGE_FILE).st_mode & 0o777) == 0o600)
+us3 = cp.UsageSeries()
+us3.load()
+b = us3._bucket_ts(1_000_000.0)
+check("round-trips buckets", us3._buckets["personal"][b] == {"turns": 1, "inTok": 100, "outTok": 200})
+# garbled file → empty, no crash
+with open(cp.USAGE_FILE, "w") as f:
+    f.write("{ not json")
+us4 = cp.UsageSeries()
+us4.load()
+check("garbled file loads empty (default-harmless)", us4._buckets == {})
+os.remove(cp.USAGE_FILE)
+
 print()
 if FAILS:
     print(f"{FAILS} check(s) FAILED")

@@ -28,6 +28,7 @@ Env:
   CREW_PROXY_STATE    circuit-breaker state dump (default ~/.local/share/claude-crew/proxy-state.json)
 """
 
+import atexit
 import json
 import logging
 import os
@@ -51,6 +52,7 @@ def _cfg_dir():
 CFG_DIR   = _cfg_dir()
 KEYS_FILE = os.path.join(CFG_DIR, "keys.conf")
 POLICY    = os.path.join(CFG_DIR, "key-policy.conf")
+USAGE_FILE = os.path.join(CFG_DIR, "usage.json")
 GATEWAY_AUTH = os.environ.get("GATEWAY_AUTH") or os.path.join(CFG_DIR, "gateway-auth.json")
 CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.expanduser("~/.claude-code-router/config.json")
 CCR_URL   = (os.environ.get("CREW_CCR_URL") or "http://127.0.0.1:3456").rstrip("/")
@@ -398,11 +400,14 @@ class UsageSeries:
 
     BUCKET_SEC = 600          # 10-minute buckets
     WINDOW_DAYS = 7
+    FLUSH_MIN_SEC = 20
 
     def __init__(self):
         self._lock = threading.Lock()
         # login -> {bucket_ts(int) -> {"turns", "inTok", "outTok"}}
         self._buckets = {}
+        self._last_flush = 0.0
+        self._dirty = False
 
     def _bucket_ts(self, now):
         return int(now // self.BUCKET_SEC) * self.BUCKET_SEC
@@ -417,6 +422,7 @@ class UsageSeries:
             b["turns"] += 1
             b["inTok"] += int(in_tok or 0)
             b["outTok"] += int(out_tok or 0)
+            self._dirty = True
 
     def prune(self, now=None):
         if now is None:
@@ -430,6 +436,68 @@ class UsageSeries:
                         del series[bts]
                 if not series:
                     del self._buckets[login]
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "version": 1,
+                "bucketSec": self.BUCKET_SEC,
+                "buckets": {
+                    login: {str(bts): dict(v) for bts, v in series.items()}
+                    for login, series in self._buckets.items()
+                },
+            }
+
+    def flush(self, force=False, now=None):
+        if now is None:
+            now = time.time()
+        with self._lock:
+            if not force and (not self._dirty or now - self._last_flush < self.FLUSH_MIN_SEC):
+                return
+            self._dirty = False
+            self._last_flush = now
+        data = self.snapshot()
+        try:
+            os.makedirs(os.path.dirname(USAGE_FILE), exist_ok=True)
+            tmp = USAGE_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, USAGE_FILE)
+        except OSError as e:
+            log.warning("usage flush failed: %s", e)
+
+    def load(self):
+        try:
+            with open(USAGE_FILE) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return
+        if not isinstance(data, dict) or not isinstance(data.get("buckets"), dict):
+            return
+        restored = {}
+        for login, series in data["buckets"].items():
+            if not isinstance(series, dict):
+                continue
+            out = {}
+            for bts, v in series.items():
+                try:
+                    out[int(bts)] = {"turns": int(v.get("turns", 0)),
+                                     "inTok": int(v.get("inTok", 0)),
+                                     "outTok": int(v.get("outTok", 0))}
+                except (ValueError, TypeError, AttributeError):
+                    continue
+            if out:
+                restored[str(login)] = out
+        with self._lock:
+            self._buckets = restored
+        # Prune relative to the newest restored bucket (data may predate wall-clock,
+        # e.g. after a long downtime): drop only what is >WINDOW_DAYS older than the
+        # series' own latest point, so a valid round-trip survives.
+        newest = max((bts for series in restored.values() for bts in series),
+                     default=None)
+        if newest is not None:
+            self.prune(now=newest + self.BUCKET_SEC)
 
 
 USAGE = UsageSeries()
@@ -1207,6 +1275,8 @@ def main():
     log.info("listening on http://127.0.0.1:%d  ->  CCR %s", PORT, CCR_URL)
     log.info("keys=%s policy=%s ccr=%s", KEYS_FILE, POLICY, CCR_CFG)
     log.info("breaker: trip after %d fails, cooldown %.0fs", FAIL_N, COOLDOWN)
+    USAGE.load()
+    atexit.register(lambda: USAGE.flush(force=True))
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     try:
         server.serve_forever()
