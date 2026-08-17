@@ -92,6 +92,18 @@ CLAUDE_BIN="${CREW_CLAUDE_BIN:-$(command -v claude || echo claude)}"
 TMUX_PREFIX="crew-"
 mkdir -p "$BACKEND_DIR" "$CREW_STATE"
 
+# Locate sibling helper scripts. crew is usually invoked via a symlink (e.g. ~/.local/bin/crew
+# -> <clone>/bin/crew), so resolve the link chain to find the real bin/ dir. Portable (no
+# realpath -f, which macOS lacks). KEYRESOLVE = the shared effective-key resolver shared with
+# crew-statusline.sh; if it's missing, callers fall back to raw state.
+_crew_self="${BASH_SOURCE[0]:-$0}"
+while [ -L "$_crew_self" ]; do
+  _crew_link="$(readlink "$_crew_self")"
+  case "$_crew_link" in /*) _crew_self="$_crew_link";; *) _crew_self="$(dirname "$_crew_self")/$_crew_link";; esac
+done
+CREW_BIN_DIR="$(cd "$(dirname "$_crew_self")" 2>/dev/null && pwd)"
+KEYRESOLVE="$CREW_BIN_DIR/crew-keyresolve.js"
+
 die(){ echo "[crew] $*" >&2; exit 1; }
 log(){ echo "[crew] $*" >&2; }
 
@@ -774,7 +786,19 @@ case "${1:-}" in
       elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$(cat "$sidf")".jsonl >/dev/null 2>&1; then st="resumable"
       else st="new"; fi
       bk=$(cat "$CREW_STATE/$nm.backend" 2>/dev/null || echo "?")
-      ky=$(cat "$CREW_STATE/$nm.key" 2>/dev/null); [ -n "$ky" ] || ky="-"
+      local _pin; _pin=$(cat "$CREW_STATE/$nm.key" 2>/dev/null); [ -n "$_pin" ] || _pin="-"
+      # KEY column shows the EFFECTIVE key (what requests actually use), not just the raw pin —
+      # so an unpinned session reads "personal"/"prod"/… (its key-policy primary) instead of "-".
+      # Resolve via the shared crew-keyresolve.js (same logic the statusline uses). We hand it
+      # this session's model + pin and blank ANTHROPIC_BASE_URL so it derives routing from the
+      # backend conf rather than crew's own ambient env. Falls back to the raw pin on any failure.
+      ky="$_pin"
+      if [ -f "$KEYRESOLVE" ] && command -v node >/dev/null 2>&1; then
+        local _eff
+        _eff=$(CREW_STATE="$CREW_STATE" CREW_HOME="$CREW_HOME" CREW_MODEL="$bk" CREW_KEY="$_pin" ANTHROPIC_BASE_URL="" \
+                 node "$KEYRESOLVE" "$nm" 2>/dev/null | cut -f2)
+        [ -n "$_eff" ] && [ "$_eff" != "?" ] && ky="$_eff"
+      fi
     }
     if [ "$ls_json" = 1 ]; then
       # JSON-escape a string (backslash, quote, control chars) for safe embedding.

@@ -54,62 +54,14 @@ if [ -z "$sess" ]; then
 fi
 
 # ---------- 2) 解析模型 + key(具体真值,绝不 "default")----------
-# 用 node 一次性读 CCR config / keys.conf / key-policy.conf,按 env + base_url 解析。
+# 交给共享解析器 crew-keyresolve.js(与 `crew ls` 同一份逻辑,单一真源):它读 CCR config /
+# keys.conf / key-policy.conf,按本会话 live env(ANTHROPIC_BASE_URL / CREW_MODEL / CREW_KEY,
+# 子进程自动继承)+ base_url 分路由解析。node 实测 ~70ms,可接受;缺 node/脚本则走下方纯 env 降级。
 model=""; key=""
-if command -v node >/dev/null 2>&1; then
-  res="$(SESS="$sess" node -e '
-    var fs=require("fs"), HOME=process.env.HOME||"";
-    var STATE=process.env.CREW_STATE||(HOME+"/.local/share/claude-crew");
-    var sess=process.env.SESS||"";
-    function rd(p){ try{ return fs.readFileSync(p,"utf8"); }catch(e){ return ""; } }
-    // keys.conf: "<alias>=<token>"(实际格式,无空格);兼容 "<alias> <token>" 空白格式。-> token->alias
-    var tok2alias={}, i, ln, parts, eqk, ka, kt;
-    var kl=rd(HOME+"/.config/claude-crew/keys.conf").split("\n");
-    for(i=0;i<kl.length;i++){
-      ln=kl[i].trim(); if(!ln||ln[0]==="#")continue;
-      eqk=ln.indexOf("=");
-      if(eqk>=0){ ka=ln.slice(0,eqk).trim(); kt=ln.slice(eqk+1).trim(); if(ka&&kt) tok2alias[kt]=ka; }
-      else { parts=ln.split(/\s+/); if(parts.length>=2) tok2alias[parts[1]]=parts[0]; }
-    }
-    // key-policy.conf: "<model> = <alias1> <alias2> ..."
-    var policy={}, pl=rd(HOME+"/.config/claude-crew/key-policy.conf").split("\n"), eq, mk, al;
-    for(i=0;i<pl.length;i++){ ln=pl[i].trim(); if(!ln||ln[0]==="#")continue; eq=ln.indexOf("="); if(eq<0)continue; mk=ln.slice(0,eq).trim(); al=ln.slice(eq+1).trim().split(/\s+/); policy[mk]=al; }
-    // CCR config
-    var ccr={}; try{ ccr=JSON.parse(rd(HOME+"/.claude-code-router/config.json")); }catch(e){}
-    var provs=ccr.Providers||ccr.providers||[];
-    function provKey(n){ for(var j=0;j<provs.length;j++){ if(provs[j]&&provs[j].name===n) return (provs[j].api_key||"")+""; } return ""; }
-    var rdef=((ccr.Router&&ccr.Router.default)||"")+"", dprov=rdef, dmodel=rdef, ci=rdef.indexOf(",");
-    if(ci>=0){ dprov=rdef.slice(0,ci); dmodel=rdef.slice(ci+1); }
-    // ---- model ----
-    var model=process.env.CREW_MODEL||process.env.CREW_BACKEND||"";
-    if(!model && sess) model=rd(STATE+"/"+sess+".backend").trim();
-    if(model===""||model==="-"||model==="default") model=dmodel;   // ambient 明文 -> 具体 model
-    var mprov=""; var mi=model.indexOf(","); if(mi>=0){ mprov=model.slice(0,mi); model=model.slice(mi+1); }
-    // ---- key(base_url 优先:决定实际路由模式,才知道真 key)----
-    var base=process.env.ANTHROPIC_BASE_URL||"", isProxy=/:8788/.test(base), isCCR=/:3456/.test(base);
-    var key=process.env.CREW_KEY||"";
-    if((!key||key==="-") && sess) key=rd(STATE+"/"+sess+".key").trim();
-    if(key==="-") key="";
-    if(!key){
-      if(isProxy){
-        // crew-proxy(:8788):真 key 由 key-policy 决定,ambient token(=test)是入口令牌不算
-        var mname=model||dmodel;
-        var pol=policy[mname]||policy[process.env.CREW_BACKEND||""]||null;
-        if(pol&&pol.length) key=pol[0];
-      } else if(isCCR){
-        // CCR 直连(:3456):真 key = Router.default 的 provider 的 api_key -> 别名;ambient token(=test)不算
-        var prov=mprov||dprov, tok=provKey(prov)||provKey(dprov);
-        if(tok) key=tok2alias[tok]||(tok.length>10?(tok.slice(0,4)+"…"+tok.slice(-3)):tok);
-      } else {
-        // 直连上游网关(llm-gw / api.anthropic.com / 未知):ambient token 本身就是真 key
-        var at=process.env.ANTHROPIC_AUTH_TOKEN||process.env.ANTHROPIC_API_KEY||"";
-        if(at) key=tok2alias[at]||(at.length>10?(at.slice(0,4)+"…"+at.slice(-3)):at);
-      }
-    }
-    if(!model) model="?";
-    if(!key) key="?";
-    process.stdout.write(model+"\t"+key);
-  ' 2>/dev/null)"
+_kr_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+_kr="$_kr_dir/crew-keyresolve.js"
+if command -v node >/dev/null 2>&1 && [ -f "$_kr" ]; then
+  res="$(CREW_STATE="$STATE" SESS="$sess" node "$_kr" "$sess" 2>/dev/null)"
   if [ -n "$res" ]; then
     IFS=$'\t' read -r model key <<<"$res"
   fi
