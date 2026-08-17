@@ -385,6 +385,7 @@ check("/api/keys masks the key (no plaintext)", _pool["k1"]["key_masked"].starts
       and "KEY_ONE" not in json.dumps(r))
 check("/api/keys carries health state", _pool["k1"].get("state") in ("healthy", "tripped"))
 check("/api/keys bundles policy + logins for admin panel", isinstance(r.get("policy"), dict) and isinstance(r.get("logins"), list))
+check("/api/keys bundles masked_by_alias for policy editor", isinstance(r.get("masked_by_alias"), dict) and r["masked_by_alias"].get("k1", "").startswith("sk-…"))
 code, r = gkey("/api/keys", "plainkey")
 check("/api/keys non-admin -> 403", code == 403)
 code, r = gkey("/api/keys", None)

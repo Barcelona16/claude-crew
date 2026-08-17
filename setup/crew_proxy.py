@@ -204,8 +204,8 @@ def load_gateway_auth():
         return {}
     out = {}
     for k, v in data.items():
-        if not isinstance(v, dict):
-            continue
+        if k.startswith("__") or not isinstance(v, dict):
+            continue  # __doc__ etc. are comments, not login entries
         out[k] = {"maps_to": str(v.get("maps_to", "")),
                   "allow_models": list(v.get("allow_models") or []),
                   "erp": str(v.get("erp", "")),
@@ -972,8 +972,8 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 async function load(){
   if(!KEY)return;
   let url='/api/usage?days=7'+(VIEW?('&key='+encodeURIComponent(VIEW)):'');
-  let r;try{r=await fetch(url,{headers:{'x-api-key':KEY}});}catch(e){$('#meta').textContent='网络错误';return;}
-  if(r.status===401){$('#meta').textContent='key 无效';logout(false);return;}
+  let r;try{r=await fetch(url,{headers:{'x-api-key':KEY}});}catch(e){$('#regmsg').innerHTML='<span style=color:#e5534b>网络错误，无法连接网关</span>';logout(false,true);return;}
+  if(r.status===401){logout(true,true);$('#regmsg').innerHTML='<span style=color:#e5534b>❌ 登录失败：key 无效或未注册。请检查后重试，或用下方「注册我的 key」先注册。</span>';return;}
   const d=await r.json();_d=d;
   if(!VIEW)SELFLOGIN=d.login;
   // logged in -> switch from landing to dashboard view
@@ -992,9 +992,9 @@ function populateViewsel(){
     logins.map(l=>'<option value="'+esc(l)+'">'+esc(l)+'</option>').join('');
   sel.value=VIEW;
 }
-function logout(clear){if(clear!==false){KEY='';sessionStorage.removeItem('crewKey');}VIEW='';_d=null;
+function logout(clear,keepmsg){if(clear!==false){KEY='';sessionStorage.removeItem('crewKey');}VIEW='';_d=null;
   $('#landing').style.display='';$('#dashbar').style.display='none';$('#dashview').style.display='none';
-  $('#key').value='';$('#meta').textContent='';}
+  if(clear!==false)$('#key').value='';$('#meta').textContent='';if(!keepmsg)$('#regmsg').textContent='';}
 async function loadHealth(){
   let r;try{r=await fetch('/api/health',{headers:{'x-api-key':KEY}});}catch(e){return;}
   if(!r.ok)return;const d=await r.json();
@@ -1016,11 +1016,17 @@ async function loadAdmin(){
     const r=await apost('/api/ccr/provider',{alias:b.dataset.del,delete:true});
     if(!r.ok&&r.body.error){if(confirm(r.body.error+'\\n强制删除?')){await apost('/api/ccr/provider',{alias:b.dataset.del,delete:true,force:true});}}
     loadAdmin();loadHealth();});
-  $('#policy').innerHTML='<table><tr><th>模型</th><th>key 顺序(alias)</th><th></th></tr>'+
-    Object.entries(kd.policy||{}).map(([m,al])=>'<tr><td>'+esc(m)+'</td><td><input data-pm="'+esc(m)+'" value="'+esc(al.join(' '))+'" size=30></td><td><button data-ps="'+esc(m)+'">存</button></td></tr>').join('')+'</table>';
+  const mba=kd.masked_by_alias||{};
+  const lbl=a=>(mba[a]||'sk-…')+'('+a+')';
+  $('#policy').innerHTML='<table><tr><th>模型</th><th>key 优先级顺序</th><th></th></tr>'+
+    Object.entries(kd.policy||{}).map(([m,al])=>'<tr><td>'+esc(m)+'</td><td><input data-pm="'+esc(m)+'" value="'+esc(al.map(lbl).join(' '))+'" size=40></td><td><button data-ps="'+esc(m)+'">存</button></td></tr>').join('')+'</table>'+
+    '<div class=dim style="font-size:11px;margin-top:4px">格式 sk-…xxxx(alias)，空格分隔按优先级排序；保存时按括号里的 alias 生效</div>';
   document.querySelectorAll('#policy [data-ps]').forEach(b=>b.onclick=async()=>{
     const inp=document.querySelector('#policy [data-pm="'+CSS.escape(b.dataset.ps)+'"]');
-    await apost('/api/policy',{model:b.dataset.ps,aliases:inp.value.trim().split(/\\s+/).filter(Boolean)});
+    // extract the alias from each "masked(alias)" token; fall back to the raw token
+    const aliases=inp.value.trim().split(/\\s+/).filter(Boolean).map(t=>{const mt=t.match(/\\(([^)]+)\\)\\s*$/);return mt?mt[1]:t;});
+    const r=await apost('/api/policy',{model:b.dataset.ps,aliases:aliases});
+    if(!r.ok)alert(r.body.error||'保存失败');
     loadAdmin();});
   $('#logins').innerHTML='<table><tr><th>login</th><th>maps_to</th><th>allow_models</th><th>erp</th><th>admin</th><th></th></tr>'+
     (kd.logins||[]).map(a=>'<tr><td>'+esc(a.login)+'</td><td>'+esc(a.maps_to)+'</td><td>'+esc((a.allow_models||[]).join(' '))+'</td><td>'+esc(a.erp||'')+'</td><td>'+(a.admin?'✓':'')+'</td><td><button class=danger data-dl="'+esc(a.login)+'">删</button></td></tr>').join('')+'</table>';
@@ -1294,7 +1300,9 @@ class Handler(BaseHTTPRequestHandler):
         auth = load_gateway_auth()
         logins = [{"login": k, "maps_to": v["maps_to"], "allow_models": v["allow_models"],
                    "erp": v["erp"], "admin": bool(v.get("admin"))} for k, v in sorted(auth.items())]
-        return self._send_json({"pool": pool, "policy": policy, "logins": logins})
+        masked_by_alias = {a: mask_key(keys.get(a, "")) for a in aliases}
+        return self._send_json({"pool": pool, "policy": policy, "logins": logins,
+                                "masked_by_alias": masked_by_alias})
 
     def do_GET(self):
         path = self.path.split("?")[0]

@@ -1,4 +1,5 @@
 {
-  "personal": { "maps_to": "personal", "allow_models": [], "erp": "wangqiwang1", "admin": true },
+  "__doc__": "login key (the JSON key) = the REAL key a person logs in / calls the gateway with. maps_to = which alias in keys.conf that real key is; allow_models empty = all; admin true = can manage the pool. jimdbtest is the exception: a shared test TICKET (not a real key) mapping to someone else's key, model-limited.",
+  "sk-REPLACE-with-the-admin-real-key": { "maps_to": "personal", "allow_models": [], "erp": "wangqiwang1", "admin": true },
   "jimdbtest": { "maps_to": "personal", "allow_models": ["GLM-5.2"], "erp": "wangqiwang1" }
 }
