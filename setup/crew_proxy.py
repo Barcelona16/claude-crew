@@ -998,17 +998,31 @@ class Handler(BaseHTTPRequestHandler):
     #    x-api-key or Authorization: Bearer <key>. Not in the auth table -> 401.
     #    Normal user sees only their own login; an admin entry may pass ?key=<login>
     #    to view another login, or ?key=__all__ for the summed-all series. Read-only.
+    def _client_key(self):
+        """The caller's login key from x-api-key or `Authorization: Bearer <key>`,
+        or None. Shared by the usage view and every admin-gated endpoint."""
+        key = self.headers.get("x-api-key")
+        if not key:
+            auth_h = self.headers.get("Authorization", "")
+            if auth_h.lower().startswith("bearer "):
+                key = auth_h[7:].strip()
+        return key or None
+
+    def require_admin(self):
+        """Return the caller's login key iff it maps to an admin entry, else None.
+        Management endpoints call this and 403 on None — enforced on 127.0.0.1 too, so
+        exposing them through the gateway is safe (the gateway re-checks as a first gate)."""
+        key = self._client_key()
+        entry = load_gateway_auth().get(key) if key else None
+        return key if (entry and entry.get("admin")) else None
+
     def _api_usage(self):
         q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         try:
             days = max(1, min(30, int(q.get("days", ["7"])[0])))
         except ValueError:
             days = 7
-        key = self.headers.get("x-api-key")
-        if not key:
-            auth_h = self.headers.get("Authorization", "")
-            if auth_h.lower().startswith("bearer "):
-                key = auth_h[7:].strip()
+        key = self._client_key()
         auth = load_gateway_auth()
         entry = auth.get(key) if key else None
         if entry is None:
@@ -1018,7 +1032,9 @@ class Handler(BaseHTTPRequestHandler):
             login = None if want == "__all__" else want
         else:
             login = key
-        return self._send_json(USAGE.series(login, days=days))
+        out = USAGE.series(login, days=days)
+        out["isAdmin"] = bool(entry.get("admin"))
+        return self._send_json(out)
 
 
     def do_GET(self):
@@ -1064,6 +1080,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- stage B: kill a session (delegates to `crew kill`, the canonical teardown) --
     def _api_session_kill(self, body):
+        if not self.require_admin():
+            return self._send_json({"ok": False, "error": "admin required"}, 403)
         d = self._read_json(body)
         if d is None:
             return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
@@ -1078,6 +1096,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- stage C: change a session's model/key (single-value crew state files) --
     def _api_session_config(self, body):
+        if not self.require_admin():
+            return self._send_json({"ok": False, "error": "admin required"}, 403)
         d = self._read_json(body)
         if d is None:
             return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
@@ -1116,6 +1136,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- stage D: add a key + CCR provider (writes global config; backs up first) --
     def _api_ccr_provider(self, body):
+        if not self.require_admin():
+            return self._send_json({"ok": False, "error": "admin required"}, 403)
         d = self._read_json(body)
         if d is None:
             return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
@@ -1185,6 +1207,8 @@ class Handler(BaseHTTPRequestHandler):
     #    {login, delete: true}                          -> remove
     # login/maps_to/model names are strict-allowlisted (no shell metachars, no commas).
     def _api_gateway_auth(self, body):
+        if not self.require_admin():
+            return self._send_json({"ok": False, "error": "admin required"}, 403)
         d = self._read_json(body)
         if d is None:
             return self._send_json({"ok": False, "error": "invalid JSON"}, 400)

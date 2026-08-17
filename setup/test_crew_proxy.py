@@ -237,18 +237,40 @@ check("/api/logs returns a list", isinstance(json.loads(raw).get("logs"), list))
 
 # ── write endpoints: session config (stage C) ────────────────────────────────────
 print("Write: session config (stage C):")
-def jpost(path, obj):
+def jpost(path, obj, key="adminkey"):
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["x-api-key"] = key
     req = urllib.request.Request(PROXY + path, data=json.dumps(obj).encode(),
-                                 headers={"Content-Type": "application/json"}, method="POST")
+                                 headers=headers, method="POST")
     try:
         r = urllib.request.urlopen(req, timeout=10)
         return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read() or b"{}")
 
+# Management endpoints now require an admin x-api-key. Seed an admin login table and
+# point GATEWAY_AUTH at it BEFORE any management call. jpost() sends "adminkey" by default.
+cp.GATEWAY_AUTH = os.path.join(_tmp, "gateway-auth.json")
+with open(cp.GATEWAY_AUTH, "w") as _f:
+    json.dump({"adminkey": {"maps_to": "k1", "allow_models": [], "erp": "root", "admin": True},
+               "plainkey": {"maps_to": "k1", "allow_models": [], "erp": "bob"}}, _f)
+
 # point crew state at the test tmpdir so writes are isolated
 os.makedirs(os.path.join(_tmp, "state"), exist_ok=True)
 cp.CREW_STATE = os.path.join(_tmp, "state")
+
+# ── admin gate: management endpoints require an admin x-api-key ────────────────────
+print("Admin gate on management endpoints:")
+for _p, _b in (("/api/session/config", {"name": "x"}),
+               ("/api/session/kill", {"name": "x"}),
+               ("/api/ccr/provider", {"alias": "z", "key": "k", "model": "M", "base_url": "https://x"}),
+               ("/api/gateway/auth", {"login": "z", "maps_to": "k1"})):
+    code, _ = jpost(_p, _b, key=None)
+    check("no key -> 403 %s" % _p, code == 403)
+    code, _ = jpost(_p, _b, key="plainkey")
+    check("known non-admin key -> 403 %s" % _p, code == 403)
+
 code, r = jpost("/api/session/config", {"name": "demo", "model": "MODEL_X", "key": "k1"})
 check("config write ok", code == 200 and r.get("ok"))
 check("wrote demo.backend", open(os.path.join(cp.CREW_STATE, "demo.backend")).read() == "MODEL_X")
