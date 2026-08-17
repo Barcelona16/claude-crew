@@ -404,6 +404,43 @@ code, body = post()  # no X-Crew-Login header
 time.sleep(0.1)
 check("no header -> falls back to alias k1 (default-harmless)", "k1" in cp.USAGE._buckets)
 
+# ── /api/usage: auth + own-vs-admin scope + data contract ─────────────────────────
+print("/api/usage endpoint:")
+# a prior test reassigned cp.GATEWAY_AUTH; point it back at this dir's seeded file
+cp.GATEWAY_AUTH = os.path.join(_cfg, "gateway-auth.json")
+# seed a known auth table for this test
+with open(os.path.join(_cfg, "gateway-auth.json"), "w") as f:
+    json.dump({
+        "personal":  {"maps_to": "k1", "allow_models": [], "erp": "me", "admin": True},
+        "jimdbtest": {"maps_to": "k1", "allow_models": ["MODEL_X"], "erp": "me"},
+    }, f)
+cp.USAGE.__init__()
+cp.USAGE.add("jimdbtest", 10, 20, now=time.time())
+cp.USAGE.add("personal", 1, 1, now=time.time())
+
+def get_usage(key, query=""):
+    req = urllib.request.Request(PROXY + "/api/usage" + query,
+                                 headers={"x-api-key": key} if key else {})
+    try:
+        r = urllib.request.urlopen(req, timeout=10)
+        return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+code, _ = get_usage("nope")
+check("unknown key -> 401", code == 401)
+code, d = get_usage("jimdbtest")
+check("normal user 200", code == 200)
+check("normal user sees own login", d["login"] == "jimdbtest")
+check("own totals newTokens=30", d["totals"]["newTokens"] == 30)
+code, d = get_usage("jimdbtest", "?key=personal")
+check("normal user cannot view others (key= ignored)", d["login"] == "jimdbtest")
+code, d = get_usage("personal", "?key=jimdbtest")
+check("admin can view another login", code == 200 and d["login"] == "jimdbtest")
+code, d = get_usage("personal", "?key=__all__")
+check("admin __all__ sums all logins", d["login"] == "__all__" and d["totals"]["newTokens"] == 32)
+check("buckets carry perReqNew", d["buckets"][0].get("perReqNew") is not None)
+
 print()
 if FAILS:
     print(f"{FAILS} check(s) FAILED")

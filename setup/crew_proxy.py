@@ -193,7 +193,8 @@ def load_gateway_auth():
             continue
         out[k] = {"maps_to": str(v.get("maps_to", "")),
                   "allow_models": list(v.get("allow_models") or []),
-                  "erp": str(v.get("erp", ""))}
+                  "erp": str(v.get("erp", "")),
+                  "admin": bool(v.get("admin"))}
     return out
 
 
@@ -417,8 +418,8 @@ class UsageSeries:
             now = time.time()
         bts = self._bucket_ts(now)
         with self._lock:
-            series = self._buckets.setdefault(login, {})
-            b = series.setdefault(bts, {"turns": 0, "inTok": 0, "outTok": 0})
+            login_map = self._buckets.setdefault(login, {})
+            b = login_map.setdefault(bts, {"turns": 0, "inTok": 0, "outTok": 0})
             b["turns"] += 1
             b["inTok"] += int(in_tok or 0)
             b["outTok"] += int(out_tok or 0)
@@ -430,11 +431,11 @@ class UsageSeries:
         cutoff = now - self.WINDOW_DAYS * 86400
         with self._lock:
             for login in list(self._buckets):
-                series = self._buckets[login]
-                for bts in list(series):
+                login_map = self._buckets[login]
+                for bts in list(login_map):
                     if bts < cutoff:
-                        del series[bts]
-                if not series:
+                        del login_map[bts]
+                if not login_map:
                     del self._buckets[login]
 
     def snapshot(self):
@@ -500,6 +501,57 @@ class UsageSeries:
                      default=None)
         if newest is not None:
             self.prune(now=newest + self.BUCKET_SEC)
+
+    def series(self, login, days=7, now=None):
+        if now is None:
+            now = time.time()
+        cutoff = now - days * 86400
+        with self._lock:
+            if login is None:
+                merged = {}
+                for series in self._buckets.values():
+                    for bts, v in series.items():
+                        if bts < cutoff:
+                            continue
+                        m = merged.setdefault(bts, {"turns": 0, "inTok": 0, "outTok": 0})
+                        m["turns"] += v["turns"]; m["inTok"] += v["inTok"]; m["outTok"] += v["outTok"]
+                src = merged
+            else:
+                src = {bts: dict(v) for bts, v in self._buckets.get(login, {}).items() if bts >= cutoff}
+        buckets = []
+        daily = {}
+        tot_new = tot_turns = 0
+        for bts in sorted(src):
+            v = src[bts]
+            new = v["inTok"] + v["outTok"]
+            tot_new += new; tot_turns += v["turns"]
+            buckets.append({
+                "t": bts * 1000,
+                "newTokens": new, "inputSum": v["inTok"], "outputSum": v["outTok"],
+                "turns": v["turns"],
+                "perReqNew": round(new / v["turns"]) if v["turns"] else 0,
+            })
+            day = time.strftime("%Y-%m-%d", time.localtime(bts))
+            dd = daily.setdefault(day, {"day": day, "newTokens": 0, "turns": 0})
+            dd["newTokens"] += new; dd["turns"] += v["turns"]
+        daily_list = []
+        for day in sorted(daily):
+            dd = daily[day]
+            dd["perReqNew"] = round(dd["newTokens"] / dd["turns"]) if dd["turns"] else 0
+            daily_list.append(dd)
+        return {
+            "generatedAt": int(now * 1000),
+            "bucketMin": self.BUCKET_SEC // 60,
+            "windowH": days * 24,
+            "login": login if login is not None else "__all__",
+            "buckets": buckets,
+            "daily": daily_list,
+            "totals": {
+                "newTokens": tot_new, "turns": tot_turns,
+                "perReqNew": round(tot_new / tot_turns) if tot_turns else 0,
+                "days": len(daily_list),
+            },
+        }
 
 
 USAGE = UsageSeries()
@@ -866,6 +918,32 @@ class Handler(BaseHTTPRequestHandler):
         n = max(1, min(n, Stats.LOG_MAX))
         return {"logs": STATS.logs(n)}
 
+    # -- self-service usage series (authenticated by the client's OWN login key) --
+    #    x-api-key or Authorization: Bearer <key>. Not in the auth table -> 401.
+    #    Normal user sees only their own login; an admin entry may pass ?key=<login>
+    #    to view another login, or ?key=__all__ for the summed-all series. Read-only.
+    def _api_usage(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        try:
+            days = max(1, min(30, int(q.get("days", ["7"])[0])))
+        except ValueError:
+            days = 7
+        key = self.headers.get("x-api-key")
+        if not key:
+            auth_h = self.headers.get("Authorization", "")
+            if auth_h.lower().startswith("bearer "):
+                key = auth_h[7:].strip()
+        auth = load_gateway_auth()
+        entry = auth.get(key) if key else None
+        if entry is None:
+            return self._send_json({"error": "unauthorized"}, 401)
+        want = q.get("key", [None])[0]
+        if entry.get("admin") and want:
+            login = None if want == "__all__" else want
+        else:
+            login = key
+        return self._send_json(USAGE.series(login, days=days))
+
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -877,6 +955,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(self._api_sessions())
         elif path == "/api/logs":
             self._send_json(self._api_logs())
+        elif path == "/api/usage":
+            self._api_usage()
         else:
             self._passthrough(b"")
 
