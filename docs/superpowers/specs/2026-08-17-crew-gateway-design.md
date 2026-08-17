@@ -111,6 +111,25 @@ CCR                   127.0.0.1:3456 ← model → 上游 base_url + transformer
 
 erp 放登录表、不改 keys.conf:keys.conf 是 crew 既有格式,改它牵动 crew CLI;"谁贡献"是登录属性,放登录表更合适。dashboard 展示时 join 显示。
 
+## 本地接入(用 crew 一键接开发机网关)
+
+crew 的"后端"就是 `~/.config/claude-crew/backends/*.conf` 一个文件(格式 `BASE_URL/MODEL/TOKEN/ENV_EXTRA/KEY_MODE`,同 joycode/ccr 后端)。因此本地接入开发机网关**不用改 crew CLI**——装一个 backend conf 即可(像装 joycode 那样):
+
+```
+# backends/gateway.conf — 远程共享池,走开发机 11.91.165.248:8790
+BASE_URL=http://11.91.165.248:8790
+MODEL=GLM-5.2
+TOKEN=<门票或真实 key,如 jimdbtest / personal>
+ENV_EXTRA=MAX_THINKING_TOKENS=0
+KEY_MODE=token
+```
+
+- `TOKEN` = 登录表里的登录 key。`jimdbtest` 仅 GLM-5.2;`personal` 全模型。
+- `KEY_MODE=token`:token 随请求带给网关做门禁,网关据登录表算亲和(与 ccr 后端同理,本地不再 --key 选池)。
+- 本地 `crew <name> --backend gateway` 即用共享池。切模型 `crew --model <model> <name>`(需在该门票 allow_models 内)。
+
+新仓库 `crew-gateway` 带 `backends/gateway.conf.example` + 一个安装脚本(拷贝到 `~/.config/claude-crew/backends/` 并填 TOKEN),达到"装插件即接入"的体验。
+
 ## 组件二:gateway.py(新仓库,单文件 stdlib,薄)
 
 stdlib `http.server` + `urllib`,零依赖,兼容 Python 3.6+(用容器内 python3)。每请求:
@@ -166,6 +185,9 @@ stdlib `http.server` + `urllib`,零依赖,兼容 Python 3.6+(用容器内 python
 crew-gateway/
   gateway.py                对外网关(门禁+allow_models+亲和头+路径白名单)
   gateway-auth.json.example 登录表样例
+  backends/
+    gateway.conf.example    本地 crew 接入用的 backend 样例(指向远程网关)
+  install-backend.sh        本地一键装:拷 gateway.conf 到 ~/.config/claude-crew/backends/ 并填 TOKEN
   deploy/                   开发机 docker 部署脚本
   README.md
 ```
@@ -206,4 +228,5 @@ crew-proxy 的两处能力增强 + dashboard 扩展落在 **claude-crew 主仓�
 2. dashboard 扩展:erp 列 + 登录表区块 + 编辑接口(进主线)。
 3. 写 gateway.py(门禁 + allow_models + 亲和头 + 路径白名单)。
 4. 开发机部署:docker → node20 → CCR → 搬 personal 凭证 → crew_proxy → gateway → 放通端口 → 保活。
-5. 端到端验证 + README。
+5. 本地接入:crew-gateway 带 backends/gateway.conf.example + install-backend.sh,本地装插件即用共享池。
+6. 端到端验证 + README。
