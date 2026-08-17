@@ -178,7 +178,7 @@ def parse_retry_after(headers):
 
 
 def load_gateway_auth():
-    """gateway-auth.json -> {login_key: {maps_to, allow_models, erp}}. Empty dict if absent
+    """gateway-auth.json -> {login_key: {maps_to, allow_models, erp, admin}}. Empty dict if absent
     (the dashboard's login-table section then just shows nothing — harmless default)."""
     try:
         with open(GATEWAY_AUTH) as f:
@@ -1220,7 +1220,12 @@ class Handler(BaseHTTPRequestHandler):
             erp = str(d.get("erp", ""))
             if erp and not ok_name.match(erp):
                 return self._send_json({"ok": False, "error": "invalid erp"}, 400)
-            auth[login] = {"maps_to": maps_to, "allow_models": clean_allow, "erp": erp}
+            prev_admin = bool(auth.get(login, {}).get("admin"))
+            admin = bool(d["admin"]) if isinstance(d.get("admin"), bool) else prev_admin
+            entry = {"maps_to": maps_to, "allow_models": clean_allow, "erp": erp}
+            if admin:
+                entry["admin"] = True
+            auth[login] = entry
 
         # write back: back up first (if the file exists), then atomic replace, mode 0600.
         try:

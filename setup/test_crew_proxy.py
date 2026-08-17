@@ -324,6 +324,22 @@ check("delete ticket1", code == 200 and r.get("ok"))
 check("ticket1 gone", "ticket1" not in json.load(open(cp.GATEWAY_AUTH)))
 code, r = jpost("/api/gateway/auth", {"login": "ghost", "delete": True})
 check("delete missing -> 404", code == 404)
+# admin flag: seed with admin
+code, r = jpost("/api/gateway/auth", {"login": "adm1", "maps_to": "k1", "admin": True})
+check("add admin login adm1", code == 200 and r.get("ok"))
+_auth = json.load(open(cp.GATEWAY_AUTH))
+check("adm1 admin seeded", _auth["adm1"].get("admin") is True)
+# edit same login WITHOUT sending admin -> admin preserved, edit applied
+code, r = jpost("/api/gateway/auth", {"login": "adm1", "maps_to": "k1", "allow_models": ["MODEL_X"]})
+check("edit adm1 without admin", code == 200 and r.get("ok"))
+_auth = json.load(open(cp.GATEWAY_AUTH))
+check("adm1 admin preserved on edit", _auth["adm1"].get("admin") is True)
+check("adm1 edit applied", _auth["adm1"]["allow_models"] == ["MODEL_X"])
+# normal upsert stays clean (no admin key written)
+code, r = jpost("/api/gateway/auth", {"login": "norm1", "maps_to": "k1"})
+check("add norm1", code == 200 and r.get("ok"))
+_auth = json.load(open(cp.GATEWAY_AUTH))
+check("norm1 has no admin key", "admin" not in _auth["norm1"])
 
 # ── usage parsing (unit) ──────────────────────────────────────────────────────────
 print("Usage parsing (unit):")
