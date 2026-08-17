@@ -51,6 +51,7 @@ def _cfg_dir():
 CFG_DIR   = _cfg_dir()
 KEYS_FILE = os.path.join(CFG_DIR, "keys.conf")
 POLICY    = os.path.join(CFG_DIR, "key-policy.conf")
+GATEWAY_AUTH = os.environ.get("GATEWAY_AUTH") or os.path.join(CFG_DIR, "gateway-auth.json")
 CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.expanduser("~/.claude-code-router/config.json")
 CCR_URL   = (os.environ.get("CREW_CCR_URL") or "http://127.0.0.1:3456").rstrip("/")
 PORT      = int(os.environ.get("CREW_PROXY_PORT", "8788"))
@@ -113,6 +114,85 @@ def load_ccr_providers():
     except (FileNotFoundError, json.JSONDecodeError):
         return []
     return cfg.get("Providers") or cfg.get("providers") or []
+
+
+COOLDOWN_FILE = os.path.join(CFG_DIR, "cooldown.conf")
+
+
+def load_cooldown():
+    """cooldown.conf -> {daily_quota, transient, retryafter_max} in seconds.
+
+    Optional file; absent -> {} and callers fall back to the single COOLDOWN constant
+    (so behavior is byte-identical to before this feature — the default-harmless rule)."""
+    out = {}
+    try:
+        with open(COOLDOWN_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                try:
+                    out[k.strip()] = float(v.strip())
+                except ValueError:
+                    continue
+    except FileNotFoundError:
+        pass
+    return out
+
+
+def cooldown_for(code, retry_after):
+    """Pick a cooldown duration (seconds) for a failure, per cooldown.conf.
+
+    - No cooldown.conf at all -> fall back to the single COOLDOWN constant (harmless default).
+    - 429 with a Retry-After <= retryafter_max -> use that Retry-After verbatim (upstream knows best).
+    - 429 with a large/absent Retry-After -> daily_quota (quota exhausted, park for a day).
+    - anything else (401/403/5xx/conn error) -> transient (short cooldown).
+    """
+    conf = load_cooldown()
+    if not conf:
+        return COOLDOWN
+    transient = conf.get("transient", COOLDOWN)
+    if code == 429:
+        ra_max = conf.get("retryafter_max", 300.0)
+        if retry_after is not None and retry_after <= ra_max:
+            return retry_after
+        return conf.get("daily_quota", 86400.0)
+    return transient
+
+
+def parse_retry_after(headers):
+    """Extract Retry-After seconds from response headers; None if absent/unparseable.
+    Only the delta-seconds form is honored (HTTP-date form is rare here and ignored)."""
+    if headers is None:
+        return None
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        return float(str(raw).strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def load_gateway_auth():
+    """gateway-auth.json -> {login_key: {maps_to, allow_models, erp}}. Empty dict if absent
+    (the dashboard's login-table section then just shows nothing — harmless default)."""
+    try:
+        with open(GATEWAY_AUTH) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for k, v in data.items():
+        if not isinstance(v, dict):
+            continue
+        out[k] = {"maps_to": str(v.get("maps_to", "")),
+                  "allow_models": list(v.get("allow_models") or []),
+                  "erp": str(v.get("erp", ""))}
+    return out
 
 
 def provider_for(realmodel, api_key, providers):
@@ -178,16 +258,19 @@ class Breaker:
                 self._fails[alias] = 0
             self._persist()
 
-    def record_fail(self, alias, now):
-        """Increment; trip at FAIL_N. Returns True if this failure tripped the key."""
+    def record_fail(self, alias, now, cooldown=None):
+        """Increment; trip at FAIL_N. Returns True if this failure tripped the key.
+        cooldown: seconds to park a tripped key (default None -> the single COOLDOWN
+        constant, i.e. behavior identical to before tiered cooldown was added)."""
+        cd = COOLDOWN if cooldown is None else cooldown
         with self._lock:
             n = self._fails.get(alias, 0) + 1
             self._fails[alias] = n
             tripped = False
             if n >= FAIL_N:
-                self._tripped[alias] = now + COOLDOWN
+                self._tripped[alias] = now + cd
                 tripped = True
-                log.warning("key '%s' TRIPPED after %d fails; cooling down %.0fs", alias, n, COOLDOWN)
+                log.warning("key '%s' TRIPPED after %d fails; cooling down %.0fs", alias, n, cd)
             self._persist()
             return tripped
 
@@ -406,12 +489,19 @@ label{font-size:12px;color:#8b949e}
 </header>
 <main>
   <section><h2>Keys</h2><table id="keys"><thead><tr>
-    <th>alias</th><th>state</th><th>requests</th><th>ok</th><th>fail</th><th>in tok</th><th>out tok</th><th>consec</th><th>cooldown</th>
+    <th>alias</th><th>erp</th><th>state</th><th>requests</th><th>ok</th><th>fail</th><th>in tok</th><th>out tok</th><th>consec</th><th>cooldown</th>
   </tr></thead><tbody></tbody></table></section>
 
   <section><h2>Usage by model</h2><table id="models"><thead><tr>
     <th>model</th><th>requests</th><th>in tok</th><th>out tok</th><th>total tok</th>
   </tr></thead><tbody></tbody></table></section>
+
+  <section><h2>Login table (gateway)</h2>
+    <table id="auth"><thead><tr>
+      <th>login key</th><th>maps to</th><th>allow models</th><th>erp</th><th></th>
+    </tr></thead><tbody></tbody></table>
+    <button id="authadd" style="margin-top:8px">+ add login key / ticket</button>
+  </section>
 
   <section><h2>Sessions</h2>
     <div class="err" id="sess-err"></div>
@@ -448,6 +538,17 @@ label{font-size:12px;color:#8b949e}
   </div>
 </form></dialog>
 
+<dialog id="authdlg"><form method="dialog">
+  <h2 id="auth-title">add login key</h2>
+  <label>login key (real key or ticket)</label><input id="auth-login" placeholder="jimdbtest">
+  <label>maps to (real alias in keys.conf)</label><input id="auth-mapsto" placeholder="personal">
+  <label>allow models (space/comma separated, empty = all)</label><input id="auth-models" placeholder="GLM-5.2">
+  <label>erp (contributor)</label><input id="auth-erp" placeholder="wangqiwang1">
+  <div style="display:flex;gap:8px;justify-content:flex-end">
+    <button value="cancel">cancel</button><button id="auth-save" value="save">save</button>
+  </div>
+</form></dialog>
+
 <script>
 const $=s=>document.querySelector(s), tb=s=>document.querySelector(s+' tbody');
 function pill(s){return `<span class="pill ${s}">${s}</span>`}
@@ -462,12 +563,18 @@ async function refresh(){
     const s=await jget('/api/status');
     $('#meta').textContent=`:${s.port} -> ${s.ccr_url}  ·  trip@${s.fail_n} cooldown ${s.cooldown}s`;
     $('#totals').textContent=`req ${s.totals.requests}  ok ${s.totals.ok}  fail ${s.totals.fail}  ·  tok ${kfmt(s.totals.in_tokens)}in / ${kfmt(s.totals.out_tokens)}out`;
-    tb('#keys').innerHTML=s.keys.map(k=>`<tr><td>${esc(k.alias)}</td><td>${pill(k.state)}</td>
+    tb('#keys').innerHTML=s.keys.map(k=>`<tr><td>${esc(k.alias)}</td><td class=dim>${esc(k.erp)||'-'}</td><td>${pill(k.state)}</td>
       <td>${k.requests}</td><td>${k.ok}</td><td>${k.fail}</td><td>${kfmt(k.in_tokens)}</td><td>${kfmt(k.out_tokens)}</td>
-      <td>${k.consec_fails}</td><td>${k.cooldown_left?k.cooldown_left+'s':'-'}</td></tr>`).join('')||'<tr><td class=dim colspan=9>no key activity yet</td></tr>';
+      <td>${k.consec_fails}</td><td>${k.cooldown_left?k.cooldown_left+'s':'-'}</td></tr>`).join('')||'<tr><td class=dim colspan=10>no key activity yet</td></tr>';
     tb('#models').innerHTML=(s.models||[]).map(m=>`<tr><td>${esc(m.model)}</td><td>${m.requests}</td>
       <td>${kfmt(m.in_tokens)}</td><td>${kfmt(m.out_tokens)}</td><td>${kfmt((m.in_tokens||0)+(m.out_tokens||0))}</td></tr>`).join('')
       ||'<tr><td class=dim colspan=5>no usage yet</td></tr>';
+    tb('#auth').innerHTML=(s.auth||[]).map(a=>`<tr><td>${esc(a.login)}</td><td>${esc(a.maps_to)}</td>
+      <td class=dim>${(a.allow_models&&a.allow_models.length)?esc(a.allow_models.join(', ')):'<span class=dim>all</span>'}</td>
+      <td class=dim>${esc(a.erp)||'-'}</td>
+      <td><button onclick="editAuth('${esc(a.login)}','${esc(a.maps_to)}','${esc((a.allow_models||[]).join(' '))}','${esc(a.erp)}')">edit</button>
+          <button class=danger onclick="delAuth('${esc(a.login)}')">del</button></td></tr>`).join('')
+      ||'<tr><td class=dim colspan=5>no login keys — click "add" below</td></tr>';
   }catch(e){$('#meta').innerHTML='<span class=err>proxy status unavailable</span>'}
 
   try{
@@ -507,6 +614,31 @@ function editSess(name,model,key){editName=name;$('#edittitle').textContent='edi
   $('#edit-model').value=model==='-'?'':model;$('#edit-key').value=key==='-'?'':key;$('#editdlg').showModal()}
 $('#edit-save').onclick=async()=>{await jpost('/api/session/config',
   {name:editName,model:$('#edit-model').value.trim(),key:$('#edit-key').value.trim()});setTimeout(refresh,200)};
+
+// -- gateway login table edit --
+function openAuth(login,mapsto,models,erp){
+  $('#auth-title').textContent=login?('edit '+login):'add login key';
+  $('#auth-login').value=login||'';$('#auth-login').readOnly=!!login;
+  $('#auth-mapsto').value=mapsto||'';$('#auth-models').value=models||'';$('#auth-erp').value=erp||'';
+  $('#authdlg').showModal();
+}
+function editAuth(login,mapsto,models,erp){openAuth(login,mapsto,models,erp)}
+$('#authadd').onclick=()=>openAuth('','','','');
+$('#auth-save').onclick=async()=>{
+  const login=$('#auth-login').value.trim();
+  if(!login)return;
+  const allow=$('#auth-models').value.trim().split(/[\s,]+/).filter(Boolean);
+  const r=await jpost('/api/gateway/auth',
+    {login,maps_to:$('#auth-mapsto').value.trim(),allow_models:allow,erp:$('#auth-erp').value.trim()});
+  if(r&&r.error)alert('failed: '+r.error);
+  setTimeout(refresh,200);
+};
+async function delAuth(login){
+  if(!confirm('delete login key "'+login+'"?'))return;
+  const r=await jpost('/api/gateway/auth',{login,delete:true});
+  if(r&&r.error)alert('failed: '+r.error);
+  setTimeout(refresh,200);
+}
 
 async function killSess(name){if(!confirm('kill session "'+name+'"? (removes tmux + crew state; transcript kept)'))return;
   const r=await jpost('/api/session/kill',{name});if(r&&r.error)alert(r.error);setTimeout(refresh,300)}
@@ -581,14 +713,23 @@ class Handler(BaseHTTPRequestHandler):
         aliases = sorted(set(st["per_key"]) | set(load_policy().get("*", [])) |
                          {a for aliases in load_policy().values() for a in aliases})
         brk = BREAKER.snapshot(aliases, now)
+        # erp per real alias: a login entry with maps_to=<alias> tags that alias's contributor.
+        auth = load_gateway_auth()
+        erp_by_alias = {}
+        for login, e in auth.items():
+            mt = e.get("maps_to")
+            if mt and mt not in erp_by_alias and e.get("erp"):
+                erp_by_alias[mt] = e["erp"]
         keys = []
         for a in sorted(set(st["per_key"]) | set(brk)):
             pk = st["per_key"].get(a, {"requests": 0, "ok": 0, "fail": 0, "in_tokens": 0, "out_tokens": 0})
             b = brk.get(a, {"consec_fails": 0, "state": "healthy", "cooldown_left": 0})
-            keys.append({"alias": a, **pk, **b})
+            keys.append({"alias": a, "erp": erp_by_alias.get(a, ""), **pk, **b})
         models = [{"model": m, **v} for m, v in sorted(st["per_model"].items())]
+        auth_rows = [{"login": k, "maps_to": v["maps_to"], "allow_models": v["allow_models"],
+                      "erp": v["erp"]} for k, v in sorted(auth.items())]
         return {"port": PORT, "ccr_url": CCR_URL, "fail_n": FAIL_N, "cooldown": COOLDOWN,
-                "totals": st["totals"], "keys": keys, "models": models}
+                "totals": st["totals"], "keys": keys, "models": models, "auth": auth_rows}
 
     def _api_sessions(self):
         out, err = run_crew(["ls", "--json"])
@@ -631,6 +772,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_session_config(body); return
         if path == "/api/ccr/provider":
             self._api_ccr_provider(body); return
+        if path == "/api/gateway/auth":
+            self._api_gateway_auth(body); return
         # Only /v1/messages and /v1/chat/completions carry a model to route on.
         if path.endswith("/messages") or path.endswith("/chat/completions"):
             self._route(body)
@@ -761,6 +904,65 @@ class Handler(BaseHTTPRequestHandler):
         log.info("added CCR provider '%s' + key '%s' (backup %s)", pname, alias, backup)
         return self._send_json({"ok": True, "provider": pname, "backup_path": backup})
 
+    # -- gateway login table: add/update/delete an entry in gateway-auth.json --
+    #    {login, maps_to, allow_models[], erp}          -> upsert
+    #    {login, delete: true}                          -> remove
+    # login/maps_to/model names are strict-allowlisted (no shell metachars, no commas).
+    def _api_gateway_auth(self, body):
+        d = self._read_json(body)
+        if d is None:
+            return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
+        login = str(d.get("login", ""))
+        ok_name = re.compile(r"^[A-Za-z0-9._-]+$")
+        if not ok_name.match(login):
+            return self._send_json({"ok": False, "error": "invalid login key"}, 400)
+
+        auth = load_gateway_auth()
+
+        if d.get("delete"):
+            if login not in auth:
+                return self._send_json({"ok": False, "error": "login key not found"}, 404)
+            auth.pop(login, None)
+        else:
+            maps_to = str(d.get("maps_to", ""))
+            if not ok_name.match(maps_to):
+                return self._send_json({"ok": False, "error": "invalid maps_to"}, 400)
+            # maps_to must be a real alias in keys.conf.
+            if maps_to not in load_keys():
+                return self._send_json({"ok": False, "error": f"maps_to '{maps_to}' not in keys.conf"}, 400)
+            allow = d.get("allow_models") or []
+            if not isinstance(allow, list):
+                return self._send_json({"ok": False, "error": "allow_models must be a list"}, 400)
+            clean_allow = []
+            for m in allow:
+                m = str(m).strip()
+                if not m:
+                    continue
+                if not ok_name.match(m):
+                    return self._send_json({"ok": False, "error": f"invalid model name '{m}'"}, 400)
+                clean_allow.append(m)
+            erp = str(d.get("erp", ""))
+            if erp and not ok_name.match(erp):
+                return self._send_json({"ok": False, "error": "invalid erp"}, 400)
+            auth[login] = {"maps_to": maps_to, "allow_models": clean_allow, "erp": erp}
+
+        # write back: back up first (if the file exists), then atomic replace, mode 0600.
+        try:
+            os.makedirs(os.path.dirname(GATEWAY_AUTH), exist_ok=True)
+            backup = None
+            if os.path.exists(GATEWAY_AUTH):
+                backup = f"{GATEWAY_AUTH}.bak.{int(time.time())}"
+                shutil.copy2(GATEWAY_AUTH, backup)
+            tmp = GATEWAY_AUTH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(auth, f, indent=2)
+            os.replace(tmp, GATEWAY_AUTH)
+            os.chmod(GATEWAY_AUTH, 0o600)
+        except OSError as e:
+            return self._send_json({"ok": False, "error": f"gateway-auth write failed: {e}"}, 500)
+        return self._send_json({"ok": True, "login": login, "deleted": bool(d.get("delete")),
+                                "backup_path": backup})
+
     # -- plain reverse proxy (no key logic): health, /v1/models, unknown paths, and
     #    policy-less model calls. When model is given (a real completion call), the request
     #    is counted under the synthetic "direct" key so the dashboard shows all traffic. --
@@ -813,6 +1015,14 @@ class Handler(BaseHTTPRequestHandler):
             self._passthrough(body, model=realmodel, stream=stream)
             return
 
+        # Affinity: an upstream (e.g. crew-gateway) may hint which key to prefer via
+        # X-Crew-Prefer-Key. If that alias is in this model's policy, bump it to the front
+        # (failover order for the rest is unchanged). Absent/unknown header -> no effect,
+        # so behavior without the header is byte-identical to before.
+        prefer = self.headers.get("X-Crew-Prefer-Key")
+        if prefer and prefer in policy:
+            policy = [prefer] + [a for a in policy if a != prefer]
+
         keys = load_keys()
         providers = load_ccr_providers()
         now = time.time()
@@ -861,7 +1071,8 @@ class Handler(BaseHTTPRequestHandler):
                 resp = urllib.request.urlopen(req, timeout=300)
             except urllib.error.HTTPError as e:
                 if _is_fail(e.code) and not forced:
-                    BREAKER.record_fail(alias, now)
+                    cd = cooldown_for(e.code, parse_retry_after(e.headers))
+                    BREAKER.record_fail(alias, now, cd)
                     STATS.record(alias, realmodel, e.code, ok=False, forced=forced, failover=bool(tried))
                     tried.append(alias)
                     log.warning("← key '%s' upstream %d; failing over", alias, e.code)
@@ -875,7 +1086,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             except Exception as e:
                 if not forced:
-                    BREAKER.record_fail(alias, now)
+                    BREAKER.record_fail(alias, now, cooldown_for(0, None))  # conn error -> transient tier
                     STATS.record(alias, realmodel, "ERR", ok=False, forced=forced, failover=bool(tried))
                     tried.append(alias)
                     log.warning("← key '%s' conn error: %s; failing over", alias, e)

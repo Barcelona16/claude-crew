@@ -56,6 +56,8 @@ class MockCCR(BaseHTTPRequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
+            if MOCK.get("retry_after") is not None:
+                self.send_header("Retry-After", str(MOCK["retry_after"]))
             self.end_headers()
             self.wfile.write(payload)
         else:
@@ -99,10 +101,13 @@ def check(name, cond):
         FAILS += 1
         print(f"  FAIL {name}")
 
-def post(model="MODEL_X"):
+def post(model="MODEL_X", headers=None):
+    h = {"Content-Type": "application/json"}
+    if headers:
+        h.update(headers)
     req = urllib.request.Request(PROXY + "/v1/messages",
                                  data=json.dumps({"model": model, "stream": False}).encode(),
-                                 headers={"Content-Type": "application/json"}, method="POST")
+                                 headers=h, method="POST")
     try:
         r = urllib.request.urlopen(req, timeout=10)
         return r.status, json.loads(r.read())
@@ -111,6 +116,7 @@ def post(model="MODEL_X"):
 
 def reset():
     MOCK["hits"].clear()
+    MOCK["retry_after"] = None
     cp.BREAKER._fails.clear()
     cp.BREAKER._tripped.clear()
 
@@ -164,6 +170,53 @@ reset(); MOCK["fail_providers"] = {"p1"}; MOCK["fail_code"] = 400
 code, _ = post()
 check("400 relayed, not failed over", code == 400 and MOCK["hits"] == ["p1"])
 check("p1 not counted as failure", cp.BREAKER._fails.get("p1", 0) == 0)
+
+# ── affinity: X-Crew-Prefer-Key bumps a lower-priority alias to the front ──────────
+print("Affinity header (X-Crew-Prefer-Key):")
+reset(); MOCK["fail_providers"] = set()
+code, body = post(headers={"X-Crew-Prefer-Key": "k2"})
+check("prefer k2 -> lands on p2 first", code == 200 and body.get("provider") == "p2")
+check("only p2 hit (no p1 attempt)", MOCK["hits"] == ["p2"])
+reset(); MOCK["fail_providers"] = set()
+code, body = post(headers={"X-Crew-Prefer-Key": "nope"})  # not in policy -> ignored
+check("unknown prefer ignored -> default k1/p1", body.get("provider") == "p1")
+reset(); MOCK["fail_providers"] = set()
+code, body = post()  # no header -> unchanged default behavior
+check("no header -> default k1/p1 (harmless)", body.get("provider") == "p1")
+# preferred but tripped -> falls through to normal policy order
+reset(); MOCK["fail_providers"] = set()
+for _ in range(3):
+    cp.BREAKER.record_fail("k2", time.time())
+code, body = post(headers={"X-Crew-Prefer-Key": "k2"})
+check("preferred-but-tripped falls back to k1", body.get("provider") == "p1")
+
+# ── tiered cooldown: 429 with small Retry-After uses that value verbatim ───────────
+print("Tiered cooldown (cooldown.conf + Retry-After):")
+# write a cooldown.conf into the test config dir
+with open(os.path.join(_cfg, "cooldown.conf"), "w") as f:
+    f.write("daily_quota=86400\ntransient=7\nretryafter_max=300\n")
+# 429 with Retry-After=5 (<= max) -> k1 tripped for ~5s (verbatim), not transient/daily
+reset(); MOCK["fail_providers"] = {"p1"}; MOCK["fail_code"] = 429; MOCK["retry_after"] = 5
+for _ in range(3):
+    post()  # p1 fails 3x -> trip
+now = time.time()
+exp = cp.BREAKER._tripped.get("k1", 0)
+check("429 small Retry-After -> ~5s cooldown", 3 <= (exp - now) <= 7)
+# 429 with no Retry-After -> daily_quota (86400)
+reset(); MOCK["fail_providers"] = {"p2"}; MOCK["fail_code"] = 429; MOCK["retry_after"] = None
+for _ in range(3):
+    post(headers={"X-Crew-Prefer-Key": "k2"})  # force onto p2 path? p2 fails -> failover, but k2 fails counted
+now = time.time()
+exp2 = cp.BREAKER._tripped.get("k2", 0)
+check("429 no Retry-After -> daily_quota (~86400)", exp2 - now > 80000)
+# 500 (non-429) -> transient (7s per our cooldown.conf)
+reset(); MOCK["fail_providers"] = {"p1"}; MOCK["fail_code"] = 500; MOCK["retry_after"] = None
+for _ in range(3):
+    post()
+now = time.time()
+exp3 = cp.BREAKER._tripped.get("k1", 0)
+check("500 -> transient (~7s)", 4 <= (exp3 - now) <= 10)
+os.remove(os.path.join(_cfg, "cooldown.conf"))  # clean up so later tests use default
 
 # ── dashboard read endpoints ──────────────────────────────────────────────────────
 print("Dashboard read endpoints:")
@@ -233,6 +286,44 @@ check("bad alias rejected", code == 400 and not r.get("ok"))
 code, r = jpost("/api/ccr/provider", {"alias": "k5", "key": "x", "model": "MODEL_X",
                                        "base_url": "ftp://nope", "transformer": "OpenAI"})
 check("non-http base_url rejected", code == 400 and not r.get("ok"))
+
+# ── gateway login table: add / update / delete + erp join + injection ─────────────
+print("Gateway login table (/api/gateway/auth):")
+cp.GATEWAY_AUTH = os.path.join(_tmp, "gateway-auth.json")
+# add a ticket mapped to a real alias k1, limited to MODEL_X
+code, r = jpost("/api/gateway/auth", {"login": "ticket1", "maps_to": "k1",
+                                      "allow_models": ["MODEL_X"], "erp": "alice"})
+check("add login ticket1", code == 200 and r.get("ok"))
+_auth = json.load(open(cp.GATEWAY_AUTH))
+check("ticket1 persisted", _auth.get("ticket1", {}).get("maps_to") == "k1")
+check("gateway-auth.json is 0600", (os.stat(cp.GATEWAY_AUTH).st_mode & 0o777) == 0o600)
+# maps_to must be a real alias in keys.conf
+code, r = jpost("/api/gateway/auth", {"login": "bad", "maps_to": "nosuchalias"})
+check("maps_to must exist in keys.conf", code == 400 and not r.get("ok"))
+# injection: login key with shell metachars rejected
+code, r = jpost("/api/gateway/auth", {"login": "a;rm -rf /", "maps_to": "k1"})
+check("shell-metachar login rejected", code == 400 and not r.get("ok"))
+# injection: bad model name in allow_models rejected
+code, r = jpost("/api/gateway/auth", {"login": "t2", "maps_to": "k1", "allow_models": ["a/../b"]})
+check("bad model name rejected", code == 400 and not r.get("ok"))
+# update existing
+code, r = jpost("/api/gateway/auth", {"login": "ticket1", "maps_to": "k2",
+                                      "allow_models": [], "erp": "bob"})
+check("update ticket1 -> k2/all/bob", code == 200 and r.get("ok"))
+_auth = json.load(open(cp.GATEWAY_AUTH))
+check("update persisted", _auth["ticket1"]["maps_to"] == "k2" and _auth["ticket1"]["allow_models"] == [])
+# erp join shows up in /api/status keys
+code, raw = get("/api/status")
+_st = json.loads(raw)
+_k2 = next((k for k in _st["keys"] if k["alias"] == "k2"), {})
+check("erp joins onto k2 in status", _k2.get("erp") == "bob")
+check("status has auth rows", any(a["login"] == "ticket1" for a in _st.get("auth", [])))
+# delete
+code, r = jpost("/api/gateway/auth", {"login": "ticket1", "delete": True})
+check("delete ticket1", code == 200 and r.get("ok"))
+check("ticket1 gone", "ticket1" not in json.load(open(cp.GATEWAY_AUTH)))
+code, r = jpost("/api/gateway/auth", {"login": "ghost", "delete": True})
+check("delete missing -> 404", code == 404)
 
 # ── usage parsing (unit) ──────────────────────────────────────────────────────────
 print("Usage parsing (unit):")
