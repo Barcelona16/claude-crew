@@ -454,8 +454,6 @@ class UsageSeries:
         with self._lock:
             if not force and (not self._dirty or now - self._last_flush < self.FLUSH_MIN_SEC):
                 return
-            self._dirty = False
-            self._last_flush = now
         data = self.snapshot()
         try:
             os.makedirs(os.path.dirname(USAGE_FILE), exist_ok=True)
@@ -466,6 +464,10 @@ class UsageSeries:
             os.replace(tmp, USAGE_FILE)
         except OSError as e:
             log.warning("usage flush failed: %s", e)
+            return  # leave _dirty=True so the next flush retries
+        with self._lock:
+            self._last_flush = now
+            self._dirty = False
 
     def load(self):
         try:
