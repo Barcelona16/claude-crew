@@ -986,9 +986,8 @@ async function load(){
   $('#admin').style.display=d.isAdmin?'block':'none';
   if(d.isAdmin){populateViewsel();loadAdmin();}
 }
-async function populateViewsel(){
-  const sd=await aget('/api/status');const sel=$('#viewsel');if(!sd)return;
-  const logins=(sd.auth||[]).map(a=>a.login);
+function populateViewsel(){
+  const sel=$('#viewsel');const logins=(_d&&_d.logins)||[];
   sel.innerHTML='<option value="">我自己('+esc(SELFLOGIN||'')+')</option><option value="__all__">全部人合计</option>'+
     logins.map(l=>'<option value="'+esc(l)+'">'+esc(l)+'</option>').join('');
   sel.value=VIEW;
@@ -1007,28 +1006,27 @@ async function aget(path){const r=await fetch(path,{headers:{'x-api-key':KEY}});
 async function apost(path,obj){const r=await fetch(path,{method:'POST',headers:{'x-api-key':KEY,'Content-Type':'application/json'},body:JSON.stringify(obj)});return {ok:r.ok,body:await r.json().catch(()=>({}))};}
 async function loadAdmin(){
   const kd=await aget('/api/keys');
-  if(kd){$('#pool').innerHTML='<table><tr><th>key</th><th>模型</th><th>策略</th><th>状态</th><th></th></tr>'+
+  if(!kd)return;
+  $('#pool').innerHTML='<table><tr><th>key</th><th>模型</th><th>策略</th><th>状态</th><th></th></tr>'+
     (kd.pool||[]).map(p=>'<tr><td>'+esc(p.key_masked)+'</td><td>'+esc((p.models||[]).join(', '))+
       '</td><td>'+esc(Object.keys(p.in_policy||{}).join(', '))+'</td><td>'+(p.state!=='healthy'?'<span style=color:#e5534b>异常'+(p.cooldown_left?' '+p.cooldown_left+'s':'')+'</span>':'<span style=color:#4ec98a>正常</span>')+
       '</td><td><button class=danger data-del="'+esc(p.alias)+'">删</button></td></tr>').join('')+'</table>';
-    document.querySelectorAll('#pool [data-del]').forEach(b=>b.onclick=async()=>{
-      if(!confirm('删除 key '+b.dataset.del+'?'))return;
-      const r=await apost('/api/ccr/provider',{alias:b.dataset.del,delete:true});
-      if(!r.ok&&r.body.error){if(confirm(r.body.error+'\\n强制删除?')){await apost('/api/ccr/provider',{alias:b.dataset.del,delete:true,force:true});}}
-      loadAdmin();loadHealth();});}
-  const pd=await aget('/api/policy');
-  if(pd){$('#policy').innerHTML='<table><tr><th>模型</th><th>key 顺序(alias)</th><th></th></tr>'+
-    Object.entries(pd.policy||{}).map(([m,al])=>'<tr><td>'+esc(m)+'</td><td><input data-pm="'+esc(m)+'" value="'+esc(al.join(' '))+'" size=30></td><td><button data-ps="'+esc(m)+'">存</button></td></tr>').join('')+'</table>';
-    document.querySelectorAll('#policy [data-ps]').forEach(b=>b.onclick=async()=>{
-      const inp=document.querySelector('#policy [data-pm="'+CSS.escape(b.dataset.ps)+'"]');
-      await apost('/api/policy',{model:b.dataset.ps,aliases:inp.value.trim().split(/\\s+/).filter(Boolean)});
-      loadAdmin();});}
-  const sd=await aget('/api/status');
-  if(sd){$('#logins').innerHTML='<table><tr><th>login</th><th>maps_to</th><th>allow_models</th><th>erp</th><th>admin</th><th></th></tr>'+
-    (sd.auth||[]).map(a=>'<tr><td>'+esc(a.login)+'</td><td>'+esc(a.maps_to)+'</td><td>'+esc((a.allow_models||[]).join(' '))+'</td><td>'+esc(a.erp||'')+'</td><td>'+(a.admin?'✓':'')+'</td><td><button class=danger data-dl="'+esc(a.login)+'">删</button></td></tr>').join('')+'</table>';
-    document.querySelectorAll('#logins [data-dl]').forEach(b=>b.onclick=async()=>{
-      if(!confirm('删除登录 '+b.dataset.dl+'?'))return;
-      await apost('/api/gateway/auth',{login:b.dataset.dl,delete:true});loadAdmin();});}
+  document.querySelectorAll('#pool [data-del]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('删除 key '+b.dataset.del+'?'))return;
+    const r=await apost('/api/ccr/provider',{alias:b.dataset.del,delete:true});
+    if(!r.ok&&r.body.error){if(confirm(r.body.error+'\\n强制删除?')){await apost('/api/ccr/provider',{alias:b.dataset.del,delete:true,force:true});}}
+    loadAdmin();loadHealth();});
+  $('#policy').innerHTML='<table><tr><th>模型</th><th>key 顺序(alias)</th><th></th></tr>'+
+    Object.entries(kd.policy||{}).map(([m,al])=>'<tr><td>'+esc(m)+'</td><td><input data-pm="'+esc(m)+'" value="'+esc(al.join(' '))+'" size=30></td><td><button data-ps="'+esc(m)+'">存</button></td></tr>').join('')+'</table>';
+  document.querySelectorAll('#policy [data-ps]').forEach(b=>b.onclick=async()=>{
+    const inp=document.querySelector('#policy [data-pm="'+CSS.escape(b.dataset.ps)+'"]');
+    await apost('/api/policy',{model:b.dataset.ps,aliases:inp.value.trim().split(/\\s+/).filter(Boolean)});
+    loadAdmin();});
+  $('#logins').innerHTML='<table><tr><th>login</th><th>maps_to</th><th>allow_models</th><th>erp</th><th>admin</th><th></th></tr>'+
+    (kd.logins||[]).map(a=>'<tr><td>'+esc(a.login)+'</td><td>'+esc(a.maps_to)+'</td><td>'+esc((a.allow_models||[]).join(' '))+'</td><td>'+esc(a.erp||'')+'</td><td>'+(a.admin?'✓':'')+'</td><td><button class=danger data-dl="'+esc(a.login)+'">删</button></td></tr>').join('')+'</table>';
+  document.querySelectorAll('#logins [data-dl]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('删除登录 '+b.dataset.dl+'?'))return;
+    await apost('/api/gateway/auth',{login:b.dataset.dl,delete:true});loadAdmin();});
 }
 $('#ak-add').onclick=async()=>{
   const r=await apost('/api/ccr/provider',{alias:$('#ak-alias').value.trim(),key:$('#ak-key').value.trim(),model:$('#ak-model').value.trim(),base_url:$('#ak-base').value.trim()});
@@ -1242,6 +1240,10 @@ class Handler(BaseHTTPRequestHandler):
             login = key
         out = USAGE.series(login, days=days)
         out["isAdmin"] = bool(entry.get("admin"))
+        if entry.get("admin"):
+            # give the admin dropdown the login list here, so it needs no extra (and no
+            # unauthenticated /api/status) call through the gateway.
+            out["logins"] = sorted(load_gateway_auth().keys())
         return self._send_json(out)
 
     # -- pool health: any valid login key may see which pool keys are down (health only,
@@ -1289,7 +1291,10 @@ class Handler(BaseHTTPRequestHandler):
                          "models": models_by_alias.get(a, []), "in_policy": in_policy,
                          "state": b["state"], "cooldown_left": b["cooldown_left"],
                          "consec_fails": b["consec_fails"]})
-        return self._send_json({"pool": pool})
+        auth = load_gateway_auth()
+        logins = [{"login": k, "maps_to": v["maps_to"], "allow_models": v["allow_models"],
+                   "erp": v["erp"], "admin": bool(v.get("admin"))} for k, v in sorted(auth.items())]
+        return self._send_json({"pool": pool, "policy": policy, "logins": logins})
 
     def do_GET(self):
         path = self.path.split("?")[0]
