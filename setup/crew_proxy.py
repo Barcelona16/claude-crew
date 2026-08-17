@@ -387,6 +387,54 @@ class Stats:
 STATS = Stats()
 
 
+class UsageSeries:
+    """Per-login-key token usage bucketed into fixed time windows, for the self-service
+    usage chart. Separate from Stats (which counts by real alias): here the dimension is
+    the client LOGIN key, so two tickets that map to the same real key stay distinct.
+
+    Thread-safe: add() holds the lock for the whole read-modify-write and accumulates
+    directly by (login, bucket) — it never relies on a 'last request' heuristic, so it is
+    correct under concurrent requests sharing one login key. Counts only, never content."""
+
+    BUCKET_SEC = 600          # 10-minute buckets
+    WINDOW_DAYS = 7
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        # login -> {bucket_ts(int) -> {"turns", "inTok", "outTok"}}
+        self._buckets = {}
+
+    def _bucket_ts(self, now):
+        return int(now // self.BUCKET_SEC) * self.BUCKET_SEC
+
+    def add(self, login, in_tok, out_tok, now=None):
+        if now is None:
+            now = time.time()
+        bts = self._bucket_ts(now)
+        with self._lock:
+            series = self._buckets.setdefault(login, {})
+            b = series.setdefault(bts, {"turns": 0, "inTok": 0, "outTok": 0})
+            b["turns"] += 1
+            b["inTok"] += int(in_tok or 0)
+            b["outTok"] += int(out_tok or 0)
+
+    def prune(self, now=None):
+        if now is None:
+            now = time.time()
+        cutoff = now - self.WINDOW_DAYS * 86400
+        with self._lock:
+            for login in list(self._buckets):
+                series = self._buckets[login]
+                for bts in list(series):
+                    if bts < cutoff:
+                        del series[bts]
+                if not series:
+                    del self._buckets[login]
+
+
+USAGE = UsageSeries()
+
+
 # ── usage parsing (best-effort, OFF the forward path) ─────────────────────────────
 USAGE_STREAM_CAP = 256 * 1024  # cap the bytes we retain for stream usage scanning
 

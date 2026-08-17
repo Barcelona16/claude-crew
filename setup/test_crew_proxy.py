@@ -351,6 +351,22 @@ check("totals count tokens", _stat["totals"]["in_tokens"] == 10 and _stat["total
 check("per-key k1 tokens", _stat["per_key"].get("k1", {}).get("out_tokens") == 20)
 check("per-model MODEL_X tokens", _stat["per_model"].get("MODEL_X", {}).get("in_tokens") == 10)
 
+# ── UsageSeries unit: bucketing + prune ───────────────────────────────────────────
+print("UsageSeries unit:")
+us = cp.UsageSeries()
+t = 1_000_000.0  # fixed epoch seconds
+us.add("personal", 10, 20, now=t)
+us.add("personal", 5, 7, now=t + 60)          # same 10-min bucket
+us.add("jimdbtest", 1, 2, now=t)              # different login, same bucket
+b0 = us._bucket_ts(t)
+check("same 10-min window merges", us._buckets["personal"][b0] == {"turns": 2, "inTok": 15, "outTok": 27})
+check("distinct login separate", us._buckets["jimdbtest"][b0] == {"turns": 1, "inTok": 1, "outTok": 2})
+us.add("personal", 3, 4, now=t + 700)         # next bucket (700s > 600)
+check("next window is a new bucket", len(us._buckets["personal"]) == 2)
+us.add("personal", 9, 9, now=t + 8 * 86400)   # 8 days later
+us.prune(now=t + 8 * 86400)
+check("prune drops >7d-old buckets", all(bts >= (t + 8 * 86400) - 7 * 86400 for bts in us._buckets["personal"]))
+
 print()
 if FAILS:
     print(f"{FAILS} check(s) FAILED")
