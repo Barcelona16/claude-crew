@@ -59,7 +59,16 @@ CREW_DEMO_GIF = os.environ.get("CREW_DEMO_GIF") or next(
     (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-demo.gif"),
                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "crew-demo.gif"))
      if os.path.exists(p)), os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-demo.gif"))
+# crew-proxy hero banner (cyberpunk). Same resolution order as the gif.
+CREW_HERO_PNG = os.environ.get("CREW_HERO_PNG") or next(
+    (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-proxy-hero.png"),
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "crew-proxy-hero.png"))
+     if os.path.exists(p)), os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-proxy-hero.png"))
 GATEWAY_AUTH = os.environ.get("GATEWAY_AUTH") or os.path.join(CFG_DIR, "gateway-auth.json")
+# Self-registration: the fixed upstream a submitted key is test-called against (NOT
+# user-supplied — no SSRF). A key that passes is added to the pool for this model.
+REGISTER_TEST_URL = os.environ.get("CREW_REGISTER_URL") or "http://llm-gw.jd.local/v1/chat/completions"
+REGISTER_MODEL = os.environ.get("CREW_REGISTER_MODEL") or "GLM-5.2"
 CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.expanduser("~/.claude-code-router/config.json")
 CCR_URL   = (os.environ.get("CREW_CCR_URL") or "http://127.0.0.1:3456").rstrip("/")
 PORT      = int(os.environ.get("CREW_PROXY_PORT", "8788"))
@@ -865,22 +874,49 @@ USAGE_HTML = """<!doctype html><html><head><meta charset=utf-8>
  th{color:#6b7684;font-weight:500} .danger{color:#e5534b;border-color:#5a2620}
  .row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}
  h1{font-size:22px;margin:0 0 2px;letter-spacing:.5px} h1 .sub{font-size:12px;color:#6b7684;font-weight:400}
- #intro{margin:18px 0;max-width:720px} #intro img{max-width:100%;border:1px solid #21262d;border-radius:8px}
- #intro .feat{color:#9aa4af;margin:8px 0} #intro code{background:#161b22;border:1px solid #21262d;border-radius:4px;padding:1px 6px}
- #intro a{color:#6cf}
+ #intro{margin:18px 0;max-width:760px} #intro img{max-width:100%;border:1px solid #21262d;border-radius:8px}
+ #intro .feat{color:#9aa4af;margin:8px 0} code{background:#161b22;border:1px solid #21262d;border-radius:4px;padding:1px 6px} a{color:#6cf}
+ .wrap{max-width:860px;margin:0 auto}
+ .card{background:#12161c;border:1px solid #21262d;border-radius:12px;padding:18px;margin:16px 0}
+ .quick pre{background:#0b0e13;border:1px solid #21262d;border-radius:8px;padding:10px 12px;overflow:auto;font-size:12px;color:#b8c2cd}
+ .hero{text-align:center;margin:10px 0} .hero img{max-width:100%;border-radius:12px;border:1px solid #21262d}
+ .authbox{display:flex;flex-direction:column;gap:10px;align-items:center;margin:14px 0}
+ .authbox .line{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+ #regmsg{font-size:12px;max-width:640px;margin:0 auto;text-align:center}
+ #regmsg pre{text-align:left;white-space:pre-wrap;color:#e5534b;background:#1a1113;border:1px solid #5a2620;border-radius:6px;padding:8px}
+ .adbox{border-top:1px solid #21262d;margin-top:30px;padding-top:8px}
 </style></head><body>
-<h1>crew-proxy <span class=sub>· 共享 key 网关 & 用量看板</span></h1>
-<div class=bar>
- <input id=key type=password placeholder="输入你的 key 登录" size=32>
- <input id=viewas placeholder="(admin) 查看某 login / __all__" size=26 style=display:none>
- <button id=login>登录</button>
- <span id=meta class=dim></span>
+<div class=wrap>
+
+<div class="card quick">
+ <h3 style="margin-top:0">🚀 快速接入本网关</h3>
+ <p class=feat>把本机地址当作 Anthropic API endpoint，用你的 key 直接发请求：</p>
+ <pre>ANTHROPIC_BASE_URL=http://11.91.165.248:8790
+ANTHROPIC_API_KEY=&lt;你的 key&gt;
+# 或直接 curl:
+curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
+  -H "content-type: application/json" \\
+  -d '{"model":"GLM-5.2","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}'</pre>
+ <p class=feat>还没有 key？下面 <b>注册你的 key</b>，测试通过即可加入共享池并使用。</p>
 </div>
-<div id=intro>
- <img src="/crew-demo.gif" alt="crew demo" loading=lazy>
- <p class=feat><b>crew</b> —— 一个人同时开多个 Claude Code 会话、随时切换模型、让不同模型互相对话协作。共享 key 池自动故障切换、限额自动摘除恢复。</p>
- <p class=feat>接入:仓库 <code>git@coding.jd.com:olsd/claude-crew.git</code>(内网) / <code>git@github.com:Barcelona16/claude-crew.git</code>(外网),装好后配一个 backend 指向本网关即可。</p>
+
+<div class=card>
+ <div class=hero><img src="/crew-proxy-hero.png" alt="crew-proxy"></div>
+ <div class=authbox>
+  <div class=line>
+   <input id=key type=password placeholder="输入你的 key 登录" size=30>
+   <input id=viewas placeholder="(admin) 查看某 login / __all__" size=24 style=display:none>
+   <button id=login>登录</button>
+  </div>
+  <div class=line>
+   <input id=regkey type=password placeholder="注册：粘贴你的真实 key（会用 GLM 实测）" size=42>
+   <button id=reg>注册我的 key</button>
+  </div>
+  <div id=regmsg></div>
+  <span id=meta class=dim></span>
+ </div>
 </div>
+
 <div id=totals></div>
 <div id=health></div>
 <div id=daily></div>
@@ -905,6 +941,15 @@ USAGE_HTML = """<!doctype html><html><head><meta charset=utf-8>
   <button id=lg-add>加/改登录</button>
  </div>
 </div>
+
+<div class="card adbox" id=intro>
+ <h3 style="margin-top:0">想要更强的接入方式？用 crew 🐧</h3>
+ <img src="/crew-demo.gif" alt="crew demo" loading=lazy>
+ <p class=feat><b>crew</b> —— 一个人同时开多个 Claude Code 会话、随时切换模型、让不同模型互相对话协作；共享 key 池自动故障切换、限额自动摘除恢复。比直接改 base_url 多了：多会话编排、模型热切换、跨模型协作。</p>
+ <p class=feat>用 CCR 的话，把 config 里的 <code>api_base_url</code> 改成 <code>http://11.91.165.248:8790</code> 即可；更推荐装 crew 后配一个 backend 指向本网关。</p>
+ <p class=feat>仓库：<code>git@coding.jd.com:olsd/claude-crew.git</code>（内网） / <code>git@github.com:Barcelona16/claude-crew.git</code>（外网）</p>
+</div>
+</div>
 <script>
 let KEY=sessionStorage.getItem('crewKey')||'', VIEW='', _d=null, _geom=null;
 const $=s=>document.querySelector(s);
@@ -917,7 +962,6 @@ async function load(){
   let r;try{r=await fetch(url,{headers:{'x-api-key':KEY}});}catch(e){$('#meta').textContent='网络错误';return;}
   if(r.status===401){$('#meta').textContent='key 无效';return;}
   const d=await r.json();_d=d;
-  $('#intro').style.display='none';
   $('#meta').textContent='登录: '+d.login+' · 近 '+(d.windowH/24)+' 天 · '+d.buckets.length+' 点';
   renderTotals(d);renderDaily(d);draw();
   loadHealth();
@@ -998,6 +1042,21 @@ document.addEventListener('mousemove',ev=>{const cv=$('#tokenChart'),tip=$('#tok
   tip.style.display='block';tip.style.left=(ev.clientX-r.left+12)+'px';tip.style.top=(ev.clientY-r.top+8)+'px';});
 window.addEventListener('resize',()=>{if(_d)draw();});
 $('#login').onclick=()=>{KEY=$('#key').value.trim();VIEW=$('#viewas').value.trim();sessionStorage.setItem('crewKey',KEY);load();};
+$('#reg').onclick=async()=>{
+  const k=$('#regkey').value.trim();const m=$('#regmsg');
+  if(!k){m.textContent='请先粘贴你的 key';return;}
+  m.textContent='正在用 GLM 实测你的 key…';
+  let r,body;try{r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})});body=await r.json();}catch(e){m.textContent='网络错误: '+e;return;}
+  if(r.ok&&body.ok){
+    m.innerHTML='<span style=color:#4ec98a>✅ 注册成功!</span> 你的 key ('+esc(body.key_masked)+') 已加入 '+esc(body.model)+' 共享池。'+
+      '<br>现在就能用它登录看用量,或直接把它作为 x-api-key 发请求到本网关。'+
+      '<br>接入方式见上方「快速接入」与下方 crew 介绍。';
+    $('#key').value=k;KEY=k;sessionStorage.setItem('crewKey',KEY);load();
+  }else{
+    m.innerHTML='<span style=color:#e5534b>❌ '+esc(body.error||'注册失败')+'</span>'+
+      (body.detail?'<pre>'+esc(body.detail)+'</pre>':'');
+  }
+};
 if(KEY){$('#key').value=KEY;$('#viewas').style.display='inline-block';load();}
 setInterval(()=>{if(KEY)load();},30000);
 </script></body></html>"""
@@ -1054,14 +1113,14 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def _send_gif(self):
+    def _send_static(self, filepath, content_type):
         try:
-            with open(CREW_DEMO_GIF, "rb") as f:
+            with open(filepath, "rb") as f:
                 body = f.read()
         except OSError:
             return self._send_json({"error": "not found"}, 404)
         self.send_response(200)
-        self.send_header("Content-Type", "image/gif")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "public, max-age=86400")
         self.send_header("Connection", "close")
@@ -1209,7 +1268,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/usage", "/usage/"):
             self._send_html(USAGE_HTML)
         elif path == "/crew-demo.gif":
-            self._send_gif()
+            self._send_static(CREW_DEMO_GIF, "image/gif")
+        elif path == "/crew-proxy-hero.png":
+            self._send_static(CREW_HERO_PNG, "image/png")
         elif path == "/api/status":
             self._send_json(self._api_status())
         elif path == "/api/sessions":
@@ -1241,6 +1302,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_gateway_auth(body); return
         if path == "/api/policy":
             self._api_policy(body); return
+        if path == "/api/register":
+            self._api_register(body); return
         # Only /v1/messages and /v1/chat/completions carry a model to route on.
         if path.endswith("/messages") or path.endswith("/chat/completions"):
             self._route(body)
@@ -1513,6 +1576,113 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as e:
             return self._send_json({"ok": False, "error": f"key-policy.conf write failed: {e}"}, 500)
         return self._send_json({"ok": True, "model": model, "aliases": aliases, "deleted": delete})
+
+    # -- self-service registration: NO admin required. A visitor submits their own real
+    #    key; we test-call the fixed internal upstream (REGISTER_TEST_URL, not user-supplied
+    #    -> no SSRF) with a tiny request. On success the key joins the shared pool for
+    #    REGISTER_MODEL (keys.conf + CCR provider + appended to that model's policy) so it
+    #    participates in failover. On failure the upstream error is returned verbatim so the
+    #    user can see why. Never exposes other keys; cannot touch policy of other models. --
+    def _api_register(self, body):
+        d = self._read_json(body)
+        if d is None:
+            return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
+        key = str(d.get("key", "")).strip()
+        if not key or len(key) > 512:
+            return self._send_json({"ok": False, "error": "key required (<=512 chars)"}, 400)
+        # 1) test-call the fixed internal upstream with a minimal request.
+        payload = json.dumps({"model": REGISTER_MODEL, "max_tokens": 8,
+                              "messages": [{"role": "user", "content": "ping"}]}).encode()
+        req = urllib.request.Request(REGISTER_TEST_URL, data=payload, method="POST",
+                                     headers={"Content-Type": "application/json",
+                                              "Authorization": "Bearer " + key,
+                                              "x-api-key": key})
+        try:
+            resp = urllib.request.urlopen(req, timeout=30)
+            resp.read(4096)
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read(2048).decode("utf-8", "replace")
+            except Exception:
+                pass
+            return self._send_json({"ok": False, "stage": "test",
+                                    "error": f"key test failed (HTTP {e.code})", "detail": detail}, 400)
+        except Exception as e:
+            return self._send_json({"ok": False, "stage": "test",
+                                    "error": f"cannot reach upstream: {e}"}, 502)
+        # 2) key passed -> add to the pool. Dedupe by key: if an existing alias already holds
+        #    this exact key, reuse it (idempotent re-register); else mint self-<8hex of key>.
+        keys = load_keys()
+        alias = next((a for a, k in keys.items() if k == key), None)
+        if alias is None:
+            import hashlib
+            alias = "self-" + hashlib.sha256(key.encode()).hexdigest()[:8]
+        # keys.conf upsert
+        try:
+            lines, found = [], False
+            if os.path.exists(KEYS_FILE):
+                with open(KEYS_FILE) as f:
+                    for ln in f:
+                        if ln.strip() and not ln.lstrip().startswith("#") and ln.split("=", 1)[0].strip() == alias:
+                            lines.append(f"{alias}={key}\n"); found = True
+                        else:
+                            lines.append(ln if ln.endswith("\n") else ln + "\n")
+            if not found:
+                lines.append(f"{alias}={key}\n")
+            os.makedirs(os.path.dirname(KEYS_FILE), exist_ok=True)
+            tmp = KEYS_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(lines)
+            os.chmod(tmp, 0o600); os.replace(tmp, KEYS_FILE)
+        except OSError as e:
+            return self._send_json({"ok": False, "error": f"keys.conf write failed: {e}"}, 500)
+        # CCR provider for (REGISTER_MODEL, key) if not already present
+        try:
+            with open(CCR_CFG) as f:
+                cfg = json.load(f)
+            provs = cfg.get("Providers") or cfg.get("providers") or []
+            pname = f"{REGISTER_MODEL}-{alias}"
+            if not any(p.get("name") == pname for p in provs):
+                shutil.copy2(CCR_CFG, f"{CCR_CFG}.bak.{int(time.time())}")
+                provs.append({"name": pname, "api_base_url": REGISTER_TEST_URL, "api_key": key,
+                              "models": [REGISTER_MODEL], "transformer": {"use": ["OpenAI"]}})
+                cfg["Providers"] = provs; cfg.pop("providers", None)
+                tmp = CCR_CFG + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(cfg, f, indent=2)
+                os.replace(tmp, CCR_CFG)
+        except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+            return self._send_json({"ok": False, "error": f"CCR config update failed: {e}"}, 500)
+        # append alias to REGISTER_MODEL policy (shared pool), preserving order/comments
+        try:
+            plines = []
+            if os.path.exists(POLICY):
+                with open(POLICY) as f:
+                    plines = f.readlines()
+            out, found = [], False
+            for ln in plines:
+                s = ln.strip()
+                if s and not s.startswith("#") and "=" in s and s.split("=", 1)[0].strip() == REGISTER_MODEL:
+                    found = True
+                    cur = s.split("=", 1)[1].split()
+                    if alias not in cur:
+                        cur.append(alias)
+                    out.append(f"{REGISTER_MODEL} = {' '.join(cur)}\n")
+                else:
+                    out.append(ln)
+            if not found:
+                out.append(f"{REGISTER_MODEL} = {alias}\n")
+            os.makedirs(os.path.dirname(POLICY), exist_ok=True)
+            tmp = POLICY + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(out)
+            os.replace(tmp, POLICY)
+        except OSError as e:
+            return self._send_json({"ok": False, "error": f"policy write failed: {e}"}, 500)
+        log.info("self-registered key alias '%s' into %s pool", alias, REGISTER_MODEL)
+        return self._send_json({"ok": True, "alias": alias, "model": REGISTER_MODEL,
+                                "key_masked": mask_key(key)})
 
     # -- gateway login table: add/update/delete an entry in gateway-auth.json --
     #    {login, maps_to, allow_models[], erp}          -> upsert

@@ -77,6 +77,8 @@ threading.Thread(target=_mock_srv.serve_forever, daemon=True).start()
 os.environ["CREW_CONFIG_DIR"] = _cfg
 os.environ["CREW_CCR_CONFIG"] = _ccr_cfg
 os.environ["CREW_CCR_URL"] = f"http://127.0.0.1:{_mock_port}"
+os.environ["CREW_REGISTER_URL"] = f"http://127.0.0.1:{_mock_port}"
+os.environ["CREW_REGISTER_MODEL"] = "GLM-5.2"
 os.environ["CREW_PROXY_STATE"] = _state
 os.environ["CREW_PROXY_FAILS"] = "3"
 os.environ["CREW_PROXY_COOLDOWN"] = "2"
@@ -428,6 +430,33 @@ check("unknown alias -> 400", code == 400 and not r.get("ok"))
 code, r = jpost("/api/policy", {"model": "MODEL_Z", "delete": True})
 check("delete MODEL_Z policy line", code == 200 and r.get("deleted"))
 check("MODEL_Z policy gone", "MODEL_Z" not in cp.load_policy())
+
+# ── self-registration: public, GLM test-call, key joins pool ──────────────────────
+print("Self-registration:")
+# success path: mock returns 200 for GLM-5.2 -> key pooled
+code, r = jpost("/api/register", {"key": "SELF_KEY_123"}, key=None)
+check("register no admin needed -> 200", code == 200 and r.get("ok"))
+check("register returns masked key", r.get("key_masked", "").startswith("sk-…"))
+_alias = r.get("alias")
+check("register minted self- alias", _alias and _alias.startswith("self-"))
+check("registered key in keys.conf", "SELF_KEY_123" in open(cp.KEYS_FILE).read())
+check("registered alias in GLM-5.2 policy", _alias in cp.load_policy().get("GLM-5.2", []))
+_ccr = json.load(open(_ccr_cfg))
+check("registered CCR provider present", any(p.get("api_key") == "SELF_KEY_123" for p in _ccr["Providers"]))
+# idempotent re-register: same key -> same alias, no dupe
+code, r2 = jpost("/api/register", {"key": "SELF_KEY_123"}, key=None)
+check("re-register same key reuses alias", r2.get("alias") == _alias)
+check("GLM-5.2 policy has no dupe alias", cp.load_policy()["GLM-5.2"].count(_alias) == 1)
+# failure path: mock rejects -> error returned verbatim, key NOT pooled
+MOCK["fail_providers"] = {"GLM-5.2"}; MOCK["fail_code"] = 401
+code, r = jpost("/api/register", {"key": "BAD_SELF_KEY"}, key=None)
+check("bad key -> 400 not ok", code == 400 and not r.get("ok"))
+check("bad key error mentions test", "test" in (r.get("stage") or "") or "HTTP" in (r.get("error") or ""))
+check("bad key NOT added to keys.conf", "BAD_SELF_KEY" not in open(cp.KEYS_FILE).read())
+MOCK["fail_providers"] = set()
+# empty key rejected
+code, r = jpost("/api/register", {"key": ""}, key=None)
+check("empty key -> 400", code == 400 and not r.get("ok"))
 
 # ── usage parsing (unit) ──────────────────────────────────────────────────────────
 print("Usage parsing (unit):")
