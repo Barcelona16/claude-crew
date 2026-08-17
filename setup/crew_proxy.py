@@ -885,9 +885,13 @@ USAGE_HTML = """<!doctype html><html><head><meta charset=utf-8>
  #regmsg{font-size:12px;max-width:640px;margin:0 auto;text-align:center}
  #regmsg pre{text-align:left;white-space:pre-wrap;color:#e5534b;background:#1a1113;border:1px solid #5a2620;border-radius:6px;padding:8px}
  .adbox{border-top:1px solid #21262d;margin-top:30px;padding-top:8px}
+ #dashbar{display:none;align-items:center;gap:12px;flex-wrap:wrap;background:#12161c;border:1px solid #21262d;border-radius:10px;padding:10px 14px;margin:8px 0 4px}
+ #dashbar .who{font-weight:600} #dashbar select{background:#161b22;color:#c7d0da;border:1px solid #30363d;border-radius:6px;padding:5px 8px}
+ #dashview{display:none}
 </style></head><body>
 <div class=wrap>
 
+<div id=landing>
 <div class="card quick">
  <h3 style="margin-top:0">🚀 快速接入本网关</h3>
  <p class=feat>把本机地址当作 Anthropic API endpoint，用你的 key 直接发请求：</p>
@@ -905,7 +909,6 @@ curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
  <div class=authbox>
   <div class=line>
    <input id=key type=password placeholder="输入你的 key 登录" size=30>
-   <input id=viewas placeholder="(admin) 查看某 login / __all__" size=24 style=display:none>
    <button id=login>登录</button>
   </div>
   <div class=line>
@@ -916,7 +919,16 @@ curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
   <span id=meta class=dim></span>
  </div>
 </div>
+</div>
 
+<div id=dashbar>
+ <span class=who id=who></span>
+ <span id=adminview style=display:none>查看: <select id=viewsel></select></span>
+ <span id=dmeta class=dim></span>
+ <button id=logout style=margin-left:auto>退出</button>
+</div>
+
+<div id=dashview>
 <div id=totals></div>
 <div id=health></div>
 <div id=daily></div>
@@ -941,6 +953,7 @@ curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
   <button id=lg-add>加/改登录</button>
  </div>
 </div>
+</div>
 
 <div class="card adbox" id=intro>
  <h3 style="margin-top:0">想要更强的接入方式？用 crew 🐧</h3>
@@ -951,7 +964,7 @@ curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
 </div>
 </div>
 <script>
-let KEY=sessionStorage.getItem('crewKey')||'', VIEW='', _d=null, _geom=null;
+let KEY=sessionStorage.getItem('crewKey')||'', VIEW='', SELFLOGIN='', _d=null, _geom=null;
 const $=s=>document.querySelector(s);
 function fmtK(n){if(n==null)return '—';if(n>=1e6)return (n/1e6).toFixed(2)+'M';if(n>=1e3)return (n/1e3).toFixed(0)+'k';return String(Math.round(n));}
 function fmtClock(ms){const d=new Date(ms),p=x=>String(x).padStart(2,'0');return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());}
@@ -960,14 +973,29 @@ async function load(){
   if(!KEY)return;
   let url='/api/usage?days=7'+(VIEW?('&key='+encodeURIComponent(VIEW)):'');
   let r;try{r=await fetch(url,{headers:{'x-api-key':KEY}});}catch(e){$('#meta').textContent='网络错误';return;}
-  if(r.status===401){$('#meta').textContent='key 无效';return;}
+  if(r.status===401){$('#meta').textContent='key 无效';logout(false);return;}
   const d=await r.json();_d=d;
-  $('#meta').textContent='登录: '+d.login+' · 近 '+(d.windowH/24)+' 天 · '+d.buckets.length+' 点';
+  if(!VIEW)SELFLOGIN=d.login;
+  // logged in -> switch from landing to dashboard view
+  $('#landing').style.display='none';$('#dashbar').style.display='flex';$('#dashview').style.display='block';
+  $('#who').textContent=(d.isAdmin?'管理员 · ':'')+'当前查看: '+d.login;
+  $('#dmeta').textContent='近 '+(d.windowH/24)+' 天 · '+d.buckets.length+' 点';
   renderTotals(d);renderDaily(d);draw();
   loadHealth();
+  $('#adminview').style.display=d.isAdmin?'inline':'none';
   $('#admin').style.display=d.isAdmin?'block':'none';
-  if(d.isAdmin)loadAdmin();
+  if(d.isAdmin){populateViewsel();loadAdmin();}
 }
+async function populateViewsel(){
+  const sd=await aget('/api/status');const sel=$('#viewsel');if(!sd)return;
+  const logins=(sd.auth||[]).map(a=>a.login);
+  sel.innerHTML='<option value="">我自己('+esc(SELFLOGIN||'')+')</option><option value="__all__">全部人合计</option>'+
+    logins.map(l=>'<option value="'+esc(l)+'">'+esc(l)+'</option>').join('');
+  sel.value=VIEW;
+}
+function logout(clear){if(clear!==false){KEY='';sessionStorage.removeItem('crewKey');}VIEW='';_d=null;
+  $('#landing').style.display='';$('#dashbar').style.display='none';$('#dashview').style.display='none';
+  $('#key').value='';$('#meta').textContent='';}
 async function loadHealth(){
   let r;try{r=await fetch('/api/health',{headers:{'x-api-key':KEY}});}catch(e){return;}
   if(!r.ok)return;const d=await r.json();
@@ -1041,14 +1069,16 @@ document.addEventListener('mousemove',ev=>{const cv=$('#tokenChart'),tip=$('#tok
   tip.innerHTML='<b>'+fmtClock(best.t)+'</b><br><span style=color:#8f8>新增</span> '+fmtK(best.newTokens)+'<br><span style=color:#6cf>in</span> '+fmtK(best.inputSum)+' · <span style=color:#e0a94f>out</span> '+fmtK(best.outputSum)+'<br>turns '+best.turns+' · 均 '+fmtK(best.perReqNew);
   tip.style.display='block';tip.style.left=(ev.clientX-r.left+12)+'px';tip.style.top=(ev.clientY-r.top+8)+'px';});
 window.addEventListener('resize',()=>{if(_d)draw();});
-$('#login').onclick=()=>{KEY=$('#key').value.trim();VIEW=$('#viewas').value.trim();sessionStorage.setItem('crewKey',KEY);load();};
+$('#login').onclick=()=>{KEY=$('#key').value.trim();VIEW='';if(!KEY)return;sessionStorage.setItem('crewKey',KEY);SELFLOGIN='';load();};
+$('#logout').onclick=()=>logout(true);
+$('#viewsel').onchange=()=>{VIEW=$('#viewsel').value;load();};
 $('#reg').onclick=async()=>{
   const k=$('#regkey').value.trim();const m=$('#regmsg');
   if(!k){m.textContent='请先粘贴你的 key';return;}
   m.textContent='正在用 GLM 实测你的 key…';
   let r,body;try{r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})});body=await r.json();}catch(e){m.textContent='网络错误: '+e;return;}
   if(r.ok&&body.ok){
-    m.innerHTML='<span style=color:#4ec98a>✅ 注册成功!</span> 你的 key ('+esc(body.key_masked)+') 已加入 '+esc(body.model)+' 共享池。'+
+    m.innerHTML='<span style=color:#4ec98a>✅ 注册成功!</span> 你的 key ('+esc(body.key_masked)+') 已加入 '+((body.models||[]).length)+' 个模型的共享池。'+
       '<br>现在就能用它登录看用量,或直接把它作为 x-api-key 发请求到本网关。'+
       '<br>接入方式见上方「快速接入」与下方 crew 介绍。';
     $('#key').value=k;KEY=k;sessionStorage.setItem('crewKey',KEY);load();
@@ -1057,7 +1087,7 @@ $('#reg').onclick=async()=>{
       (body.detail?'<pre>'+esc(body.detail)+'</pre>':'');
   }
 };
-if(KEY){$('#key').value=KEY;$('#viewas').style.display='inline-block';load();}
+if(KEY){$('#key').value=KEY;load();}
 setInterval(()=>{if(KEY)load();},30000);
 </script></body></html>"""
 
@@ -1637,42 +1667,62 @@ class Handler(BaseHTTPRequestHandler):
             os.chmod(tmp, 0o600); os.replace(tmp, KEYS_FILE)
         except OSError as e:
             return self._send_json({"ok": False, "error": f"keys.conf write failed: {e}"}, 500)
-        # CCR provider for (REGISTER_MODEL, key) if not already present
+        # 3) CCR providers: clone one provider per model this pool already serves, using the
+        #    new key with that model's own base_url + transformer, so the key can serve EVERY
+        #    model (not just the one we test-called).
+        added_models = []
         try:
             with open(CCR_CFG) as f:
                 cfg = json.load(f)
             provs = cfg.get("Providers") or cfg.get("providers") or []
-            pname = f"{REGISTER_MODEL}-{alias}"
-            if not any(p.get("name") == pname for p in provs):
-                shutil.copy2(CCR_CFG, f"{CCR_CFG}.bak.{int(time.time())}")
-                provs.append({"name": pname, "api_base_url": REGISTER_TEST_URL, "api_key": key,
-                              "models": [REGISTER_MODEL], "transformer": {"use": ["OpenAI"]}})
-                cfg["Providers"] = provs; cfg.pop("providers", None)
-                tmp = CCR_CFG + ".tmp"
-                with open(tmp, "w") as f:
-                    json.dump(cfg, f, indent=2)
-                os.replace(tmp, CCR_CFG)
+            # model -> (base_url, transformer) template from an existing provider serving it
+            tmpl = {}
+            for p in provs:
+                base = p.get("api_base_url") or p.get("apiBaseUrl") or REGISTER_TEST_URL
+                tr = p.get("transformer") or {"use": ["OpenAI"]}
+                for m in (p.get("models") or []):
+                    tmpl.setdefault(m, (base, tr))
+            # guarantee the test model even if no provider enumerated it
+            tmpl.setdefault(REGISTER_MODEL, (REGISTER_TEST_URL, {"use": ["OpenAI"]}))
+            shutil.copy2(CCR_CFG, f"{CCR_CFG}.bak.{int(time.time())}")
+            existing = {p.get("name") for p in provs}
+            for m, (base, tr) in tmpl.items():
+                pname = f"{m}-{alias}"
+                if pname in existing:
+                    continue
+                provs.append({"name": pname, "api_base_url": base, "api_key": key,
+                              "models": [m], "transformer": tr})
+                added_models.append(m)
+            cfg["Providers"] = provs; cfg.pop("providers", None)
+            tmp = CCR_CFG + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cfg, f, indent=2)
+            os.replace(tmp, CCR_CFG)
         except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
             return self._send_json({"ok": False, "error": f"CCR config update failed: {e}"}, 500)
-        # append alias to REGISTER_MODEL policy (shared pool), preserving order/comments
+        # 4) policy: append alias to EVERY model's line (create lines for models with none).
         try:
+            models = sorted(set(tmpl))
             plines = []
             if os.path.exists(POLICY):
                 with open(POLICY) as f:
                     plines = f.readlines()
-            out, found = [], False
+            out, seen = [], set()
             for ln in plines:
                 s = ln.strip()
-                if s and not s.startswith("#") and "=" in s and s.split("=", 1)[0].strip() == REGISTER_MODEL:
-                    found = True
-                    cur = s.split("=", 1)[1].split()
-                    if alias not in cur:
-                        cur.append(alias)
-                    out.append(f"{REGISTER_MODEL} = {' '.join(cur)}\n")
-                else:
-                    out.append(ln)
-            if not found:
-                out.append(f"{REGISTER_MODEL} = {alias}\n")
+                if s and not s.startswith("#") and "=" in s:
+                    m = s.split("=", 1)[0].strip()
+                    if m in models:
+                        seen.add(m)
+                        cur = s.split("=", 1)[1].split()
+                        if alias not in cur:
+                            cur.append(alias)
+                        out.append(f"{m} = {' '.join(cur)}\n")
+                        continue
+                out.append(ln)
+            for m in models:
+                if m not in seen:
+                    out.append(f"{m} = {alias}\n")
             os.makedirs(os.path.dirname(POLICY), exist_ok=True)
             tmp = POLICY + ".tmp"
             with open(tmp, "w") as f:
@@ -1680,8 +1730,8 @@ class Handler(BaseHTTPRequestHandler):
             os.replace(tmp, POLICY)
         except OSError as e:
             return self._send_json({"ok": False, "error": f"policy write failed: {e}"}, 500)
-        log.info("self-registered key alias '%s' into %s pool", alias, REGISTER_MODEL)
-        return self._send_json({"ok": True, "alias": alias, "model": REGISTER_MODEL,
+        log.info("self-registered key alias '%s' into %d models", alias, len(tmpl))
+        return self._send_json({"ok": True, "alias": alias, "models": sorted(set(tmpl)),
                                 "key_masked": mask_key(key)})
 
     # -- gateway login table: add/update/delete an entry in gateway-auth.json --

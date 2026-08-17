@@ -433,20 +433,26 @@ check("MODEL_Z policy gone", "MODEL_Z" not in cp.load_policy())
 
 # ── self-registration: public, GLM test-call, key joins pool ──────────────────────
 print("Self-registration:")
-# success path: mock returns 200 for GLM-5.2 -> key pooled
+# success path: mock returns 200 for GLM-5.2 -> key pooled across ALL models
 code, r = jpost("/api/register", {"key": "SELF_KEY_123"}, key=None)
 check("register no admin needed -> 200", code == 200 and r.get("ok"))
 check("register returns masked key", r.get("key_masked", "").startswith("sk-…"))
 _alias = r.get("alias")
 check("register minted self- alias", _alias and _alias.startswith("self-"))
+check("register returns models list", isinstance(r.get("models"), list) and len(r["models"]) >= 1)
 check("registered key in keys.conf", "SELF_KEY_123" in open(cp.KEYS_FILE).read())
-check("registered alias in GLM-5.2 policy", _alias in cp.load_policy().get("GLM-5.2", []))
+_pol = cp.load_policy()
+check("registered alias in every served model's policy", all(_alias in _pol.get(m, []) for m in r["models"]))
 _ccr = json.load(open(_ccr_cfg))
-check("registered CCR provider present", any(p.get("api_key") == "SELF_KEY_123" for p in _ccr["Providers"]))
-# idempotent re-register: same key -> same alias, no dupe
+check("registered CCR provider(s) present", sum(1 for p in _ccr["Providers"] if p.get("api_key") == "SELF_KEY_123") >= 1)
+# idempotent re-register: same key -> same alias, no dupe providers/policy
+_before = sum(1 for p in _ccr["Providers"] if p.get("api_key") == "SELF_KEY_123")
 code, r2 = jpost("/api/register", {"key": "SELF_KEY_123"}, key=None)
 check("re-register same key reuses alias", r2.get("alias") == _alias)
-check("GLM-5.2 policy has no dupe alias", cp.load_policy()["GLM-5.2"].count(_alias) == 1)
+_ccr2 = json.load(open(_ccr_cfg))
+check("re-register adds no dup providers", sum(1 for p in _ccr2["Providers"] if p.get("api_key") == "SELF_KEY_123") == _before)
+_pol2 = cp.load_policy()
+check("re-register no dup alias in policy", all(_pol2.get(m, []).count(_alias) == 1 for m in r2.get("models", [])))
 # failure path: mock rejects -> error returned verbatim, key NOT pooled
 MOCK["fail_providers"] = {"GLM-5.2"}; MOCK["fail_code"] = 401
 code, r = jpost("/api/register", {"key": "BAD_SELF_KEY"}, key=None)
