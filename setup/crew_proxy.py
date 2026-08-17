@@ -855,7 +855,7 @@ let KEY=sessionStorage.getItem('crewKey')||'', VIEW='', _d=null, _geom=null;
 const $=s=>document.querySelector(s);
 function fmtK(n){if(n==null)return '—';if(n>=1e6)return (n/1e6).toFixed(2)+'M';if(n>=1e3)return (n/1e3).toFixed(0)+'k';return String(Math.round(n));}
 function fmtClock(ms){const d=new Date(ms),p=x=>String(x).padStart(2,'0');return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());}
-function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function load(){
   if(!KEY)return;
   let url='/api/usage?days=7'+(VIEW?('&key='+encodeURIComponent(VIEW)):'');
@@ -1438,7 +1438,13 @@ def main():
     log.info("keys=%s policy=%s ccr=%s", KEYS_FILE, POLICY, CCR_CFG)
     log.info("breaker: trip after %d fails, cooldown %.0fs", FAIL_N, COOLDOWN)
     USAGE.load()
+    log.info("usage series loaded (%d logins)", len(USAGE._buckets))
     atexit.register(lambda: USAGE.flush(force=True))
+    def _usage_flusher():
+        while True:
+            time.sleep(UsageSeries.FLUSH_MIN_SEC)
+            USAGE.flush()
+    threading.Thread(target=_usage_flusher, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     try:
         server.serve_forever()
