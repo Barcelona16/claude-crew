@@ -198,6 +198,16 @@ def load_gateway_auth():
     return out
 
 
+def mask_key(key):
+    """Show only enough of a real API key to recognize it, never the secret itself:
+    'sk-…3f9a' (last 4). Empty/short keys collapse to '…'. Used everywhere a key would
+    otherwise surface in an API response or the dashboard."""
+    if not key:
+        return "…"
+    tail = key[-4:] if len(key) >= 4 else key
+    return "sk-…" + tail
+
+
 def provider_for(realmodel, api_key, providers):
     """Find the CCR provider serving `realmodel` with `api_key` (mirrors crew's ccr_provider_for)."""
     for p in providers:
@@ -973,7 +983,7 @@ class Handler(BaseHTTPRequestHandler):
             keys.append({"alias": a, "erp": erp_by_alias.get(a, ""), **pk, **b})
         models = [{"model": m, **v} for m, v in sorted(st["per_model"].items())]
         auth_rows = [{"login": k, "maps_to": v["maps_to"], "allow_models": v["allow_models"],
-                      "erp": v["erp"]} for k, v in sorted(auth.items())]
+                      "erp": v["erp"], "admin": bool(v.get("admin"))} for k, v in sorted(auth.items())]
         return {"port": PORT, "ccr_url": CCR_URL, "fail_n": FAIL_N, "cooldown": COOLDOWN,
                 "totals": st["totals"], "keys": keys, "models": models, "auth": auth_rows}
 
@@ -1036,6 +1046,52 @@ class Handler(BaseHTTPRequestHandler):
         out["isAdmin"] = bool(entry.get("admin"))
         return self._send_json(out)
 
+    # -- pool health: any valid login key may see which pool keys are down (health only,
+    #    no key material, no alias names — keyed by masked key so users understand slowness
+    #    without learning credentials). Unknown key -> 401. --
+    def _api_health(self):
+        key = self._client_key()
+        if not key or key not in load_gateway_auth():
+            return self._send_json({"error": "unauthorized"}, 401)
+        now = time.time()
+        keys = load_keys()
+        aliases = sorted(set(keys) | {a for al in load_policy().values() for a in al})
+        brk = BREAKER.snapshot(aliases, now)
+        out = []
+        for a in aliases:
+            b = brk.get(a, {"state": "healthy", "cooldown_left": 0})
+            out.append({"key_masked": mask_key(keys.get(a, "")),
+                        "state": b["state"], "cooldown_left": b["cooldown_left"]})
+        return self._send_json({"pool": out})
+
+    # -- admin: full key pool for management (masked keys + models + policy rank + health).
+    #    alias is returned because delete/policy ops target it, but the UI shows the masked
+    #    key. Admin-only. --
+    def _api_keys(self):
+        if not self.require_admin():
+            return self._send_json({"error": "admin required"}, 403)
+        now = time.time()
+        keys = load_keys()
+        policy = load_policy()
+        providers = load_ccr_providers()
+        aliases = sorted(set(keys) | {a for al in policy.values() for a in al})
+        brk = BREAKER.snapshot(aliases, now)
+        models_by_alias = {}
+        for a in aliases:
+            ms = set()
+            for p in providers:
+                if (p.get("api_key") or p.get("apiKey")) == keys.get(a):
+                    ms.update(p.get("models") or [])
+            models_by_alias[a] = sorted(ms)
+        pool = []
+        for a in aliases:
+            b = brk.get(a, {"consec_fails": 0, "state": "healthy", "cooldown_left": 0})
+            in_policy = {m: al.index(a) for m, al in policy.items() if a in al}
+            pool.append({"alias": a, "key_masked": mask_key(keys.get(a, "")),
+                         "models": models_by_alias.get(a, []), "in_policy": in_policy,
+                         "state": b["state"], "cooldown_left": b["cooldown_left"],
+                         "consec_fails": b["consec_fails"]})
+        return self._send_json({"pool": pool})
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -1051,6 +1107,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(self._api_logs())
         elif path == "/api/usage":
             self._api_usage()
+        elif path == "/api/health":
+            self._api_health()
+        elif path == "/api/keys":
+            self._api_keys()
+        elif path == "/api/policy":
+            self._api_policy_get()
         else:
             self._passthrough(b"")
 
@@ -1066,6 +1128,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_ccr_provider(body); return
         if path == "/api/gateway/auth":
             self._api_gateway_auth(body); return
+        if path == "/api/policy":
+            self._api_policy(body); return
         # Only /v1/messages and /v1/chat/completions carry a model to route on.
         if path.endswith("/messages") or path.endswith("/chat/completions"):
             self._route(body)
@@ -1141,6 +1205,8 @@ class Handler(BaseHTTPRequestHandler):
         d = self._read_json(body)
         if d is None:
             return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
+        if d.get("delete"):
+            return self._delete_key(str(d.get("alias", "")), bool(d.get("force")))
         alias = str(d.get("alias", "")); key = str(d.get("key", ""))
         model = str(d.get("model", "")); base_url = str(d.get("base_url", ""))
         transformer = str(d.get("transformer", "OpenAI"))
@@ -1201,6 +1267,141 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": False, "error": f"CCR write failed (backup at {backup}): {e}"}, 500)
         log.info("added CCR provider '%s' + key '%s' (backup %s)", pname, alias, backup)
         return self._send_json({"ok": True, "provider": pname, "backup_path": backup})
+
+    # -- admin: delete a real key from the pool: keys.conf line + matching CCR providers +
+    #    strip from every policy line. Refuses to orphan a model (leave it with no keys)
+    #    unless force. Backs up all three files first. --
+    def _delete_key(self, alias, force=False):
+        if not SAFE_NAME.match(alias):
+            return self._send_json({"ok": False, "error": "invalid alias"}, 400)
+        keys = load_keys()
+        if alias not in keys:
+            return self._send_json({"ok": False, "error": f"alias '{alias}' not in keys.conf"}, 404)
+        # orphan guard: any model whose policy would become empty by removing this alias?
+        policy = load_policy()
+        orphaned = [m for m, al in policy.items() if al == [alias]]
+        if orphaned and not force:
+            return self._send_json({"ok": False, "error": "would orphan model(s): "
+                                    + ", ".join(sorted(orphaned)) + " (pass force to proceed)"}, 409)
+        api_key = keys.get(alias)
+        ts = int(time.time())
+        # 1) keys.conf: drop the alias line (back up first).
+        try:
+            if os.path.exists(KEYS_FILE):
+                shutil.copy2(KEYS_FILE, f"{KEYS_FILE}.bak.{ts}")
+                with open(KEYS_FILE) as f:
+                    lines = f.readlines()
+                kept = [ln for ln in lines if not (ln.strip() and not ln.lstrip().startswith("#")
+                        and ln.split("=", 1)[0].strip() == alias)]
+                tmp = KEYS_FILE + ".tmp"
+                with open(tmp, "w") as f:
+                    f.writelines(kept)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, KEYS_FILE)
+        except OSError as e:
+            return self._send_json({"ok": False, "error": f"keys.conf write failed: {e}"}, 500)
+        # 2) key-policy.conf: strip the alias from every line (preserve comments/order).
+        try:
+            if os.path.exists(POLICY):
+                shutil.copy2(POLICY, f"{POLICY}.bak.{ts}")
+                with open(POLICY) as f:
+                    plines = f.readlines()
+                new_plines = []
+                for ln in plines:
+                    s = ln.strip()
+                    if not s or s.startswith("#") or "=" not in s:
+                        new_plines.append(ln); continue
+                    model, al = s.split("=", 1)
+                    rest = [x for x in al.split() if x != alias]
+                    new_plines.append(f"{model.strip()} = {' '.join(rest)}\n")
+                tmp = POLICY + ".tmp"
+                with open(tmp, "w") as f:
+                    f.writelines(new_plines)
+                os.replace(tmp, POLICY)
+        except OSError as e:
+            return self._send_json({"ok": False, "error": f"key-policy.conf write failed: {e}"}, 500)
+        # 3) CCR config: drop providers whose api_key matches this alias's key (back up).
+        try:
+            with open(CCR_CFG) as f:
+                cfg = json.load(f)
+            shutil.copy2(CCR_CFG, f"{CCR_CFG}.bak.{ts}")
+            provs = cfg.get("Providers") or cfg.get("providers") or []
+            before = len(provs)
+            provs = [p for p in provs if (p.get("api_key") or p.get("apiKey")) != api_key]
+            cfg["Providers"] = provs
+            cfg.pop("providers", None)
+            tmp = CCR_CFG + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cfg, f, indent=2)
+            os.replace(tmp, CCR_CFG)
+            removed = before - len(provs)
+        except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+            return self._send_json({"ok": False, "error": f"CCR config update failed: {e}"}, 500)
+        log.info("deleted key '%s' (providers removed: %d, force=%s)", alias, removed, force)
+        return self._send_json({"ok": True, "deleted": alias, "providers_removed": removed})
+
+    # -- admin: per-model priority policy. GET returns {model: [alias,...]}; POST
+    #    {model, aliases:[...]} rewrites that model's line (order = priority);
+    #    {model, delete: true} drops the line. Aliases must exist in keys.conf. --
+    def _api_policy_get(self):
+        if not self.require_admin():
+            return self._send_json({"error": "admin required"}, 403)
+        return self._send_json({"policy": load_policy()})
+
+    def _api_policy(self, body):
+        if not self.require_admin():
+            return self._send_json({"ok": False, "error": "admin required"}, 403)
+        d = self._read_json(body)
+        if d is None:
+            return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
+        model = str(d.get("model", ""))
+        if not SAFE_NAME.match(model):
+            return self._send_json({"ok": False, "error": "invalid model"}, 400)
+        delete = bool(d.get("delete"))
+        aliases = []
+        if not delete:
+            aliases = d.get("aliases") or []
+            if not isinstance(aliases, list):
+                return self._send_json({"ok": False, "error": "aliases must be a list"}, 400)
+            keys = load_keys()
+            clean = []
+            for a in aliases:
+                a = str(a).strip()
+                if not SAFE_NAME.match(a):
+                    return self._send_json({"ok": False, "error": f"invalid alias '{a}'"}, 400)
+                if a not in keys:
+                    return self._send_json({"ok": False, "error": f"alias '{a}' not in keys.conf"}, 400)
+                clean.append(a)
+            aliases = clean
+        # rewrite key-policy.conf: replace/drop this model's line, preserve everything else.
+        try:
+            ts = int(time.time())
+            lines = []
+            if os.path.exists(POLICY):
+                shutil.copy2(POLICY, f"{POLICY}.bak.{ts}")
+                with open(POLICY) as f:
+                    lines = f.readlines()
+            out_lines = []
+            found = False
+            for ln in lines:
+                s = ln.strip()
+                if s and not s.startswith("#") and "=" in s and s.split("=", 1)[0].strip() == model:
+                    found = True
+                    if not delete:
+                        out_lines.append(f"{model} = {' '.join(aliases)}\n")
+                    # delete: skip the line
+                else:
+                    out_lines.append(ln)
+            if not found and not delete:
+                out_lines.append(f"{model} = {' '.join(aliases)}\n")
+            os.makedirs(os.path.dirname(POLICY), exist_ok=True)
+            tmp = POLICY + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(out_lines)
+            os.replace(tmp, POLICY)
+        except OSError as e:
+            return self._send_json({"ok": False, "error": f"key-policy.conf write failed: {e}"}, 500)
+        return self._send_json({"ok": True, "model": model, "aliases": aliases, "deleted": delete})
 
     # -- gateway login table: add/update/delete an entry in gateway-auth.json --
     #    {login, maps_to, allow_models[], erp}          -> upsert

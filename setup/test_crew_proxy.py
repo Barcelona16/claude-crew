@@ -363,6 +363,72 @@ check("add norm1", code == 200 and r.get("ok"))
 _auth = json.load(open(cp.GATEWAY_AUTH))
 check("norm1 has no admin key", "admin" not in _auth["norm1"])
 
+# ── key pool: /api/keys (admin) + /api/health (any login) + delete ────────────────
+print("Key pool + health:")
+def gkey(path, key):
+    headers = {"x-api-key": key} if key else {}
+    req = urllib.request.Request(PROXY + path, headers=headers)
+    try:
+        r = urllib.request.urlopen(req, timeout=10)
+        return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+# /api/keys is admin-only, returns masked keys
+code, r = gkey("/api/keys", "adminkey")
+check("/api/keys admin -> 200", code == 200)
+_pool = {p["alias"]: p for p in r.get("pool", [])}
+check("/api/keys lists k1", "k1" in _pool)
+check("/api/keys masks the key (no plaintext)", _pool["k1"]["key_masked"].startswith("sk-…")
+      and "KEY_ONE" not in json.dumps(r))
+check("/api/keys carries health state", _pool["k1"].get("state") in ("healthy", "tripped"))
+code, r = gkey("/api/keys", "plainkey")
+check("/api/keys non-admin -> 403", code == 403)
+code, r = gkey("/api/keys", None)
+check("/api/keys no key -> 403", code == 403)
+
+# /api/health: any valid login key, health only, NO alias names, NO key material
+code, r = gkey("/api/health", "plainkey")
+check("/api/health any login -> 200", code == 200)
+check("/api/health has pool health", isinstance(r.get("pool"), list) and len(r["pool"]) >= 1)
+_h = r["pool"][0]
+check("/api/health entry keyed by masked key", "key_masked" in _h and "state" in _h)
+check("/api/health leaks no alias/key names", "alias" not in _h and "KEY_ONE" not in json.dumps(r))
+code, r = gkey("/api/health", "nope")
+check("/api/health unknown key -> 401", code == 401)
+
+# delete a key: cleans keys.conf + CCR providers + policy; orphan guard
+code, r = jpost("/api/ccr/provider", {"alias": "delme", "key": "KEY_DEL", "model": "MODEL_Y",
+                                       "base_url": "https://api.example.com/v1/chat/completions"})
+check("seed delme key", code == 200 and r.get("ok"))
+code, r = jpost("/api/policy", {"model": "MODEL_Y", "aliases": ["delme"]})
+check("policy MODEL_Y=delme set", code == 200 and r.get("ok"))
+# now delme is the SOLE key for MODEL_Y -> delete without force refused
+code, r = jpost("/api/ccr/provider", {"alias": "delme", "delete": True})
+check("delete refuses to orphan MODEL_Y", code == 409 and not r.get("ok"))
+code, r = jpost("/api/ccr/provider", {"alias": "delme", "delete": True, "force": True})
+check("force delete ok", code == 200 and r.get("deleted") == "delme")
+check("delme gone from keys.conf", "delme=" not in open(cp.KEYS_FILE).read())
+_ccr = json.load(open(_ccr_cfg))
+check("delme CCR providers removed", not any(p.get("api_key") == "KEY_DEL" for p in _ccr["Providers"]))
+_pol = cp.load_policy()
+check("delme stripped from policy", "delme" not in _pol.get("MODEL_Y", []))
+
+# ── policy get/set/delete + validation ────────────────────────────────────────────
+print("Policy endpoint:")
+code, r = gkey("/api/policy", "adminkey")
+check("GET /api/policy admin -> 200", code == 200 and isinstance(r.get("policy"), dict))
+code, r = gkey("/api/policy", "plainkey")
+check("GET /api/policy non-admin -> 403", code == 403)
+code, r = jpost("/api/policy", {"model": "MODEL_Z", "aliases": ["k1", "k4"]})
+check("set MODEL_Z policy", code == 200 and r.get("aliases") == ["k1", "k4"])
+check("MODEL_Z policy persisted in order", cp.load_policy().get("MODEL_Z") == ["k1", "k4"])
+code, r = jpost("/api/policy", {"model": "MODEL_Z", "aliases": ["nosuchalias"]})
+check("unknown alias -> 400", code == 400 and not r.get("ok"))
+code, r = jpost("/api/policy", {"model": "MODEL_Z", "delete": True})
+check("delete MODEL_Z policy line", code == 200 and r.get("deleted"))
+check("MODEL_Z policy gone", "MODEL_Z" not in cp.load_policy())
+
 # ── usage parsing (unit) ──────────────────────────────────────────────────────────
 print("Usage parsing (unit):")
 check("anthropic non-stream", cp.parse_usage(
