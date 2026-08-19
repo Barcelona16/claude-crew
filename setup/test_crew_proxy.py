@@ -79,6 +79,7 @@ os.environ["CREW_CCR_CONFIG"] = _ccr_cfg
 os.environ["CREW_CCR_URL"] = f"http://127.0.0.1:{_mock_port}"
 os.environ["CREW_REGISTER_URL"] = f"http://127.0.0.1:{_mock_port}"
 os.environ["CREW_REGISTER_MODEL"] = "GLM-5.2"
+os.environ["CREW_REGISTER_RETRY_BASE"] = "0"  # no backoff sleep in tests
 os.environ["CREW_PROXY_STATE"] = _state
 os.environ["CREW_PROXY_FAILS"] = "3"
 os.environ["CREW_PROXY_COOLDOWN"] = "2"
@@ -447,6 +448,12 @@ _pol = cp.load_policy()
 check("registered alias in every served model's policy", all(_alias in _pol.get(m, []) for m in r["models"]))
 _ccr = json.load(open(_ccr_cfg))
 check("registered CCR provider(s) present", sum(1 for p in _ccr["Providers"] if p.get("api_key") == "SELF_KEY_123") >= 1)
+check("register returns allow_models", isinstance(r.get("allow_models"), list) and len(r["allow_models"]) >= 1)
+_auth = json.load(open(cp.GATEWAY_AUTH))
+check("register created a login entry keyed by the key", "SELF_KEY_123" in _auth)
+check("login entry allow_models = defaults", _auth["SELF_KEY_123"]["allow_models"] == r["allow_models"])
+check("login entry maps_to the minted alias", _auth["SELF_KEY_123"]["maps_to"] == _alias)
+check("register login is NOT admin", not _auth["SELF_KEY_123"].get("admin"))
 # idempotent re-register: same key -> same alias, no dupe providers/policy
 _before = sum(1 for p in _ccr["Providers"] if p.get("api_key") == "SELF_KEY_123")
 code, r2 = jpost("/api/register", {"key": "SELF_KEY_123"}, key=None)
@@ -455,12 +462,17 @@ _ccr2 = json.load(open(_ccr_cfg))
 check("re-register adds no dup providers", sum(1 for p in _ccr2["Providers"] if p.get("api_key") == "SELF_KEY_123") == _before)
 _pol2 = cp.load_policy()
 check("re-register no dup alias in policy", all(_pol2.get(m, []).count(_alias) == 1 for m in r2.get("models", [])))
-# failure path: mock rejects -> error returned verbatim, key NOT pooled
+# failure path: AUTH error (401/403) -> key is bad, 400, verbatim error, NOT pooled
 MOCK["fail_providers"] = {"GLM-5.2"}; MOCK["fail_code"] = 401
 code, r = jpost("/api/register", {"key": "BAD_SELF_KEY"}, key=None)
-check("bad key -> 400 not ok", code == 400 and not r.get("ok"))
-check("bad key error mentions test", "test" in (r.get("stage") or "") or "HTTP" in (r.get("error") or ""))
-check("bad key NOT added to keys.conf", "BAD_SELF_KEY" not in open(cp.KEYS_FILE).read())
+check("auth-fail key -> 400 not ok", code == 400 and not r.get("ok"))
+check("auth-fail not marked transient", not r.get("transient"))
+check("auth-fail key NOT added to keys.conf", "BAD_SELF_KEY" not in open(cp.KEYS_FILE).read())
+# transient path: 503/busy -> retried, then 503 transient=True, NOT pooled (not the key's fault)
+MOCK["fail_providers"] = {"GLM-5.2"}; MOCK["fail_code"] = 503
+code, r = jpost("/api/register", {"key": "BUSY_SELF_KEY"}, key=None)
+check("busy upstream -> 503 transient", code == 503 and r.get("transient") is True)
+check("busy upstream key NOT pooled", "BUSY_SELF_KEY" not in open(cp.KEYS_FILE).read())
 MOCK["fail_providers"] = set()
 # empty key rejected
 code, r = jpost("/api/register", {"key": ""}, key=None)

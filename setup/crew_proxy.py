@@ -69,6 +69,11 @@ GATEWAY_AUTH = os.environ.get("GATEWAY_AUTH") or os.path.join(CFG_DIR, "gateway-
 # user-supplied — no SSRF). A key that passes is added to the pool for this model.
 REGISTER_TEST_URL = os.environ.get("CREW_REGISTER_URL") or "http://llm-gw.jd.local/v1/chat/completions"
 REGISTER_MODEL = os.environ.get("CREW_REGISTER_MODEL") or "GLM-5.2"
+REGISTER_RETRY_BASE = float(os.environ.get("CREW_REGISTER_RETRY_BASE", "1.5"))  # backoff step (s)
+# Models a self-registrant is allowed to CALL by default (their login's allow_models).
+# Anything else is admin-granted later. Comma-separated env override.
+REGISTER_ALLOW = [m.strip() for m in (os.environ.get("CREW_REGISTER_ALLOW")
+    or "Claude-Opus-4.6-joybuilder,GLM-5.2,GLM-5.2-joybuilder").split(",") if m.strip()]
 CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.expanduser("~/.claude-code-router/config.json")
 CCR_URL   = (os.environ.get("CREW_CCR_URL") or "http://127.0.0.1:3456").rstrip("/")
 PORT      = int(os.environ.get("CREW_PROXY_PORT", "8788"))
@@ -1077,15 +1082,19 @@ $('#login').onclick=()=>{KEY=$('#key').value.trim();VIEW='';if(!KEY)return;sessi
 $('#logout').onclick=()=>logout(true);
 $('#viewsel').onchange=()=>{VIEW=$('#viewsel').value;load();};
 $('#reg').onclick=async()=>{
-  const k=$('#regkey').value.trim();const m=$('#regmsg');
+  const k=$('#regkey').value.trim();const m=$('#regmsg');const btn=$('#reg');
   if(!k){m.textContent='请先粘贴你的 key';return;}
-  m.textContent='正在用 GLM 实测你的 key…';
-  let r,body;try{r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})});body=await r.json();}catch(e){m.textContent='网络错误: '+e;return;}
+  btn.disabled=true;m.textContent='正在用 GLM 实测你的 key…（上游繁忙时会自动重试几次）';
+  let r,body;try{r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})});body=await r.json();}catch(e){m.textContent='网络错误: '+e;btn.disabled=false;return;}
+  btn.disabled=false;
   if(r.ok&&body.ok){
-    m.innerHTML='<span style=color:#4ec98a>✅ 注册成功!</span> 你的 key ('+esc(body.key_masked)+') 已加入 '+((body.models||[]).length)+' 个模型的共享池。'+
-      '<br>现在就能用它登录看用量,或直接把它作为 x-api-key 发请求到本网关。'+
-      '<br>接入方式见上方「快速接入」与下方 crew 介绍。';
+    m.innerHTML='<span style=color:#4ec98a>✅ 注册成功!</span> 你的 key ('+esc(body.key_masked)+') 已登记。'+
+      '<br>你当前可调用的模型: <b>'+esc((body.allow_models||[]).join(', '))+'</b>(需要更多模型找管理员开通)。'+
+      '<br>现在就能用它登录看用量,或作为 x-api-key 发请求到本网关。接入方式见上方「快速接入」与下方 crew 介绍。';
     $('#key').value=k;KEY=k;sessionStorage.setItem('crewKey',KEY);load();
+  }else if(body.transient){
+    m.innerHTML='<span style=color:#e0a94f>⏳ '+esc(body.error||'上游繁忙,请稍后重试')+'</span>'+
+      '<br><span class=dim>这不是你的 key 的问题,是上游服务器当前并发已满。点「注册我的 key」再试一次即可。</span>';
   }else{
     m.innerHTML='<span style=color:#e5534b>❌ '+esc(body.error||'注册失败')+'</span>'+
       (body.detail?'<pre>'+esc(body.detail)+'</pre>':'');
@@ -1633,27 +1642,44 @@ class Handler(BaseHTTPRequestHandler):
         key = str(d.get("key", "")).strip()
         if not key or len(key) > 512:
             return self._send_json({"ok": False, "error": "key required (<=512 chars)"}, 400)
-        # 1) test-call the fixed internal upstream with a minimal request.
+        # 1) test-call the fixed internal upstream with a minimal request. Retry a few times
+        #    on TRANSIENT upstream errors (429/503/5xx/conn) — a busy-server "max_concurrency"
+        #    spike is not a bad key. Only auth errors (401/403) mean the key is actually bad.
         payload = json.dumps({"model": REGISTER_MODEL, "max_tokens": 8,
                               "messages": [{"role": "user", "content": "ping"}]}).encode()
-        req = urllib.request.Request(REGISTER_TEST_URL, data=payload, method="POST",
-                                     headers={"Content-Type": "application/json",
-                                              "Authorization": "Bearer " + key,
-                                              "x-api-key": key})
-        try:
-            resp = urllib.request.urlopen(req, timeout=30)
-            resp.read(4096)
-        except urllib.error.HTTPError as e:
-            detail = ""
+        last_detail, last_code = "", None
+        ok_tested = False
+        for attempt in range(4):
+            req = urllib.request.Request(REGISTER_TEST_URL, data=payload, method="POST",
+                                         headers={"Content-Type": "application/json",
+                                                  "Authorization": "Bearer " + key,
+                                                  "x-api-key": key})
             try:
-                detail = e.read(2048).decode("utf-8", "replace")
-            except Exception:
-                pass
-            return self._send_json({"ok": False, "stage": "test",
-                                    "error": f"key test failed (HTTP {e.code})", "detail": detail}, 400)
-        except Exception as e:
-            return self._send_json({"ok": False, "stage": "test",
-                                    "error": f"cannot reach upstream: {e}"}, 502)
+                resp = urllib.request.urlopen(req, timeout=30)
+                resp.read(4096)
+                ok_tested = True
+                break
+            except urllib.error.HTTPError as e:
+                last_code = e.code
+                try:
+                    last_detail = e.read(2048).decode("utf-8", "replace")
+                except Exception:
+                    last_detail = ""
+                if e.code in (401, 403):
+                    # genuine auth failure -> the key is bad, no point retrying.
+                    return self._send_json({"ok": False, "stage": "test",
+                                            "error": f"key 无效或无权限 (HTTP {e.code})",
+                                            "detail": last_detail}, 400)
+                # 429/5xx/other -> transient, retry after a short backoff
+            except Exception as e:
+                last_code, last_detail = None, str(e)
+            time.sleep(REGISTER_RETRY_BASE * (attempt + 1))
+        if not ok_tested:
+            # exhausted retries on a transient condition -> tell the user to retry, do NOT
+            # reject the key. 503 so the UI can distinguish "server busy" from "bad key".
+            return self._send_json({"ok": False, "stage": "test", "transient": True,
+                                    "error": "上游繁忙,暂时无法验证你的 key(并发已满/限流),请稍后重试",
+                                    "detail": last_detail}, 503)
         # 2) key passed -> add to the pool. Dedupe by key: if an existing alias already holds
         #    this exact key, reuse it (idempotent re-register); else mint self-<8hex of key>.
         keys = load_keys()
@@ -1743,9 +1769,40 @@ class Handler(BaseHTTPRequestHandler):
             os.replace(tmp, POLICY)
         except OSError as e:
             return self._send_json({"ok": False, "error": f"policy write failed: {e}"}, 500)
-        log.info("self-registered key alias '%s' into %d models", alias, len(tmpl))
+        # 5) create/refresh a gateway-auth login entry for this key so the registrant can only
+        #    CALL the default-authorized models (allow_models). login == the key itself.
+        #    Never grants admin; if the login already exists, keep its admin/erp but do NOT
+        #    widen allow_models automatically (admin manages that afterwards).
+        try:
+            auth = load_gateway_auth()
+            prev = auth.get(key, {})
+            entry = {"maps_to": alias,
+                     "allow_models": prev.get("allow_models") or list(REGISTER_ALLOW),
+                     "erp": prev.get("erp", "")}
+            if prev.get("admin"):
+                entry["admin"] = True
+            # write raw (load_gateway_auth normalizes on read); preserve other logins + __doc__
+            raw = {}
+            try:
+                with open(GATEWAY_AUTH) as f:
+                    raw = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+            raw[key] = entry
+            os.makedirs(os.path.dirname(GATEWAY_AUTH), exist_ok=True)
+            if os.path.exists(GATEWAY_AUTH):
+                shutil.copy2(GATEWAY_AUTH, f"{GATEWAY_AUTH}.bak.{int(time.time())}")
+            tmp = GATEWAY_AUTH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(raw, f, indent=2)
+            os.chmod(tmp, 0o600); os.replace(tmp, GATEWAY_AUTH)
+        except OSError as e:
+            return self._send_json({"ok": False, "error": f"gateway-auth write failed: {e}"}, 500)
+        log.info("self-registered key alias '%s' into %d models; allow=%s", alias, len(tmpl), REGISTER_ALLOW)
         return self._send_json({"ok": True, "alias": alias, "models": sorted(set(tmpl)),
-                                "key_masked": mask_key(key)})
+                                "allow_models": entry["allow_models"], "key_masked": mask_key(key)})
 
     # -- gateway login table: add/update/delete an entry in gateway-auth.json --
     #    {login, maps_to, allow_models[], erp}          -> upsert
