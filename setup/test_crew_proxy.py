@@ -437,7 +437,7 @@ check("MODEL_Z policy gone", "MODEL_Z" not in cp.load_policy())
 # ── self-registration: public, GLM test-call, key joins pool ──────────────────────
 print("Self-registration:")
 # success path: mock returns 200 for GLM-5.2 -> key pooled across ALL models
-code, r = jpost("/api/register", {"key": "SELF_KEY_123"}, key=None)
+code, r = jpost("/api/register", {"key": "SELF_KEY_123", "erp": "alice01"}, key=None)
 check("register no admin needed -> 200", code == 200 and r.get("ok"))
 check("register returns masked key", r.get("key_masked", "").startswith("sk-…"))
 _alias = r.get("alias")
@@ -454,9 +454,14 @@ check("register created a login entry keyed by the key", "SELF_KEY_123" in _auth
 check("login entry allow_models = defaults", _auth["SELF_KEY_123"]["allow_models"] == r["allow_models"])
 check("login entry maps_to the minted alias", _auth["SELF_KEY_123"]["maps_to"] == _alias)
 check("register login is NOT admin", not _auth["SELF_KEY_123"].get("admin"))
+check("register login carries submitted erp", _auth["SELF_KEY_123"].get("erp") == "alice01")
+# erp is required
+code, r = jpost("/api/register", {"key": "NOERP_KEY"}, key=None)
+check("register without erp -> 400", code == 400 and "erp" in (r.get("error") or ""))
+check("no-erp key NOT pooled", "NOERP_KEY" not in open(cp.KEYS_FILE).read())
 # idempotent re-register: same key -> same alias, no dupe providers/policy
 _before = sum(1 for p in _ccr["Providers"] if p.get("api_key") == "SELF_KEY_123")
-code, r2 = jpost("/api/register", {"key": "SELF_KEY_123"}, key=None)
+code, r2 = jpost("/api/register", {"key": "SELF_KEY_123", "erp": "alice01"}, key=None)
 check("re-register same key reuses alias", r2.get("alias") == _alias)
 _ccr2 = json.load(open(_ccr_cfg))
 check("re-register adds no dup providers", sum(1 for p in _ccr2["Providers"] if p.get("api_key") == "SELF_KEY_123") == _before)
@@ -464,13 +469,13 @@ _pol2 = cp.load_policy()
 check("re-register no dup alias in policy", all(_pol2.get(m, []).count(_alias) == 1 for m in r2.get("models", [])))
 # failure path: AUTH error (401/403) -> key is bad, 400, verbatim error, NOT pooled
 MOCK["fail_providers"] = {"GLM-5.2"}; MOCK["fail_code"] = 401
-code, r = jpost("/api/register", {"key": "BAD_SELF_KEY"}, key=None)
+code, r = jpost("/api/register", {"key": "BAD_SELF_KEY", "erp": "bob02"}, key=None)
 check("auth-fail key -> 400 not ok", code == 400 and not r.get("ok"))
 check("auth-fail not marked transient", not r.get("transient"))
 check("auth-fail key NOT added to keys.conf", "BAD_SELF_KEY" not in open(cp.KEYS_FILE).read())
 # transient path: 503/busy -> retried, then 503 transient=True, NOT pooled (not the key's fault)
 MOCK["fail_providers"] = {"GLM-5.2"}; MOCK["fail_code"] = 503
-code, r = jpost("/api/register", {"key": "BUSY_SELF_KEY"}, key=None)
+code, r = jpost("/api/register", {"key": "BUSY_SELF_KEY", "erp": "cara03"}, key=None)
 check("busy upstream -> 503 transient", code == 503 and r.get("transient") is True)
 check("busy upstream key NOT pooled", "BUSY_SELF_KEY" not in open(cp.KEYS_FILE).read())
 MOCK["fail_providers"] = set()

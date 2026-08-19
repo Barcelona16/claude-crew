@@ -918,6 +918,7 @@ curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
   </div>
   <div class=line>
    <input id=regkey type=password placeholder="注册：粘贴你的真实 key（会用 GLM 实测）" size=42>
+   <input id=regerp placeholder="你的 erp 工号（必填）" size=16>
    <button id=reg>注册我的 key</button>
   </div>
   <div id=regmsg></div>
@@ -1023,9 +1024,16 @@ async function loadAdmin(){
     loadAdmin();loadHealth();});
   const mba=kd.masked_by_alias||{};
   const lbl=a=>(mba[a]||'sk-…')+'('+a+')';
-  $('#policy').innerHTML='<table><tr><th>模型</th><th>key 优先级顺序</th><th></th></tr>'+
-    Object.entries(kd.policy||{}).map(([m,al])=>'<tr><td>'+esc(m)+'</td><td><input data-pm="'+esc(m)+'" value="'+esc(al.map(lbl).join(' '))+'" size=40></td><td><button data-ps="'+esc(m)+'">存</button></td></tr>').join('')+'</table>'+
-    '<div class=dim style="font-size:11px;margin-top:4px">格式 sk-…xxxx(alias)，空格分隔按优先级排序；保存时按括号里的 alias 生效</div>';
+  // The viewed user prefers their own maps_to key at call time (affinity). Show that as a
+  // per-row hint, but keep the EDITABLE input at the true STORED order so saving never
+  // accidentally persists the per-user reordering.
+  const curLogin=(_d&&_d.login)||'';
+  const curEntry=(kd.logins||[]).find(x=>x.login===curLogin);
+  const prefer=curEntry?curEntry.maps_to:'';
+  const hint=al=>prefer&&al.includes(prefer)?' <span class=dim style="font-size:11px">· 实际优先 '+esc(mba[prefer]||prefer)+'</span>':'';
+  $('#policy').innerHTML='<table><tr><th>模型</th><th>key 优先级顺序（存储/共享兜底）</th><th></th></tr>'+
+    Object.entries(kd.policy||{}).map(([m,al])=>'<tr><td>'+esc(m)+'</td><td><input data-pm="'+esc(m)+'" value="'+esc(al.map(lbl).join(' '))+'" size=40>'+hint(al)+'</td><td><button data-ps="'+esc(m)+'">存</button></td></tr>').join('')+'</table>'+
+    '<div class=dim style="font-size:11px;margin-top:4px">输入框是存储的共享兜底顺序；调用时该用户自己的 key 会被自动提到最前（affinity，见「实际优先」）。保存按括号里的 alias 生效。</div>';
   document.querySelectorAll('#policy [data-ps]').forEach(b=>b.onclick=async()=>{
     const inp=document.querySelector('#policy [data-pm="'+CSS.escape(b.dataset.ps)+'"]');
     // extract the alias from each "masked(alias)" token; fall back to the raw token
@@ -1034,7 +1042,13 @@ async function loadAdmin(){
     if(!r.ok)alert(r.body.error||'保存失败');
     loadAdmin();});
   $('#logins').innerHTML='<table><tr><th>login</th><th>maps_to</th><th>allow_models</th><th>erp</th><th>admin</th><th></th></tr>'+
-    (kd.logins||[]).map(a=>'<tr><td>'+esc(a.login)+'</td><td>'+esc(a.maps_to)+'</td><td>'+esc((a.allow_models||[]).join(' '))+'</td><td>'+esc(a.erp||'')+'</td><td>'+(a.admin?'✓':'')+'</td><td><button class=danger data-dl="'+esc(a.login)+'">删</button></td></tr>').join('')+'</table>';
+    (kd.logins||[]).map((a,i)=>'<tr><td title="'+esc(a.login)+'">'+esc(a.login.length>16?a.login.slice(0,6)+'…'+a.login.slice(-4):a.login)+'</td><td>'+esc(a.maps_to)+'</td><td>'+esc((a.allow_models||[]).join(' '))+'</td><td>'+esc(a.erp||'')+'</td><td>'+(a.admin?'✓':'')+'</td><td><button data-le="'+i+'">改</button> <button class=danger data-dl="'+esc(a.login)+'">删</button></td></tr>').join('')+'</table>';
+  window._logins=kd.logins||[];
+  document.querySelectorAll('#logins [data-le]').forEach(b=>b.onclick=()=>{
+    const a=window._logins[+b.dataset.le];if(!a)return;
+    $('#lg-login').value=a.login;$('#lg-maps').value=a.maps_to;$('#lg-models').value=(a.allow_models||[]).join(' ');
+    $('#lg-erp').value=a.erp||'';$('#lg-admin').checked=!!a.admin;
+    $('#lg-login').scrollIntoView({block:'center'});$('#lg-login').focus();});
   document.querySelectorAll('#logins [data-dl]').forEach(b=>b.onclick=async()=>{
     if(!confirm('删除登录 '+b.dataset.dl+'?'))return;
     await apost('/api/gateway/auth',{login:b.dataset.dl,delete:true});loadAdmin();});
@@ -1082,10 +1096,11 @@ $('#login').onclick=()=>{KEY=$('#key').value.trim();VIEW='';if(!KEY)return;sessi
 $('#logout').onclick=()=>logout(true);
 $('#viewsel').onchange=()=>{VIEW=$('#viewsel').value;load();};
 $('#reg').onclick=async()=>{
-  const k=$('#regkey').value.trim();const m=$('#regmsg');const btn=$('#reg');
+  const k=$('#regkey').value.trim();const erp=$('#regerp').value.trim();const m=$('#regmsg');const btn=$('#reg');
   if(!k){m.textContent='请先粘贴你的 key';return;}
+  if(!erp){m.innerHTML='<span style=color:#e5534b>请填写你的 erp 工号</span>';return;}
   btn.disabled=true;m.textContent='正在用 GLM 实测你的 key…（上游繁忙时会自动重试几次）';
-  let r,body;try{r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k})});body=await r.json();}catch(e){m.textContent='网络错误: '+e;btn.disabled=false;return;}
+  let r,body;try{r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k,erp:erp})});body=await r.json();}catch(e){m.textContent='网络错误: '+e;btn.disabled=false;return;}
   btn.disabled=false;
   if(r.ok&&body.ok){
     m.innerHTML='<span style=color:#4ec98a>✅ 注册成功!</span> 你的 key ('+esc(body.key_masked)+') 已登记。'+
@@ -1642,6 +1657,11 @@ class Handler(BaseHTTPRequestHandler):
         key = str(d.get("key", "")).strip()
         if not key or len(key) > 512:
             return self._send_json({"ok": False, "error": "key required (<=512 chars)"}, 400)
+        erp = str(d.get("erp", "")).strip()
+        if not erp:
+            return self._send_json({"ok": False, "error": "erp（工号）必填"}, 400)
+        if not SAFE_NAME.match(erp) or len(erp) > 64:
+            return self._send_json({"ok": False, "error": "erp 含非法字符或过长"}, 400)
         # 1) test-call the fixed internal upstream with a minimal request. Retry a few times
         #    on TRANSIENT upstream errors (429/503/5xx/conn) — a busy-server "max_concurrency"
         #    spike is not a bad key. Only auth errors (401/403) mean the key is actually bad.
@@ -1778,7 +1798,7 @@ class Handler(BaseHTTPRequestHandler):
             prev = auth.get(key, {})
             entry = {"maps_to": alias,
                      "allow_models": prev.get("allow_models") or list(REGISTER_ALLOW),
-                     "erp": prev.get("erp", "")}
+                     "erp": erp or prev.get("erp", "")}
             if prev.get("admin"):
                 entry["admin"] = True
             # write raw (load_gateway_auth normalizes on read); preserve other logins + __doc__
