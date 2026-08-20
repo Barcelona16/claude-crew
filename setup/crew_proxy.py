@@ -73,7 +73,7 @@ REGISTER_RETRY_BASE = float(os.environ.get("CREW_REGISTER_RETRY_BASE", "1.5"))  
 # Models a self-registrant is allowed to CALL by default (their login's allow_models).
 # Anything else is admin-granted later. Comma-separated env override.
 REGISTER_ALLOW = [m.strip() for m in (os.environ.get("CREW_REGISTER_ALLOW")
-    or "Claude-Opus-4.6-joybuilder,Claude-Opus-4.8-joybuilder,GLM-5.2,GLM-5.2-joybuilder").split(",") if m.strip()]
+    or "Claude-Opus-4.6-joybuilder,Claude-Opus-4.7-joybuilder,Claude-Opus-4.8-joybuilder,GLM-5.2,GLM-5.2-joybuilder").split(",") if m.strip()]
 CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.expanduser("~/.claude-code-router/config.json")
 CCR_URL   = (os.environ.get("CREW_CCR_URL") or "http://127.0.0.1:3456").rstrip("/")
 # Command run to make CCR pick up newly-written providers (self-registration appends to
