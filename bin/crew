@@ -475,7 +475,10 @@ interactive_pick(){  # interactive_pick <session-name>
   fi
   # tmux — skip if --tmux/--no-tmux was given
   if [ "${NO_TMUX_EXPLICIT:-0}" != 1 ]; then
-    local def_tm; def_tm=$([ "$NO_TMUX" = 1 ] && printf 'no-tmux (foreground)' || printf 'tmux (background, default)')
+    # Seed the default from the session's REMEMBERED mode if it has one, else ambient NO_TMUX.
+    local _rm="$NO_TMUX"; local _mf="$CREW_STATE/${1:-}.notmux"
+    [ -n "${1:-}" ] && [ -f "$_mf" ] && _rm=$(cat "$_mf" 2>/dev/null)
+    local def_tm; def_tm=$([ "$_rm" = 1 ] && printf 'no-tmux (foreground)' || printf 'tmux (background, default)')
     local chosen; chosen=$(printf 'tmux (background, default)\nno-tmux (foreground)\n' | _pick_one "tmux mode" "$def_tm")
     case "$chosen" in no-tmux*) NO_TMUX=1;; *) NO_TMUX=0;; esac
   fi
@@ -483,6 +486,18 @@ interactive_pick(){  # interactive_pick <session-name>
 }
 
 # --- session lifecycle ------------------------------------------------------
+# fg_live NAME: true iff NAME is a live no-tmux (foreground) session — its mode is
+# foreground AND its recorded pid is still alive. A stale pid (process gone) => not live,
+# and we clean it up. Lets tmux-centric checks reason about foreground sessions too.
+fg_live(){
+  local nm="$1"
+  local modef="$CREW_STATE/$nm.notmux" fgpidf="$CREW_STATE/$nm.fgpid" pid
+  [ -f "$modef" ] && [ "$(cat "$modef" 2>/dev/null)" = 1 ] || return 1
+  [ -f "$fgpidf" ] || return 1
+  pid=$(cat "$fgpidf" 2>/dev/null)
+  case "$pid" in ''|*[!0-9]*) return 1;; esac
+  if kill -0 "$pid" 2>/dev/null; then return 0; else rm -f "$fgpidf" 2>/dev/null; return 1; fi
+}
 ensure_session(){
   local name="$1" backend="$2" fresh="$3" yolo="$4" no_tmux="${5:-0}" tmux_s="$TMUX_PREFIX$1"
   crew_autoprune   # opportunistic, throttled, backgrounded — never blocks this spawn
@@ -495,13 +510,33 @@ ensure_session(){
   fi
   local bkf="$CREW_STATE/$name.backend"
   local keyf="$CREW_STATE/$name.key"
+  local modef="$CREW_STATE/$name.notmux"
+  local fgpidf="$CREW_STATE/$name.fgpid"
+  # Mode (tmux/no-tmux) is part of session identity: unless the caller EXPLICITLY passed
+  # --tmux/--no-tmux, honor the mode this session last launched with. Prevents the same
+  # name resolving to two different live sessions (one tmux, one foreground).
+  if [ "${NO_TMUX_EXPLICIT:-0}" != 1 ] && [ -f "$modef" ]; then
+    no_tmux=$(cat "$modef" 2>/dev/null); [ "$no_tmux" = 1 ] || no_tmux=0
+  fi
+  # Is this session live right now, and in which mode? Look at BOTH tmux and a tracked
+  # foreground pid (fg_live), so switching/re-attaching reasons about either mode.
+  local live_mode=""   # "" none, "tmux", or "fg"
+  if tmux has-session -t "$tmux_s" 2>/dev/null; then live_mode=tmux
+  elif fg_live "$name"; then live_mode=fg; fi
+  # Cross-mode double-launch guard: if it's live in one mode and the caller EXPLICITLY
+  # forces the other, refuse rather than spin up a second claude on the same .sid.
+  if [ -n "$live_mode" ] && [ "${NO_TMUX_EXPLICIT:-0}" = 1 ]; then
+    local want_mode; want_mode=$([ "$no_tmux" = 1 ] && echo fg || echo tmux)
+    if [ "$want_mode" != "$live_mode" ]; then
+      die "'$name' is live in $([ "$live_mode" = fg ] && echo 'no-tmux (foreground)' || echo tmux) mode — stop it first: crew stop $name"
+    fi
+  fi
   # If the session is already live, just re-attach — UNLESS the caller explicitly
-  # asked for a DIFFERENT backend, in which case stop it and relaunch on the new one
-  # (history preserved below via --resume). This makes `crew --backend X <name>` a
-  # one-command model switch instead of "crew stop, then re-run with --backend".
-  # In --no-tmux mode there's no tmux session to inspect or re-attach to, so skip
-  # this block entirely and always (re)launch in the foreground below.
-  if [ "$no_tmux" != 1 ] && tmux has-session -t "$tmux_s" 2>/dev/null; then
+  # asked for a DIFFERENT backend/key, in which case stop it and relaunch on the new one
+  # (history preserved below via --resume). Works for BOTH tmux and foreground sessions;
+  # the relaunch below uses the session's remembered mode, so a no-tmux GLM session
+  # switched to kimi comes back as a no-tmux kimi session (not a stray tmux one).
+  if [ -n "$live_mode" ]; then
     local running=""; [ -f "$bkf" ] && running=$(cat "$bkf")
     local running_key=""; [ -f "$keyf" ] && running_key=$(cat "$keyf")
     local want_restart=0
@@ -511,7 +546,12 @@ ensure_session(){
     if [ "${KEY_EXPLICIT:-0}" = 1 ] && [ "${KEY:-}" != "$running_key" ]; then
       log "switching '$name' key: ${running_key:-<backend default>} -> ${KEY:-<backend default>} (restart; history kept via --resume)"; want_restart=1
     fi
-    if [ "$want_restart" = 1 ]; then tmux kill-session -t "$tmux_s" 2>/dev/null || true; else return; fi
+    if [ "$want_restart" = 1 ]; then
+      if [ "$live_mode" = tmux ]; then tmux kill-session -t "$tmux_s" 2>/dev/null || true
+      else kill "$(cat "$fgpidf" 2>/dev/null)" 2>/dev/null || true; rm -f "$fgpidf"; fi
+    else
+      return
+    fi
   fi
   # Per-session backend memory: an explicit --backend wins and is remembered for
   # next time; otherwise reuse whatever backend this session last started with.
@@ -580,9 +620,13 @@ ensure_session(){
   if [ "$no_tmux" = 1 ]; then
     log "session '$name' starting in foreground (no tmux; backend: $backend, model: ${BK_MODEL:-<default>}, key: $keydisp)"
     cd "$cwd" || die "cannot cd to $cwd"
+    printf '1\n' > "$modef"           # remember mode = foreground
+    printf '%s\n' "$$" > "$fgpidf"    # this shell becomes claude via exec -> $$ is claude's pid
     eval "export $envp"   # envp is space-separated, printf %q-quoted KEY=value pairs
     exec $CLAUDE_BIN $modelarg $flags $resume
   fi
+  printf '0\n' > "$modef"             # remember mode = tmux
+  rm -f "$fgpidf" 2>/dev/null || true # no longer a foreground session
 
   local cmd="cd $(printf %q "$cwd") &&$envp exec $CLAUDE_BIN $modelarg $flags $resume; echo CREW_SESSION_EXITED; exec bash -i"
   tmux set-option -g history-limit "${CREW_HISTORY_LIMIT:-200000}" 2>/dev/null || true  # keep long scrollback on attach
@@ -782,7 +826,7 @@ case "${1:-}" in
     _ls_row(){
       cwd=$(path_for_name "$nm"); [ -n "$cwd" ] || cwd="?"
       local sidf="$CREW_STATE/$nm.sid"
-      if tmux has-session -t "$(tmux_name_for "$nm")" 2>/dev/null; then st="live"
+      if tmux has-session -t "$(tmux_name_for "$nm")" 2>/dev/null || fg_live "$nm"; then st="live"
       elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$(cat "$sidf")".jsonl >/dev/null 2>&1; then st="resumable"
       else st="new"; fi
       bk=$(cat "$CREW_STATE/$nm.backend" 2>/dev/null || echo "?")
@@ -852,7 +896,14 @@ EOF
     # so `crew [--backend X] <name>` resumes it later with full history. This is how
     # you switch a session's model: `crew stop <name>` then `crew --backend Y <name>`.
     if is_adopted "$2"; then die "'$2' is adopted/external (tmux '$(tmux_name_for "$2")') — crew won't stop it; manage it where it was started"; fi
-    if tmux kill-session -t "$(tmux_name_for "$2")" 2>/dev/null; then log "stopped $2 (state kept; resume with: crew $2)"; else log "no live tmux session '$2' (nothing to stop)"; fi
+    if tmux kill-session -t "$(tmux_name_for "$2")" 2>/dev/null; then
+      log "stopped $2 (state kept; resume with: crew $2)"
+    elif fg_live "$2"; then
+      kill "$(cat "$CREW_STATE/$2.fgpid" 2>/dev/null)" 2>/dev/null && log "stopped $2 (foreground; state kept; resume with: crew $2)" || log "could not stop foreground '$2'"
+      rm -f "$CREW_STATE/$2.fgpid" 2>/dev/null || true
+    else
+      log "no live session '$2' (nothing to stop)"
+    fi
     ;;
   models|backends) echo "== models =="; for b in $(list_backends_inline); do echo "  $b"; done;;
   adopt) [ -n "${2:-}" ] && [ -n "${3:-}" ] || die "usage: crew adopt <name> <tmux-session> [--sid <uuid>] [--dir <path>] [--model <label>]"
@@ -898,7 +949,7 @@ EOF
     reaped=0; kept=0
     while IFS= read -r nm; do
       [ -n "$nm" ] || continue
-      if tmux has-session -t "$(tmux_name_for "$nm")" 2>/dev/null; then kept=$((kept+1)); continue; fi   # live -> keep
+      if tmux has-session -t "$(tmux_name_for "$nm")" 2>/dev/null || fg_live "$nm"; then kept=$((kept+1)); continue; fi   # live (tmux or foreground) -> keep
       if is_adopted "$nm"; then kept=$((kept+1)); continue; fi                                            # external -> keep
       sidf="$CREW_STATE/$nm.sid"; last=0
       if [ -f "$sidf" ]; then s=$(cat "$sidf" 2>/dev/null)
@@ -910,7 +961,7 @@ EOF
       if [ "$p_dry" = 1 ]; then echo "  would release '$nm' (idle ${age_d}d)"; reaped=$((reaped+1)); continue; fi
       tmux kill-session -t "$(tmux_name_for "$nm")" 2>/dev/null || true
       if [ "$p_purge" = 1 ] && [ -f "$sidf" ]; then s=$(cat "$sidf" 2>/dev/null); rm -f "$HOME"/.claude/projects/*/"$s".jsonl 2>/dev/null || true; fi
-      rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key"
+      rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid"
       if [ -f "$REG" ]; then t=$(mktemp) && awk -F'\t' -v m="$nm" '$2!=m' "$REG" > "$t" && mv "$t" "$REG"; fi
       echo "  released '$nm' (idle ${age_d}d$( [ "$p_purge" = 1 ] && printf ', transcript purged'))"
       reaped=$((reaped+1))
@@ -1086,7 +1137,7 @@ EOF
       elif command -v systemctl >/dev/null 2>&1; then systemctl --user restart "${CREW_CCR_UNIT:-claudecrew-ccr}" >/dev/null 2>&1 || true; fi
       echo "  restarted CCR — new models are live (crew, pick '$sm_key')"
     fi;;
-  attach) [ -n "${2:-}" ] || die "usage: crew attach <name>"; exec tmux -u attach -t "$(tmux_name_for "$2")";;
+  attach) [ -n "${2:-}" ] || die "usage: crew attach <name>"; fg_live "$2" && die "'$2' runs in the foreground of another terminal — not attachable; switch to it there or 'crew stop $2'"; exec tmux -u attach -t "$(tmux_name_for "$2")";;
   kill) [ -n "${2:-}" ] || die "usage: crew kill <name> [--purge]"
     nm="$2"; purge=0; [ "${3:-}" = "--purge" ] && purge=1
     # Fully delete the session so it stops showing in `crew ls`: kill the tmux
@@ -1094,11 +1145,12 @@ EOF
     # --purge additionally deletes the saved Claude transcript (irreversible).
     if is_adopted "$nm"; then die "'$nm' is adopted/external (tmux '$(tmux_name_for "$nm")') — crew won't kill it. Un-adopt: rm $CREW_STATE/$nm.tmux"; fi
     tmux kill-session -t "$(tmux_name_for "$nm")" 2>/dev/null && log "killed tmux session $nm" || true
+    if fg_live "$nm"; then kill "$(cat "$CREW_STATE/$nm.fgpid" 2>/dev/null)" 2>/dev/null && log "killed foreground session $nm" || true; fi
     sidf="$CREW_STATE/$nm.sid"
     if [ "$purge" = 1 ] && [ -f "$sidf" ]; then
       psid=$(cat "$sidf"); rm -f "$HOME"/.claude/projects/*/"$psid".jsonl 2>/dev/null && log "purged transcript $psid" || true
     fi
-    rm -f "$sidf" "$CREW_STATE/$nm.backend"
+    rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid"
     if [ -f "$REG" ]; then t=$(mktemp) && awk -F'\t' -v m="$nm" '$2!=m' "$REG" > "$t" && mv "$t" "$REG"; fi
     log "deleted session '$nm' (tmux + sid + registry$( [ "$purge" = 1 ] && printf ' + transcript' ))"
     ;;
@@ -1128,7 +1180,8 @@ EOF
         name="$chosen"   # attach an existing session as-is (its remembered model/key stick)
       fi
       ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO" "$NO_TMUX"
-      [ "$NO_TMUX" = 1 ] || exec tmux -u attach -t "$(tmux_name_for "$name")"
+      if fg_live "$name"; then log "session '$name' runs in the foreground of another terminal — switch to it there, or 'crew stop $name' then relaunch"
+      elif [ "$NO_TMUX" != 1 ]; then exec tmux -u attach -t "$(tmux_name_for "$name")"; fi
       exit 0
     fi
     awk 'NR>=2{ if($0 !~ /^#/) exit; sub(/^# ?/,""); print }' "$0";;
@@ -1145,7 +1198,7 @@ EOF
     # fall back to tmux for this launch and note it.
     if [ "$NO_TMUX" = 1 ] && [ -n "$task" ]; then
       log "note: --no-tmux ignored — a queued task needs tmux (send-keys); launching detached instead"
-      NO_TMUX=0
+      NO_TMUX=0; NO_TMUX_EXPLICIT=0   # a fallback, not an explicit tmux request: don't trip the cross-mode guard
     fi
     ensure_session "$name" "$BACKEND" "$FRESH" "$YOLO" "$NO_TMUX"
     # (in --no-tmux mode with no task, ensure_session exec'd claude in the foreground and
@@ -1153,6 +1206,7 @@ EOF
     # A task means "queue work, don't attach". Otherwise attach when interactive (a TTY) —
     # so `crew <name>`, and any `--model`/`--key` switch, drops you straight into the session.
     if [ -n "$task" ]; then send_task "$name" "$task"
+    elif fg_live "$name"; then log "session '$name' is running in the foreground of another terminal — switch to it there, or 'crew stop $name' then relaunch"
     elif [ -t 1 ]; then exec tmux -u attach -t "$(tmux_name_for "$name")"
     else log "session '$name' ready (no task); crew attach $name"; fi;;
 esac
