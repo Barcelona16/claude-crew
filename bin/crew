@@ -524,12 +524,15 @@ ensure_session(){
   local live_mode=""   # "" none, "tmux", or "fg"
   if tmux has-session -t "$tmux_s" 2>/dev/null; then live_mode=tmux
   elif fg_live "$name"; then live_mode=fg; fi
-  # Cross-mode double-launch guard: if it's live in one mode and the caller EXPLICITLY
-  # forces the other, refuse rather than spin up a second claude on the same .sid.
+  # Cross-mode: the session is already live in one mode but the caller EXPLICITLY asked for
+  # the other. Don't start a second claude on the same .sid, and don't dead-end the user —
+  # enter the running session as-is (its current mode wins) and note the flag was ignored.
+  # Switching modes for real needs an explicit stop first (then the next launch honors it).
   if [ -n "$live_mode" ] && [ "${NO_TMUX_EXPLICIT:-0}" = 1 ]; then
     local want_mode; want_mode=$([ "$no_tmux" = 1 ] && echo fg || echo tmux)
     if [ "$want_mode" != "$live_mode" ]; then
-      die "'$name' is live in $([ "$live_mode" = fg ] && echo 'no-tmux (foreground)' || echo tmux) mode — stop it first: crew stop $name"
+      log "'$name' is already live in $([ "$live_mode" = fg ] && echo 'no-tmux (foreground)' || echo tmux) mode — entering that; --$([ "$no_tmux" = 1 ] && echo no-tmux || echo tmux) ignored. To switch: crew stop $name, then re-run."
+      no_tmux=$([ "$live_mode" = fg ] && echo 1 || echo 0)   # align with the live session
     fi
   fi
   # If the session is already live, just re-attach — UNLESS the caller explicitly
