@@ -1,0 +1,35 @@
+# Example: use the shared crew-gateway (an outward, Anthropic-compatible API) as a crew
+# backend — so `crew` can run models off a shared box instead of your own upstream keys.
+#
+# How it works:  your client --(x-api-key: LOGIN KEY)--> crew-gateway (:8790)
+#                  -> crew-proxy -> CCR -> upstream gateway
+# The gateway authenticates you by a LOGIN KEY and routes to a shared key pool, so you
+# never handle upstream credentials — you only hold your own login key.
+#
+# Get a login key:  open the gateway's /usage page in a browser and register your own
+# key. It test-calls the key, pools it, and issues you a login. New logins may use
+# Claude-Opus-4.6-joybuilder, GLM-5.2, and GLM-5.2-joybuilder by default (an admin can
+# widen this). Your per-key token usage is visible on that same /usage page.
+#
+# To use:  copy this file to  ~/.config/claude-crew/backends/<name>.conf , put YOUR login
+# key in TOKEN, then start a session with:   crew --model <name> <session>
+#
+# This file is sourced by bash — keep it valid shell (KEY=value; quote values with spaces).
+
+# The gateway's Anthropic /v1/messages endpoint (scheme://host:port — NO trailing path).
+BASE_URL=http://11.91.165.248:8790
+
+# Model to request. New registrants are allowed Claude-Opus-4.6-joybuilder by default.
+MODEL=Claude-Opus-4.6-joybuilder
+
+# Your gateway LOGIN key, sent as x-api-key. Replace with your own.
+# NEVER commit a real key — this example ships a placeholder on purpose.
+TOKEN=sk-YOUR-LOGIN-KEY
+
+# token mode: the gateway credential IS the inbound token (x-api-key). A pinned
+# `crew --key <alias>` just swaps this token. Correct for a direct-to-gateway backend.
+KEY_MODE=token
+
+# The JD gateway rejects Anthropic's per-turn `thinking` field (per-turn 400) and does not
+# advertise a context window for these model ids; disable thinking and silence the warning.
+ENV_EXTRA="MAX_THINKING_TOKENS=0 CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1"

@@ -73,7 +73,7 @@ REGISTER_RETRY_BASE = float(os.environ.get("CREW_REGISTER_RETRY_BASE", "1.5"))  
 # Models a self-registrant is allowed to CALL by default (their login's allow_models).
 # Anything else is admin-granted later. Comma-separated env override.
 REGISTER_ALLOW = [m.strip() for m in (os.environ.get("CREW_REGISTER_ALLOW")
-    or "Claude-Opus-4.6-joybuilder,GLM-5.2,GLM-5.2-joybuilder").split(",") if m.strip()]
+    or "Claude-Opus-4.6-joybuilder,Claude-Opus-4.8-joybuilder,GLM-5.2,GLM-5.2-joybuilder").split(",") if m.strip()]
 CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.expanduser("~/.claude-code-router/config.json")
 CCR_URL   = (os.environ.get("CREW_CCR_URL") or "http://127.0.0.1:3456").rstrip("/")
 PORT      = int(os.environ.get("CREW_PROXY_PORT", "8788"))
@@ -216,6 +216,28 @@ def load_gateway_auth():
                   "erp": str(v.get("erp", "")),
                   "admin": bool(v.get("admin"))}
     return out
+
+
+def _raw_gateway_auth():
+    """The gateway-auth.json dict verbatim (including __-prefixed config keys), {} if absent."""
+    try:
+        with open(GATEWAY_AUTH) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def register_allow_list():
+    """The live default allow_models handed to a new self-registrant. Admin-editable via
+    gateway-auth.json's reserved "__register_allow__" list; falls back to the REGISTER_ALLOW
+    constant when unset. Always returns a fresh list of clean model-name strings."""
+    v = _raw_gateway_auth().get("__register_allow__")
+    if isinstance(v, list):
+        out = [str(m).strip() for m in v if str(m).strip()]
+        if out:
+            return out
+    return list(REGISTER_ALLOW)
 
 
 def mask_key(key):
@@ -958,6 +980,12 @@ curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
   <input id=lg-erp placeholder="erp" size=10><label><input id=lg-admin type=checkbox> admin</label>
   <button id=lg-add>加/改登录</button>
  </div>
+ <h3>新注册者默认可用模型</h3>
+ <div class=row>
+  <input id=ra-list placeholder="空格分隔的模型名(空=重置为内置默认)" size=44>
+  <button id=ra-save>保存默认</button>
+  <span id=ra-msg class=dim></span>
+ </div>
 </div>
 </div>
 
@@ -1052,7 +1080,16 @@ async function loadAdmin(){
   document.querySelectorAll('#logins [data-dl]').forEach(b=>b.onclick=async()=>{
     if(!confirm('删除登录 '+b.dataset.dl+'?'))return;
     await apost('/api/gateway/auth',{login:b.dataset.dl,delete:true});loadAdmin();});
+  const ra=await aget('/api/register-allow');
+  if(ra&&$('#ra-list')){$('#ra-list').value=(ra.allow||[]).join(' ');
+    $('#ra-list').placeholder='空格分隔(空=重置为内置默认: '+(ra.builtin||[]).join(' ')+')';}
 }
+$('#ra-save').onclick=async()=>{
+  const models=$('#ra-list').value.trim().split(/\\s+/).filter(Boolean);
+  const r=await apost('/api/register-allow',{allow:models});
+  if(!r.ok){$('#ra-msg').textContent=r.body.error||'保存失败';}
+  else{$('#ra-msg').textContent='已保存: '+((r.body.allow||[]).join(' ')||'(内置默认)');loadAdmin();}
+};
 $('#ak-add').onclick=async()=>{
   const r=await apost('/api/ccr/provider',{alias:$('#ak-alias').value.trim(),key:$('#ak-key').value.trim(),model:$('#ak-model').value.trim(),base_url:$('#ak-base').value.trim()});
   if(!r.ok)alert(r.body.error||'失败');else{$('#ak-key').value=$('#ak-alias').value='';loadAdmin();}
@@ -1292,7 +1329,9 @@ class Handler(BaseHTTPRequestHandler):
             b = brk.get(a, {"state": "healthy", "cooldown_left": 0})
             out.append({"key_masked": mask_key(keys.get(a, "")),
                         "state": b["state"], "cooldown_left": b["cooldown_left"]})
-        return self._send_json({"pool": out})
+        # served model names (policy keys) — not secret; lets an unrestricted login discover
+        # what the pool offers via /v1/models without needing the admin-only /api/policy.
+        return self._send_json({"pool": out, "models": sorted(load_policy().keys())})
 
     # -- admin: full key pool for management (masked keys + models + policy rank + health).
     #    alias is returned because delete/policy ops target it, but the UI shows the masked
@@ -1352,6 +1391,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_keys()
         elif path == "/api/policy":
             self._api_policy_get()
+        elif path == "/api/register-allow":
+            self._api_register_allow_get()
         else:
             self._passthrough(b"")
 
@@ -1369,6 +1410,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_gateway_auth(body); return
         if path == "/api/policy":
             self._api_policy(body); return
+        if path == "/api/register-allow":
+            self._api_register_allow(body); return
         if path == "/api/register":
             self._api_register(body); return
         # Only /v1/messages and /v1/chat/completions carry a model to route on.
@@ -1797,7 +1840,7 @@ class Handler(BaseHTTPRequestHandler):
             auth = load_gateway_auth()
             prev = auth.get(key, {})
             entry = {"maps_to": alias,
-                     "allow_models": prev.get("allow_models") or list(REGISTER_ALLOW),
+                     "allow_models": prev.get("allow_models") or register_allow_list(),
                      "erp": erp or prev.get("erp", "")}
             if prev.get("admin"):
                 entry["admin"] = True
@@ -1820,9 +1863,58 @@ class Handler(BaseHTTPRequestHandler):
             os.chmod(tmp, 0o600); os.replace(tmp, GATEWAY_AUTH)
         except OSError as e:
             return self._send_json({"ok": False, "error": f"gateway-auth write failed: {e}"}, 500)
-        log.info("self-registered key alias '%s' into %d models; allow=%s", alias, len(tmpl), REGISTER_ALLOW)
+        log.info("self-registered key alias '%s' into %d models; allow=%s", alias, len(tmpl), entry["allow_models"])
         return self._send_json({"ok": True, "alias": alias, "models": sorted(set(tmpl)),
                                 "allow_models": entry["allow_models"], "key_masked": mask_key(key)})
+
+    # -- default allow-list for NEW self-registrants (admin-editable) --
+    #    GET  -> {allow: [...current...], builtin: [...constant fallback...]}
+    #    POST {allow: ["ModelA","ModelB"]} -> persist to gateway-auth.json "__register_allow__"
+    #    Model names are strict-allowlisted (no shell metachars / commas). Empty list resets
+    #    to the built-in constant (removes the override).
+    def _api_register_allow_get(self):
+        if not self.require_admin():
+            return self._send_json({"error": "admin required"}, 403)
+        return self._send_json({"allow": register_allow_list(), "builtin": list(REGISTER_ALLOW)})
+
+    def _api_register_allow(self, body):
+        if not self.require_admin():
+            return self._send_json({"ok": False, "error": "admin required"}, 403)
+        d = self._read_json(body)
+        if d is None:
+            return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
+        raw_list = d.get("allow")
+        if not isinstance(raw_list, list):
+            return self._send_json({"ok": False, "error": "allow must be a list"}, 400)
+        ok_name = re.compile(r"^[A-Za-z0-9._-]+$")
+        models = []
+        for m in raw_list:
+            m = str(m).strip()
+            if not m:
+                continue
+            if not ok_name.match(m):
+                return self._send_json({"ok": False, "error": f"invalid model name: {m!r}"}, 400)
+            if m not in models:
+                models.append(m)
+        try:
+            raw = _raw_gateway_auth()
+            if not isinstance(raw, dict):
+                raw = {}
+            if models:
+                raw["__register_allow__"] = models
+            else:
+                raw.pop("__register_allow__", None)  # empty = reset to built-in default
+            os.makedirs(os.path.dirname(GATEWAY_AUTH), exist_ok=True)
+            if os.path.exists(GATEWAY_AUTH):
+                shutil.copy2(GATEWAY_AUTH, f"{GATEWAY_AUTH}.bak.{int(time.time())}")
+            tmp = GATEWAY_AUTH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(raw, f, indent=2)
+            os.chmod(tmp, 0o600); os.replace(tmp, GATEWAY_AUTH)
+        except OSError as e:
+            return self._send_json({"ok": False, "error": f"gateway-auth write failed: {e}"}, 500)
+        log.info("register-allow default set to %s", register_allow_list())
+        return self._send_json({"ok": True, "allow": register_allow_list()})
 
     # -- gateway login table: add/update/delete an entry in gateway-auth.json --
     #    {login, maps_to, allow_models[], erp}          -> upsert

@@ -40,6 +40,7 @@
 #                         Runs itself opportunistically (throttled) on spawn/up; CREW_PRUNE_AUTO=0 disables
 #   crew doctor           read-only health check (services, keys.conf, key-policy resolvable)
 #   crew stats            crew-proxy usage in the terminal (key health + token totals)
+#   crew add-key [<name>]        add a new API+key as a direct backend; picks from its /v1/models
 #   crew sync-models [--key A]   discover a key's upstream models; pick which new ones to add to CCR
 #
 # MESSAGING (between sessions)
@@ -1037,6 +1038,68 @@ $als
 EOF
       fi
     fi;;
+  add-key|add-api)
+    # Interactively add a NEW API endpoint + key as a DIRECT token backend — crew talks to the
+    # API directly (no local CCR). Queries <base>/v1/models with the key to list the models that
+    # key may use, you pick one, and a ready-to-run backend conf is written to BACKEND_DIR. Then
+    # `crew --model <name> <session>` uses it. (To fold a key's models into your LOCAL CCR
+    # instead, use `crew sync-models`.) Flags allow non-interactive/scripted use:
+    #   crew add-key [<name>] [--base-url <url>] [--key <k>] [--model <m>]
+    # With an explicit --model, /v1/models discovery is skipped (for APIs that don't expose it).
+    command -v node >/dev/null 2>&1 || die "crew add-key needs node (to read /v1/models)"
+    shift 2>/dev/null || true
+    ak_name=""; ak_base=""
+    # --key and --model are eaten by the GLOBAL parser (into KEY / BACKEND) before we get here,
+    # exactly like sync-models reads $KEY. For add-key, --key's value is the RAW new key (it need
+    # not be a keys.conf alias). --base-url is not global, so it survives in the positionals.
+    ak_key=""; [ "${KEY_EXPLICIT:-0}" = 1 ] && [ "${KEY:-}" != "-" ] && ak_key="$KEY"
+    ak_model=""; [ "${BACKEND_EXPLICIT:-0}" = 1 ] && ak_model="$BACKEND"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --base-url) ak_base="${2:-}"; shift 2;;
+        --base-url=*) ak_base="${1#*=}"; shift;;
+        -*) shift;;
+        *) [ -z "$ak_name" ] && ak_name="$1"; shift;;
+      esac
+    done
+    # 1) backend name (must be a fresh conf we won't clobber)
+    if [ -z "$ak_name" ]; then printf '  backend name (e.g. remote) > ' >&2; read -r ak_name </dev/tty || true; fi
+    [ -n "$ak_name" ] || die "no name given"
+    case "$ak_name" in *[!A-Za-z0-9._-]*) die "invalid name '$ak_name' (letters, digits, . _ - only)";; esac
+    ak_conf="$BACKEND_DIR/$ak_name.conf"
+    [ -e "$ak_conf" ] && die "backend '$ak_name' already exists ($ak_conf) — choose another name, or 'crew kill'/remove it first"
+    # 2) API base URL (origin only, no path)
+    if [ -z "$ak_base" ]; then printf '  API base URL (scheme://host:port, no path) > ' >&2; read -r ak_base </dev/tty || true; fi
+    [ -n "$ak_base" ] || die "no base URL given"
+    ak_base="${ak_base%/}"
+    case "$ak_base" in http://*|https://*) :;; *) die "base URL must start with http:// or https://";; esac
+    # 3) key (silent input)
+    if [ -z "$ak_key" ]; then printf '  login key (input hidden) > ' >&2; read -rs ak_key </dev/tty || true; echo >&2; fi
+    [ -n "$ak_key" ] || die "no key given"
+    # 4) model — discover via /v1/models unless one was given explicitly
+    if [ -z "$ak_model" ]; then
+      log "querying $ak_base/v1/models for models this key can use ..."
+      ak_remote=$(fetch_models_url "$ak_base/v1/models" "$ak_key")
+      ak_ids=$(printf '%s\n' "$ak_remote" | awk -F'\t' 'NF{print ($2!=""?$2:$1)}' | awk 'NF')
+      [ -n "$ak_ids" ] || die "$ak_base/v1/models returned no models (bad key, wrong URL, or the API doesn't expose /v1/models). Re-run with --model <name> to skip discovery."
+      ak_model=$(printf '%s\n' "$ak_ids" | _pick_one "pick model for '$ak_name'" "$(printf '%s\n' "$ak_ids" | head -1)")
+    fi
+    [ -n "$ak_model" ] || die "no model chosen"
+    # 5) write the direct token backend conf (mode 600 — it holds a key)
+    mkdir -p "$BACKEND_DIR"
+    {
+      printf '# Added by `crew add-key` — direct token backend to an Anthropic-compatible API.\n'
+      printf '# TOKEN is sent as the inbound credential (ANTHROPIC_AUTH_TOKEN / x-api-key).\n'
+      printf 'BASE_URL=%s\n' "$ak_base"
+      printf 'MODEL=%s\n' "$ak_model"
+      printf 'TOKEN=%s\n' "$ak_key"
+      printf 'KEY_MODE=token\n'
+      printf 'ENV_EXTRA="MAX_THINKING_TOKENS=0 CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1"\n'
+    } > "$ak_conf" || die "write failed: $ak_conf"
+    chmod 600 "$ak_conf" 2>/dev/null || true
+    echo "== added backend '$ak_name' -> $ak_base  (model: $ak_model)"
+    echo "   use it:  crew --model $ak_name <session>"
+    ;;
   sync-models)
     # Discover models a key can serve upstream and (interactively) add the ones you don't have
     # locally into CCR. Pick a key first, then a multi-select of NEW models. joycode is a key
