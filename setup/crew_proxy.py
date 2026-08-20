@@ -76,6 +76,11 @@ REGISTER_ALLOW = [m.strip() for m in (os.environ.get("CREW_REGISTER_ALLOW")
     or "Claude-Opus-4.6-joybuilder,Claude-Opus-4.8-joybuilder,GLM-5.2,GLM-5.2-joybuilder").split(",") if m.strip()]
 CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.expanduser("~/.claude-code-router/config.json")
 CCR_URL   = (os.environ.get("CREW_CCR_URL") or "http://127.0.0.1:3456").rstrip("/")
+# Command run to make CCR pick up newly-written providers (self-registration appends to
+# CCR's config.json, and CCR has no hot-reload — only a restart). Empty = do nothing (the
+# default off, so a laptop where CCR is managed by launchd/systemd isn't disrupted); the
+# shared container sets CREW_CCR_RELOAD_CMD="ccr restart".
+CCR_RELOAD_CMD = os.environ.get("CREW_CCR_RELOAD_CMD", "")
 PORT      = int(os.environ.get("CREW_PROXY_PORT", "8788"))
 FAIL_N    = int(os.environ.get("CREW_PROXY_FAILS", "3"))
 COOLDOWN  = float(os.environ.get("CREW_PROXY_COOLDOWN", "60"))
@@ -238,6 +243,20 @@ def register_allow_list():
         if out:
             return out
     return list(REGISTER_ALLOW)
+
+
+def reload_ccr():
+    """Best-effort: make CCR pick up config.json changes (it has no hot-reload). Runs
+    CCR_RELOAD_CMD in a shell with a timeout; never raises — a failed reload must not fail
+    the registration (an admin can always `ccr restart` manually). No-op if unconfigured."""
+    if not CCR_RELOAD_CMD:
+        return
+    try:
+        r = subprocess.run(CCR_RELOAD_CMD, shell=True, timeout=30,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        log.info("CCR reload (%s) rc=%s", CCR_RELOAD_CMD, r.returncode)
+    except Exception as e:
+        log.warning("CCR reload failed (%s): %s", CCR_RELOAD_CMD, e)
 
 
 def mask_key(key):
@@ -1864,6 +1883,11 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as e:
             return self._send_json({"ok": False, "error": f"gateway-auth write failed: {e}"}, 500)
         log.info("self-registered key alias '%s' into %d models; allow=%s", alias, len(tmpl), entry["allow_models"])
+        # New CCR providers were appended above; CCR has no hot-reload, so restart it (best-
+        # effort) — otherwise the freshly-added providers 404 ("provider not found") until the
+        # next manual restart, which is exactly how 4.6 kept breaking after each registration.
+        if added_models:
+            reload_ccr()
         return self._send_json({"ok": True, "alias": alias, "models": sorted(set(tmpl)),
                                 "allow_models": entry["allow_models"], "key_masked": mask_key(key)})
 
