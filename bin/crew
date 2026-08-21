@@ -413,7 +413,18 @@ _pick_one(){  # _pick_one <title> <default_line>  (options on stdin, one per lin
     local reply; printf '  choose > ' >&2; read -r reply </dev/tty
     if [ -z "$reply" ]; then chosen="$def"
     elif [ "$reply" -ge 1 ] 2>/dev/null && [ "$reply" -le "${#opts[@]}" ] 2>/dev/null; then chosen="${opts[$((reply-1))]}"
-    else chosen="$def"; fi
+    else
+      # Accept the option TEXT too (people type "personal", not "2"): exact match, else a
+      # unique case-insensitive prefix. Only fall back to the default if it matches nothing.
+      local o m="" hits=0 h="" rl; rl=$(printf '%s' "$reply" | tr 'A-Z' 'a-z')
+      for o in "${opts[@]}"; do [ "$o" = "$reply" ] && { m="$o"; break; }; done
+      if [ -z "$m" ]; then
+        for o in "${opts[@]}"; do case "$(printf '%s' "$o" | tr 'A-Z' 'a-z')" in "$rl"*) hits=$((hits+1)); h="$o";; esac; done
+        [ "$hits" = 1 ] && m="$h"
+      fi
+      if [ -n "$m" ]; then chosen="$m"
+      else printf '  no match for "%s" — keeping default: %s\n' "$reply" "$def" >&2; chosen="$def"; fi
+    fi
   fi
   [ -z "$chosen" ] && chosen="$def"
   printf '%s' "$chosen"
@@ -505,6 +516,12 @@ ensure_session(){
   # Adopted/external session (e.g. the main `work` session managed by bootstrap/start.sh):
   # crew doesn't spawn or own its lifecycle — the caller just attaches to the live tmux.
   if is_adopted "$name"; then
+    # crew won't restart an adopted session, so an explicit --key/--model switch can't be
+    # applied here (that needs a restart). Say so loudly instead of silently just attaching —
+    # otherwise `crew main --key X` looks like it "did nothing".
+    if [ "${BACKEND_EXPLICIT:-0}" = 1 ] || [ "${KEY_EXPLICIT:-0}" = 1 ]; then
+      log "'$name' is adopted/external (tmux '$(tmux_name_for "$name")') — crew won't restart it, so --model/--key can't be applied. Change model/key where the session is started, or un-adopt it (rm $CREW_STATE/$name.tmux) to let crew own + switch it."
+    fi
     tmux has-session -t "$(tmux_name_for "$name")" 2>/dev/null \
       || log "adopted '$name': tmux '$(tmux_name_for "$name")' not live (start it where it's managed)"
     return 0
