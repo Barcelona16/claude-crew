@@ -538,6 +538,16 @@ ensure_session(){
   local keyf="$CREW_STATE/$name.key"
   local modef="$CREW_STATE/$name.notmux"
   local fgpidf="$CREW_STATE/$name.fgpid"
+  local notifyf="$CREW_STATE/$name.notify"
+  local settingsf="$CREW_STATE/$name.settings.json"
+  # --notify: persist "who to ping when this session finishes a task" (a crew session
+  # name, or the initiator if --notify was given bare). Only written when the caller
+  # passed --notify on THIS invocation, so sessions never started with --notify keep
+  # zero notify behavior (no hook injected below).
+  if [ "${NOTIFY_EXPLICIT:-0}" = 1 ]; then
+    local _nt="$NOTIFY"; [ -z "$_nt" ] && _nt=$(whoami_session); [ -z "$_nt" ] && _nt="cli"
+    printf '%s\n' "$_nt" > "$notifyf"
+  fi
   # tmux-pinned session (e.g. an always-on agent like `main`): a <name>.pintmux marker forbids
   # no-tmux — a foreground session dies when its terminal closes, which for an always-on agent
   # means it silently stops answering @mentions/cron. Force tmux and warn instead of obeying
@@ -653,6 +663,18 @@ ensure_session(){
   fi
   local modelarg=""; [ -n "$BK_MODEL" ] && modelarg="--model $BK_MODEL"
 
+  # Completion-notify Stop hook (ONLY for sessions that have a .notify target): inject a
+  # per-session settings.json whose Stop hook calls `crew __notify-hook`. That hook scans
+  # the just-finished turn for a <<CREW-DONE: ...>> marker and pings the notify target.
+  # Sessions with no .notify get no hook injected -> behavior identical to before.
+  # Both exec paths below (foreground + tmux) pick this up because it appends to $flags.
+  if [ -f "$notifyf" ]; then
+    local crew_self; crew_self=$(command -v crew || echo crew)
+    jq -n --arg cmd "$crew_self __notify-hook" \
+      '{hooks:{Stop:[{hooks:[{type:"command",command:$cmd}]}]}}' > "$settingsf" 2>/dev/null || true
+    [ -s "$settingsf" ] && case " $flags " in *" --settings "*) :;; *) flags="$flags --settings $(printf %q "$settingsf")";; esac
+  fi
+
   # --no-tmux: run claude directly in THIS terminal. All the backend/key/model/--resume
   # resolution above is tmux-independent and already ran; state (.sid/.backend/.key) is
   # written, so `crew ls`/`send`/`inbox`/resume keep working. exec replaces this process
@@ -696,7 +718,17 @@ ensure_session(){
   log "session '$name' ready (tmux: $tmux_s, backend: $backend, model: ${BK_MODEL:-<default>}, key: $keydisp); watch: crew attach $name"
   sleep 5
 }
-send_task(){ local t; t=$(tmux_name_for "$1"); tmux send-keys -t "$t" -l "$2"; sleep 1; tmux send-keys -t "$t" Enter; log "fed task to '$1'; watch: crew attach $1"; }
+send_task(){ local t; t=$(tmux_name_for "$1"); local body="$2"
+  # For --notify sessions, append the completion-marker convention so the injected Stop
+  # hook can detect final delivery. Only when a .notify target exists for this session.
+  if [ -f "$CREW_STATE/$1.notify" ]; then
+    body="$body
+
+[crew 完成回报] 当你这次任务【全部完成、最终交付】时,在回复末尾单独输出一行:
+<<CREW-DONE: 一句话结论>>
+只在真正完成时输出这一次;中间步骤不要输出,否则会误报完成。"
+  fi
+  tmux send-keys -t "$t" -l "$body"; sleep 1; tmux send-keys -t "$t" Enter; log "fed task to '$1'; watch: crew attach $1"; }
 
 
 # --- optional extensions -----------------------------------------------------
@@ -786,7 +818,7 @@ crew_log(){
 }
 
 # --- arg parsing ------------------------------------------------------------
-BACKEND="${CREW_BACKEND:-}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; NO_TMUX="${CREW_NO_TMUX:-0}"; NO_TMUX_EXPLICIT=0; PICK=0; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; POS=()
+BACKEND="${CREW_BACKEND:-}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; NO_TMUX="${CREW_NO_TMUX:-0}"; NO_TMUX_EXPLICIT=0; PICK=0; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; NOTIFY=""; NOTIFY_EXPLICIT=0; POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --model|--backend) BACKEND="${2:?--model needs a value (see: crew models)}"; BACKEND_EXPLICIT=1; shift 2;;
@@ -800,6 +832,8 @@ while [ $# -gt 0 ]; do
     --tmux)    NO_TMUX=0; NO_TMUX_EXPLICIT=1; shift;;
     --pick|-p) PICK=1; shift;;
     --from) FROM="${2:?--from needs a value}"; shift 2;;
+    --notify) NOTIFY_EXPLICIT=1; case "${2:-}" in ""|-*) NOTIFY="";; *) NOTIFY="$2"; shift;; esac; shift;;
+    --notify=*) NOTIFY_EXPLICIT=1; NOTIFY="${1#*=}"; shift;;
     --nudge) NUDGE=1; shift;;
     --peek) PEEK=1; shift;;
     --all) ALLTGT=1; shift;;
@@ -1202,6 +1236,48 @@ EOF
     rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid" "$CREW_STATE/$nm.tmuxname" "$CREW_STATE/$nm.pintmux"
     if [ -f "$REG" ]; then t=$(mktemp) && awk -F'\t' -v m="$nm" '$2!=m' "$REG" > "$t" && mv "$t" "$REG"; fi
     log "deleted session '$nm' (tmux + sid + registry$( [ "$purge" = 1 ] && printf ' + transcript' ))"
+    ;;
+  __notify-hook)
+    # Hidden: invoked by the Claude Code Stop hook injected into --notify sessions.
+    # Reads the hook JSON on stdin (has .transcript_path + .session_id), scans the
+    # LAST assistant message for a <<CREW-DONE: ...>> marker, and if present pings the
+    # session's notify target via crew_send --nudge. Dedups by marker hash so the same
+    # completion isn't reported twice. MUST always exit 0 — a hook failure must never
+    # block or crash the child agent's session.
+    {
+      self="${CREW_SESSION:-}"
+      [ -z "$self" ] && exit 0
+      notifyf="$CREW_STATE/$self.notify"
+      [ -f "$notifyf" ] || exit 0
+      target=$(cat "$notifyf" 2>/dev/null); [ -z "$target" ] && exit 0
+      [ "$target" = "$self" ] && exit 0   # don't ping self
+
+      hook_json=$(cat 2>/dev/null)
+      tpath=$(printf '%s' "$hook_json" | jq -r '.transcript_path // empty' 2>/dev/null)
+      [ -n "$tpath" ] && [ -f "$tpath" ] || exit 0
+
+      # Last assistant message's concatenated text from the transcript jsonl.
+      last_text=$(jq -rs '
+        [ .[] | select(.type=="assistant") ] | last
+        | .message.content // [] | map(select(.type=="text") | .text) | join("\n")
+      ' "$tpath" 2>/dev/null)
+      [ -n "$last_text" ] || exit 0
+
+      # Extract the <<CREW-DONE: ...>> marker (first occurrence).
+      marker=$(printf '%s' "$last_text" | grep -oE '<<CREW-DONE:[^>]*>>' | head -1)
+      [ -n "$marker" ] || exit 0
+
+      # Dedup: hash the marker; skip if we already reported this exact one.
+      mhash=$(printf '%s' "$marker" | cksum | awk '{print $1}')
+      seenf="$CREW_STATE/$self.notify.seen"
+      if [ -f "$seenf" ] && grep -qx "$mhash" "$seenf" 2>/dev/null; then exit 0; fi
+      printf '%s\n' "$mhash" >> "$seenf"
+
+      # One-line conclusion from inside the marker.
+      concl=$(printf '%s' "$marker" | sed -E 's/^<<CREW-DONE:[[:space:]]*//; s/>>$//')
+      FROM="$self" NUDGE=1 crew_send "$target" "done: $self — $concl"
+    } 2>/dev/null
+    exit 0
     ;;
   send) shift; if [ "$ALLTGT" = 1 ]; then crew_broadcast "$@"; else crew_send "$@"; fi;;
   inbox) shift; crew_inbox "$@";;
