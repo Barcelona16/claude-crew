@@ -30,29 +30,26 @@
 #   crew pin <name>       pin an always-on session to tmux (refuse --no-tmux, so it can't be
 #                         accidentally switched to foreground and die on terminal close)
 #   crew unpin <name>     remove the tmux pin (allow --no-tmux again)
-#   crew adopt <name> <tmux-session> [--sid U] [--model M]   register an EXTERNAL tmux session
-#                         (e.g. the main `work` session) into crew: shows in ls, attach/send/log
-#                         reach it, but crew never spawns/stops/kills it (stop/kill/prune refuse it)
 #
 # CONFIG
 #   crew models           list available model presets
 #   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
 #   crew up               ensure dependency services are up (CCR :3456 + crew-proxy :8788)
-#   crew prune [--days N] [--dry-run] [--purge]   auto-release sessions idle > N days (default 7);
-#                         never touches a live or adopted session; keeps transcripts unless --purge.
-#                         Runs itself opportunistically (throttled) on spawn/up; CREW_PRUNE_AUTO=0 disables
-#   crew doctor           read-only health check (services, keys.conf, key-policy resolvable)
-#   crew stats            crew-proxy usage in the terminal (key health + token totals)
-#   crew add-key [<name>]        add a new API+key as a direct backend; picks from its /v1/models
-#   crew sync-models [--key A]   discover a key's upstream models; pick which new ones to add to CCR
 #
 # MESSAGING (between sessions)
 #   crew send [--from X] [--nudge] <name> "msg"   drop a message in <name>'s mailbox
 #   crew send --all [--nudge] "msg"               broadcast to all running sessions
 #   crew inbox [--peek] [<name>]                  read (and consume) your mailbox
 #
-# ADVANCED
-#   crew delegate --model M "task"   one-shot `claude -p` delegation (result to stdout)
+# ADVANCED (occasional: setup, diagnostics, external sessions)
+#   crew adopt <name> <tmux-session> [--sid U] [--model M]   register an EXTERNAL tmux session
+#                         (e.g. the main `work` session) into crew: shows in ls, attach/send/log
+#                         reach it, but crew never spawns/stops/kills it (stop/kill/prune refuse it)
+#   crew add-key [<name>]        add a new API+key as a direct backend; picks from its /v1/models
+#   crew sync-models [--key A]   discover a key's upstream models; add new ones to CCR
+#   crew prune [--days N] [--dry-run] [--purge]   release sessions idle > N days (default 7); never
+#                         touches a live/adopted session; runs itself opportunistically on spawn/up
+#   crew doctor           read-only health check (services, keys.conf, key-policy resolvable)
 #   crew log [--tail N] [--raw] [<name>]          full transcript from Claude's session log
 #
 # The two knobs you switch are --model and --key; everything else is plumbing.
@@ -321,8 +318,8 @@ ccr_origin_for_key(){
     if(p){ try{ const u=new URL(p.api_base_url||p.apiBaseUrl); process.stdout.write(u.protocol+"//"+u.host); }catch(e){} }
   ' "$cfg" 2>/dev/null
 }
-# Resolve a pinned --key alias per the loaded backend's KEY_MODE. Shared by ensure_session
-# and crew_delegate_core so both honor --key identically. token mode: sets KEY_INBOUND_OVERRIDE
+# Resolve a pinned --key alias per the loaded backend's KEY_MODE. Used by ensure_session so
+# --key is honored identically wherever a session launches. token mode: sets KEY_INBOUND_OVERRIDE
 # to the raw key (becomes ANTHROPIC_AUTH_TOKEN). ccr mode: rewrites BK_MODEL to the provider
 # serving this model with that key. Reads BK_MODEL/BK_KEY_MODE; may mutate BK_MODEL; sets the
 # global KEY_INBOUND_OVERRIDE ("" if none).
@@ -701,34 +698,6 @@ ensure_session(){
 }
 send_task(){ local t; t=$(tmux_name_for "$1"); tmux send-keys -t "$t" -l "$2"; sleep 1; tmux send-keys -t "$t" Enter; log "fed task to '$1'; watch: crew attach $1"; }
 
-# --- one-shot delegation -----------------------------------------------------
-# `crew delegate --model X "task"` runs a one-shot `claude -p` sub-agent on a crew
-# backend and prints its result to stdout — no tmux, no session, no --resume. Reuses
-# load_backend + the same env assembly as ensure_session.
-crew_delegate_core(){
-  local backend="$1"; shift; local task="$*"
-  { [ -z "$backend" ] || [ "$backend" = default ]; } && die "delegate needs an explicit backend with a base URL (e.g. --model glm). available: $(list_backends_inline)"
-  [ -n "$task" ] || die "usage: crew delegate --model <name> \"<task>\""
-  load_backend "$backend"
-  apply_key_pin "${KEY:-}"   # honor --key (ccr: swaps provider; token: overrides inbound below)
-  [ -n "$BK_ENSURE_CMD" ] && { log "ensuring backend '$backend' is up..."; bash -c "$BK_ENSURE_CMD" >&2 || log "WARN: ENSURE_CMD failed (continuing)"; }
-  if [ "${BK_KEY_MODE:-}" = ccr ]; then
-    crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}" >&2
-    crew_proxy_up >&2
-    crew_ext_dep_up "$BK_MODEL"
-  fi
-  local tok="$BK_TOKEN"
-  [ -n "$BK_TOKEN_CMD" ] && tok=$(bash -c "$BK_TOKEN_CMD" 2>/dev/null)
-  if [ -n "$BK_TOKEN_ENV" ]; then local _ev="${!BK_TOKEN_ENV-}"; [ -n "$_ev" ] && tok="$_ev"; fi
-  [ -n "$KEY_INBOUND_OVERRIDE" ] && tok="$KEY_INBOUND_OVERRIDE"
-  local modelarg=""; [ -n "$BK_MODEL" ] && modelarg="--model $BK_MODEL"
-  local flags="${BK_CLAUDE_FLAGS:-${CREW_CLAUDE_FLAGS:-}}"
-  [ -n "$BK_BASE_URL" ] && export ANTHROPIC_BASE_URL="$BK_BASE_URL"
-  [ -n "$tok" ]         && export ANTHROPIC_AUTH_TOKEN="$tok"
-  [ -n "$BK_ENV_EXTRA" ] && eval "export $BK_ENV_EXTRA"
-  log "delegating to '$backend' (model: ${BK_MODEL:-<default>}) via claude -p..."
-  exec $CLAUDE_BIN -p $modelarg $flags "$task"
-}
 
 # --- optional extensions -----------------------------------------------------
 # Core crew = tmux + a CCR/proxy-routed model preset. Optional add-ons live as ext/*.sh that
@@ -935,6 +904,8 @@ EOF
     fi
     ;;
   whoami|me|current) die "crew whoami was removed — session params now live in the statusline (⬡ <session> · <model> · 🔑<key>)";;
+  stats) die "crew stats was removed — see token usage on the crew-proxy dashboard / gateway /usage page (or /api/status).";;
+  delegate) die "crew delegate was removed — start a session on the backend instead: crew --model <M> <name> \"<task>\".";;
   stop) [ -n "${2:-}" ] || die "usage: crew stop <name>"
     # Stop the running tmux session but KEEP its on-disk state (.sid + transcript),
     # so `crew [--backend X] <name>` resumes it later with full history. This is how
@@ -1043,38 +1014,6 @@ EOF
         done
       done < "$pol"
     fi;;
-  stats)
-    # Show crew-proxy usage (key health + token totals) in the terminal — reads the same
-    # /api/status the dashboard uses. Needs crew-proxy running (crew up).
-    prxp="${CREW_PROXY_PORT:-8788}"; url="http://127.0.0.1:$prxp/api/status"
-    if command -v curl >/dev/null 2>&1; then raw=$(curl -fsS "$url" 2>/dev/null)
-    elif command -v python3 >/dev/null 2>&1; then raw=$(python3 -c 'import sys,urllib.request;sys.stdout.write(urllib.request.urlopen(sys.argv[1],timeout=3).read().decode())' "$url" 2>/dev/null)
-    else die "need curl or python3 to fetch $url"; fi
-    [ -n "$raw" ] || die "crew-proxy not reachable on :$prxp (crew up first?)"
-    command -v python3 >/dev/null 2>&1 || die "crew stats needs python3 to format output"
-    printf '%s' "$raw" | python3 -c '
-import sys, json
-d = json.load(sys.stdin)
-t = d.get("totals", {})
-def k(n):
-    n = n or 0
-    return "%.1fM" % (n/1e6) if n>=1e6 else "%.1fk" % (n/1e3) if n>=1e3 else str(n)
-print("== crew-proxy stats ==")
-print("  :%s  ->  %s   trip@%s cooldown %ss" % (d.get("port"), d.get("ccr_url"), d.get("fail_n"), d.get("cooldown")))
-print("  totals: req %s  ok %s  fail %s  tok %sin / %sout" % (t.get("requests",0), t.get("ok",0), t.get("fail",0), k(t.get("in_tokens")), k(t.get("out_tokens"))))
-ks = d.get("keys", [])
-if ks:
-    print("  keys:")
-    print("    %-14s %-9s %8s %6s %6s %8s %8s" % ("ALIAS","STATE","REQ","OK","FAIL","IN","OUT"))
-    for x in ks:
-        print("    %-14s %-9s %8s %6s %6s %8s %8s" % (x.get("alias",""), x.get("state",""), x.get("requests",0), x.get("ok",0), x.get("fail",0), k(x.get("in_tokens")), k(x.get("out_tokens"))))
-ms = d.get("models", [])
-if ms:
-    print("  models:")
-    print("    %-28s %8s %8s %8s" % ("MODEL","REQ","IN","OUT"))
-    for x in ms:
-        print("    %-28s %8s %8s %8s" % (x.get("model",""), x.get("requests",0), k(x.get("in_tokens")), k(x.get("out_tokens"))))
-' || die "failed to parse crew-proxy response";;
   keys) echo "== api keys ($KEYS_FILE) =="
     if [ ! -f "$KEYS_FILE" ]; then echo "  (no keys file; create it with lines: <alias>=<api-key>)";
     else
@@ -1264,7 +1203,6 @@ EOF
     if [ -f "$REG" ]; then t=$(mktemp) && awk -F'\t' -v m="$nm" '$2!=m' "$REG" > "$t" && mv "$t" "$REG"; fi
     log "deleted session '$nm' (tmux + sid + registry$( [ "$purge" = 1 ] && printf ' + transcript' ))"
     ;;
-  delegate) shift; crew_delegate_core "$BACKEND" "$@";;
   send) shift; if [ "$ALLTGT" = 1 ]; then crew_broadcast "$@"; else crew_send "$@"; fi;;
   inbox) shift; crew_inbox "$@";;
   log) shift; crew_log "$@";;
