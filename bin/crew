@@ -27,6 +27,9 @@
 #   crew attach <name>    attach to observe a session
 #   crew stop <name>      stop a session's tmux but KEEP its state (resume/switch later)
 #   crew kill <name> [--purge]   delete a session for good (tmux + id + registry; --purge also transcript)
+#   crew pin <name>       pin an always-on session to tmux (refuse --no-tmux, so it can't be
+#                         accidentally switched to foreground and die on terminal close)
+#   crew unpin <name>     remove the tmux pin (allow --no-tmux again)
 #   crew adopt <name> <tmux-session> [--sid U] [--model M]   register an EXTERNAL tmux session
 #                         (e.g. the main `work` session) into crew: shows in ls, attach/send/log
 #                         reach it, but crew never spawns/stops/kills it (stop/kill/prune refuse it)
@@ -869,6 +872,7 @@ case "${1:-}" in
       if tmux has-session -t "$(tmux_name_for "$nm")" 2>/dev/null || fg_live "$nm"; then st="live"
       elif [ -f "$sidf" ] && ls "$HOME"/.claude/projects/*/"$(cat "$sidf")".jsonl >/dev/null 2>&1; then st="resumable"
       else st="new"; fi
+      [ -f "$CREW_STATE/$nm.pintmux" ] && st="$st 📌"   # tmux-pinned (always-on; refuses --no-tmux)
       bk=$(cat "$CREW_STATE/$nm.backend" 2>/dev/null || echo "?")
       local _pin; _pin=$(cat "$CREW_STATE/$nm.key" 2>/dev/null); [ -n "$_pin" ] || _pin="-"
       # KEY column shows the EFFECTIVE key (what requests actually use), not just the raw pin —
@@ -945,6 +949,10 @@ EOF
       log "no live session '$2' (nothing to stop)"
     fi
     ;;
+  pin) [ -n "${2:-}" ] || die "usage: crew pin <name>   (pin an always-on session to tmux; refuses --no-tmux)"
+    printf 1 > "$CREW_STATE/$2.pintmux"; log "'$2' pinned to tmux — --no-tmux will be refused. Un-pin: crew unpin $2";;
+  unpin) [ -n "${2:-}" ] || die "usage: crew unpin <name>"
+    rm -f "$CREW_STATE/$2.pintmux"; log "'$2' un-pinned — --no-tmux (foreground) is allowed again";;
   models|backends) echo "== models =="; for b in $(list_backends_inline); do echo "  $b"; done;;
   adopt) [ -n "${2:-}" ] && [ -n "${3:-}" ] || die "usage: crew adopt <name> <tmux-session> [--sid <uuid>] [--dir <path>] [--model <label>]"
     # Register an EXTERNALLY-managed tmux session (e.g. the main `work` session that
