@@ -538,6 +538,15 @@ ensure_session(){
   local keyf="$CREW_STATE/$name.key"
   local modef="$CREW_STATE/$name.notmux"
   local fgpidf="$CREW_STATE/$name.fgpid"
+  # tmux-pinned session (e.g. an always-on agent like `main`): a <name>.pintmux marker forbids
+  # no-tmux — a foreground session dies when its terminal closes, which for an always-on agent
+  # means it silently stops answering @mentions/cron. Force tmux and warn instead of obeying
+  # --no-tmux. Clear the pin with `rm <state>/<name>.pintmux` if you really want foreground.
+  if [ -f "$CREW_STATE/$name.pintmux" ] && [ "$no_tmux" = 1 ]; then
+    [ "${NO_TMUX_EXPLICIT:-0}" = 1 ] && log "'$name' is pinned to tmux (always-on); ignoring --no-tmux. Un-pin: rm $CREW_STATE/$name.pintmux"
+    no_tmux=0; NO_TMUX_EXPLICIT=1   # force tmux; treat as explicit so remembered-mode read is skipped
+    rm -f "$modef" 2>/dev/null || true   # scrub any stale foreground-mode memory
+  fi
   # Mode (tmux/no-tmux) is part of session identity: unless the caller EXPLICITLY passed
   # --tmux/--no-tmux, honor the mode this session last launched with. Prevents the same
   # name resolving to two different live sessions (one tmux, one foreground).
@@ -992,7 +1001,7 @@ EOF
       if [ "$p_dry" = 1 ]; then echo "  would release '$nm' (idle ${age_d}d)"; reaped=$((reaped+1)); continue; fi
       tmux kill-session -t "$(tmux_name_for "$nm")" 2>/dev/null || true
       if [ "$p_purge" = 1 ] && [ -f "$sidf" ]; then s=$(cat "$sidf" 2>/dev/null); rm -f "$HOME"/.claude/projects/*/"$s".jsonl 2>/dev/null || true; fi
-      rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid" "$CREW_STATE/$nm.tmuxname"
+      rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid" "$CREW_STATE/$nm.tmuxname" "$CREW_STATE/$nm.pintmux"
       if [ -f "$REG" ]; then t=$(mktemp) && awk -F'\t' -v m="$nm" '$2!=m' "$REG" > "$t" && mv "$t" "$REG"; fi
       echo "  released '$nm' (idle ${age_d}d$( [ "$p_purge" = 1 ] && printf ', transcript purged'))"
       reaped=$((reaped+1))
@@ -1243,7 +1252,7 @@ EOF
     if [ "$purge" = 1 ] && [ -f "$sidf" ]; then
       psid=$(cat "$sidf"); rm -f "$HOME"/.claude/projects/*/"$psid".jsonl 2>/dev/null && log "purged transcript $psid" || true
     fi
-    rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid" "$CREW_STATE/$nm.tmuxname"
+    rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid" "$CREW_STATE/$nm.tmuxname" "$CREW_STATE/$nm.pintmux"
     if [ -f "$REG" ]; then t=$(mktemp) && awk -F'\t' -v m="$nm" '$2!=m' "$REG" > "$t" && mv "$t" "$REG"; fi
     log "deleted session '$nm' (tmux + sid + registry$( [ "$purge" = 1 ] && printf ' + transcript' ))"
     ;;
