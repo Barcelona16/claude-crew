@@ -1128,8 +1128,9 @@ function renderDaily(d){const days=d.daily||[];if(!days.length){$('#daily').inne
     return '<div class=dcol title="'+esc(x.day)+' 新增 '+fmtK(x.newTokens)+' · '+fmtK(x.turns)+' 请求"><div>'+fmtK(x.newTokens)+'</div><div class=dbarwrap><div class=dbar style=height:'+h+'px></div></div><div class=dday>'+esc(x.day.slice(5))+'</div></div>';
   }).join('');}
 function draw(){
-  const d=_d;if(!d||!d.buckets.length)return;const cv=$('#tokenChart');const dpr=window.devicePixelRatio||1;
+  const cv=$('#tokenChart');const dpr=window.devicePixelRatio||1;
   const W0=cv.clientWidth||800,H0=220;cv.width=W0*dpr;cv.height=H0*dpr;const g=cv.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W0,H0);
+  const d=_d;if(!d||!d.buckets.length){_geom=null;return;}   // clear FIRST, then bail — an empty view must blank the chart, not keep the previous key's line
   const padL=52,padR=16,padT=10,padB=22,W=W0-padL-padR,H=H0-padT-padB,bs=d.buckets;
   const t0=bs[0].t,t1=bs[bs.length-1].t+(d.bucketMin||10)*60000,tspan=Math.max(1,t1-t0);
   let mx=1;bs.forEach(b=>{mx=Math.max(mx,b.newTokens||0);});
