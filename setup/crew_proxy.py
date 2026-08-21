@@ -496,6 +496,13 @@ class UsageSeries:
             b["outTok"] += int(out_tok or 0)
             self._dirty = True
 
+    def labels(self):
+        """Every login label that has recorded usage (keys of the bucket store). Includes
+        'direct' (non-gateway traffic) and orphans (a login since removed from the auth
+        table) — so the admin usage view can surface traffic the login table forgot."""
+        with self._lock:
+            return sorted(k for k, m in self._buckets.items() if m)
+
     def prune(self, now=None):
         if now is None:
             now = time.time()
@@ -1040,9 +1047,9 @@ async function load(){
   if(d.isAdmin){populateViewsel();loadAdmin();}
 }
 function populateViewsel(){
-  const sel=$('#viewsel');const logins=(_d&&_d.logins)||[];
+  const sel=$('#viewsel');const logins=(_d&&_d.logins)||[];const orphans=new Set((_d&&_d.orphan_logins)||[]);
   sel.innerHTML='<option value="">我自己('+esc(SELFLOGIN||'')+')</option><option value="__all__">全部人合计</option>'+
-    logins.map(l=>'<option value="'+esc(l)+'">'+esc(l)+'</option>').join('');
+    logins.map(l=>'<option value="'+esc(l)+'">'+esc(l)+(orphans.has(l)?(l==='direct'?' · 直连/未走网关':' · 未登录(孤儿)'):'')+'</option>').join('');
   sel.value=VIEW;
 }
 function logout(clear,keepmsg){if(clear!==false){KEY='';sessionStorage.removeItem('crewKey');}VIEW='';_d=null;
@@ -1329,8 +1336,13 @@ class Handler(BaseHTTPRequestHandler):
         out["isAdmin"] = bool(entry.get("admin"))
         if entry.get("admin"):
             # give the admin dropdown the login list here, so it needs no extra (and no
-            # unauthenticated /api/status) call through the gateway.
-            out["logins"] = sorted(load_gateway_auth().keys())
+            # unauthenticated /api/status) call through the gateway. Union the login table
+            # with every label that actually has usage, so 'direct' and orphaned (removed)
+            # logins are viewable too — otherwise their traffic is invisible per-key.
+            authset = set(load_gateway_auth().keys())
+            usage_labels = set(USAGE.labels())
+            out["logins"] = sorted(authset | usage_labels)
+            out["orphan_logins"] = sorted(usage_labels - authset)  # usage but no login entry
         return self._send_json(out)
 
     # -- pool health: any valid login key may see which pool keys are down (health only,
