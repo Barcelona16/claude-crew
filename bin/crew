@@ -135,7 +135,15 @@ mtime(){ stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 # An ADOPTED/external session (a `<name>.tmux` override file exists — e.g. the main `work`
 # session that bootstrap/start.sh manages, not crew) uses that recorded name verbatim, so
 # `crew attach/ls/send` reach the real tmux while crew never owns its lifecycle.
-tmux_name_for(){ if [ -f "$CREW_STATE/$1.tmux" ]; then cat "$CREW_STATE/$1.tmux"; else printf '%s' "$TMUX_PREFIX$1"; fi; }
+tmux_name_for(){
+  # <name>.tmuxname: a tmux-name override that does NOT mark the session adopted (crew still
+  # owns/restarts it) — lets crew own a session whose tmux is named e.g. `work`. <name>.tmux:
+  # the legacy adopt marker (also overrides the name, but is_adopted keys off it → crew won't
+  # spawn/stop/kill it). Fall back to the crew- prefixed default.
+  if [ -f "$CREW_STATE/$1.tmuxname" ]; then cat "$CREW_STATE/$1.tmuxname"
+  elif [ -f "$CREW_STATE/$1.tmux" ]; then cat "$CREW_STATE/$1.tmux"
+  else printf '%s' "$TMUX_PREFIX$1"; fi
+}
 is_adopted(){ [ -f "$CREW_STATE/$1.tmux" ]; }
 # Most-recent-activity epoch for a session: max mtime across its transcript JSONL and its
 # .sid/.backend/.key state. Used to sort `crew ls` so the sessions you're working in float
@@ -511,7 +519,7 @@ fg_live(){
   if kill -0 "$pid" 2>/dev/null; then return 0; else rm -f "$fgpidf" 2>/dev/null; return 1; fi
 }
 ensure_session(){
-  local name="$1" backend="$2" fresh="$3" yolo="$4" no_tmux="${5:-0}" tmux_s="$TMUX_PREFIX$1"
+  local name="$1" backend="$2" fresh="$3" yolo="$4" no_tmux="${5:-0}" tmux_s; tmux_s=$(tmux_name_for "$1")
   crew_autoprune   # opportunistic, throttled, backgrounded — never blocks this spawn
   # Adopted/external session (e.g. the main `work` session managed by bootstrap/start.sh):
   # crew doesn't spawn or own its lifecycle — the caller just attaches to the live tmux.
@@ -984,7 +992,7 @@ EOF
       if [ "$p_dry" = 1 ]; then echo "  would release '$nm' (idle ${age_d}d)"; reaped=$((reaped+1)); continue; fi
       tmux kill-session -t "$(tmux_name_for "$nm")" 2>/dev/null || true
       if [ "$p_purge" = 1 ] && [ -f "$sidf" ]; then s=$(cat "$sidf" 2>/dev/null); rm -f "$HOME"/.claude/projects/*/"$s".jsonl 2>/dev/null || true; fi
-      rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid"
+      rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid" "$CREW_STATE/$nm.tmuxname"
       if [ -f "$REG" ]; then t=$(mktemp) && awk -F'\t' -v m="$nm" '$2!=m' "$REG" > "$t" && mv "$t" "$REG"; fi
       echo "  released '$nm' (idle ${age_d}d$( [ "$p_purge" = 1 ] && printf ', transcript purged'))"
       reaped=$((reaped+1))
@@ -1235,7 +1243,7 @@ EOF
     if [ "$purge" = 1 ] && [ -f "$sidf" ]; then
       psid=$(cat "$sidf"); rm -f "$HOME"/.claude/projects/*/"$psid".jsonl 2>/dev/null && log "purged transcript $psid" || true
     fi
-    rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid"
+    rm -f "$sidf" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid" "$CREW_STATE/$nm.tmuxname"
     if [ -f "$REG" ]; then t=$(mktemp) && awk -F'\t' -v m="$nm" '$2!=m' "$REG" > "$t" && mv "$t" "$REG"; fi
     log "deleted session '$nm' (tmux + sid + registry$( [ "$purge" = 1 ] && printf ' + transcript' ))"
     ;;
