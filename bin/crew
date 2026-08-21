@@ -1234,6 +1234,10 @@ EOF
     fi
     awk 'NR>=2{ if($0 !~ /^#/) exit; sub(/^# ?/,""); print }' "$0";;
   *)
+    # Let an optional ext/*.sh handle a subcommand it registered (e.g. joycode-export). The
+    # ext defines crew_ext_cmd(); it should `return 0` if it handled "$1" (and exit itself),
+    # or `return 1` to fall through to normal session-name handling. Core has no such command.
+    if declare -F crew_ext_cmd >/dev/null 2>&1; then crew_ext_cmd "$@" && exit 0 || true; fi
     first="$1"; shift || true; rest="$*"
     if { [ -f "$REG" ] && awk -F'\t' -v m="$first" '$2==m{ok=1}END{exit !ok}' "$REG"; } || [[ "$first" =~ ^[A-Za-z0-9._-]{1,32}$ ]]; then
       name=$(resolve_explicit_name "$first" "$PWD"); task="$rest"
