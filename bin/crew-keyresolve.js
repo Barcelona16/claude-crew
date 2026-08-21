@@ -70,21 +70,40 @@ if (ci >= 0) { dprov = rdef.slice(0, ci); dmodel = rdef.slice(ci + 1); }
 
 // A model's backend conf tells us its BASE_URL (routing mode) when there is no live env.
 // Match by realmodel against each backends/*.conf MODEL ("provider,realmodel" or "realmodel").
+// Returns { base, prov } — prov is the provider prefix when the conf carries one
+// ("joycode-oai,Kimi-K3" -> "joycode-oai"), so a policy-less model can still resolve the
+// key its CCR provider actually uses (crew-proxy passthrough rides that provider's key).
 function deriveBaseFromBackends(rm) {
-  if (!rm || rm === "?") return "";
+  var out = { base: "", prov: "" };
+  if (!rm || rm === "?") return out;
   try {
-    var dir = CONF + "/backends", files = fs.readdirSync(dir), i, txt, m, mm, c, bu;
+    var dir = CONF + "/backends", files, i, txt, m, mm, c, bu;
+    // The session's .backend / CREW_MODEL value may be a backend NAME ("kimi-k3") whose
+    // realmodel ("Kimi-K3") differs in case — an exact-name file beats the realmodel scan.
+    txt = rd(dir + "/" + rm + ".conf");
+    if (txt) {
+      m = /(^|\n)[ \t]*MODEL[ \t]*=[ \t]*([^\n]+)/.exec(txt);
+      if (m) {
+        mm = m[2].trim(); c = mm.indexOf(",");
+        if (c >= 0) { out.prov = mm.slice(0, c).trim(); mm = mm.slice(c + 1); }
+        out.base = ((/(^|\n)[ \t]*BASE_URL[ \t]*=[ \t]*([^\n]+)/.exec(txt) || [])[2] || "").trim();
+        if (out.prov || out.base) return out;
+      }
+    }
+    files = fs.readdirSync(dir);
     for (i = 0; i < files.length; i++) {
       if (!/\.conf$/.test(files[i])) continue;
       txt = rd(dir + "/" + files[i]);
       m = /(^|\n)[ \t]*MODEL[ \t]*=[ \t]*([^\n]+)/.exec(txt); if (!m) continue;
-      mm = m[2].trim(); c = mm.indexOf(","); if (c >= 0) mm = mm.slice(c + 1);
-      if (mm.trim() !== rm) continue;
+      mm = m[2].trim(); c = mm.indexOf(",");
+      if (c >= 0) { out.prov = mm.slice(0, c).trim(); mm = mm.slice(c + 1); }
+      if (mm.trim() !== rm) { out.prov = ""; continue; }
       bu = /(^|\n)[ \t]*BASE_URL[ \t]*=[ \t]*([^\n]+)/.exec(txt);
-      return bu ? bu[2].trim() : "";
+      out.base = bu ? bu[2].trim() : "";
+      return out;
     }
   } catch (e) {}
-  return "";
+  return out;
 }
 
 // ---- model ----
@@ -96,7 +115,8 @@ var realmodel = model;
 
 // ---- routing mode: live ANTHROPIC_BASE_URL wins; else derive from conf; else proxy default ----
 var base = process.env.ANTHROPIC_BASE_URL || "";
-if (!base) base = deriveBaseFromBackends(realmodel);
+var bconf = base ? { base: "", prov: "" } : deriveBaseFromBackends(realmodel);
+if (!base) base = bconf.base;
 var isProxy = /:8788/.test(base), isCCR = /:3456/.test(base);
 if (!base && !isProxy && !isCCR) isProxy = true;   // crew standard: all backends route via :8788
 
@@ -107,8 +127,17 @@ if (key === "-") key = "";
 if (!key) {
   if (isProxy) {
     var mname = realmodel || dmodel;
-    var pol = policy[mname] || policy[process.env.CREW_BACKEND || ""] || null;
+    var pol = policy[mname] || null;
     if (pol && pol.length) key = pol[0];
+    // No policy line for this model -> crew-proxy passes it through to CCR, where the
+    // provider named in the backend conf (or the CCR model string) supplies the real key.
+    // Derive THAT — never fall back to policy[CREW_BACKEND]: that ambient env var leaks in
+    // from whatever crew session ran `crew ls` and would mislabel unrelated sessions
+    // (e.g. a joycode-keyed session displaying "personal").
+    if (!key) {
+      var pprov = mprov || bconf.prov || dprov, ptok = provKey(pprov) || provKey(dprov);
+      if (ptok) key = tok2alias[ptok] || (ptok.length > 10 ? (ptok.slice(0, 4) + "…" + ptok.slice(-3)) : ptok);
+    }
   } else if (isCCR) {
     var prov = mprov || dprov, tok = provKey(prov) || provKey(dprov);
     if (tok) key = tok2alias[tok] || (tok.length > 10 ? (tok.slice(0, 4) + "…" + tok.slice(-3)) : tok);
