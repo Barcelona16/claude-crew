@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# CREW_PROXY_REPO_REV: (run `git rev-parse --short HEAD` in the crew repo and fill this when cutting an install)
 """crew-proxy — a thin local reverse proxy between Claude Code and claude-code-router (CCR).
 
     claude  ->  crew-proxy (:8788)  ->  CCR (:3456)  ->  upstream gateway
