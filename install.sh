@@ -3,9 +3,17 @@
 #   bash install.sh                 # symlink into ~/.local/bin (default) + statusLine
 #   PREFIX=/usr/local bash install.sh   # system-wide (may need sudo)
 #   bash install.sh --no-statusline # skip touching ~/.claude/settings.json
+#   bash install.sh --clean-stale   # 装完后清残留会话状态(tmux 死了但 crew 还标 live)
+#   bash install.sh --clean-stale --dry-run   # 只打印会清什么,不动
 set -euo pipefail
 NO_STATUSLINE=0
-for a in "$@"; do case "$a" in --no-statusline) NO_STATUSLINE=1;; esac; done
+CLEAN_STALE=0
+DRY_RUN=0
+for a in "$@"; do case "$a" in
+  --no-statusline) NO_STATUSLINE=1;;
+  --clean-stale)   CLEAN_STALE=1;;
+  --dry-run)       DRY_RUN=1;;
+esac; done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local}"
 BINDIR="$PREFIX/bin"
@@ -51,4 +59,45 @@ elif command -v node >/dev/null 2>&1; then
   ' || echo "[install] WARN: statusLine wiring failed; set statusLine.command = bash $STATUSLINE_SH manually"
 else
   echo "[install] node not found; skipping statusLine. Set statusLine.command = bash $STATUSLINE_SH manually"
+fi
+
+# --- 清残留会话状态(--clean-stale)-------------------------------------------
+# crew ls 判 live 看两处:(1) tmux has-session (2) fgpid 存活。任一命中就 live。
+# 残留场景:tmux 已被 kill / 电脑重启后 tmux server 全空,但 crew_state/<name>.sid
+# 还在;下次 crew ls 显示 resumable,并没错——问题是 fg_live 分支:.notmux=1 +
+# .fgpid 指向早死的 pid → crew 会误报 live(fgpid 复用到别的 pid 就更乱)。
+# 这段清:.notmux=1 但 .fgpid 里的 pid 已经不是 claude 进程 → 删 fgpid 让状态如实。
+if [ "$CLEAN_STALE" = 1 ]; then
+  STATE="${CREW_STATE:-$HOME/.local/share/claude-crew}"
+  if [ -d "$STATE" ]; then
+    echo "[install] 扫 $STATE 找残留 fgpid…"
+    cleaned=0
+    for fgf in "$STATE"/*.fgpid; do
+      [ -f "$fgf" ] || continue
+      nm=$(basename "$fgf" .fgpid)
+      pid=$(cat "$fgf" 2>/dev/null | tr -d '[:space:]')
+      case "$pid" in ''|*[!0-9]*)
+        echo "  [stale] $nm fgpid 内容非数字($pid) → rm"
+        [ "$DRY_RUN" = 0 ] && rm -f "$fgf"; cleaned=$((cleaned+1)); continue;;
+      esac
+      if ! kill -0 "$pid" 2>/dev/null; then
+        echo "  [stale] $nm fgpid=$pid 已死 → rm"
+        [ "$DRY_RUN" = 0 ] && rm -f "$fgf"; cleaned=$((cleaned+1)); continue
+      fi
+      # pid 存活但不是 claude(pid 复用到别的进程) → 也算残留
+      cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+      case "$cmd" in
+        *claude*) : ;;  # 真是 claude,保留
+        *)
+          echo "  [stale] $nm fgpid=$pid 存活但非 claude($cmd) → rm"
+          [ "$DRY_RUN" = 0 ] && rm -f "$fgf"; cleaned=$((cleaned+1)) ;;
+      esac
+    done
+    if [ "$cleaned" = 0 ]; then
+      echo "[install] 无残留 fgpid"
+    else
+      echo "[install] 清了 $cleaned 条残留 fgpid$([ "$DRY_RUN" = 1 ] && echo ' [dry-run 未真删]')"
+    fi
+    echo "[install] 建议再跑 'crew prune --dry-run' 看长期闲置(>7d)会话"
+  fi
 fi
