@@ -35,6 +35,7 @@
 #   crew models           list available model presets
 #   crew keys             list api-key aliases from ~/.config/claude-crew/keys.conf
 #   crew up               ensure dependency services are up (CCR :3456 + crew-proxy :8788)
+#   crew version [--check]  show crew version (git commit); --check compares to the remote
 #
 # MESSAGING (between sessions)
 #   crew send [--from X] [--nudge] <name> "msg"   drop a message in <name>'s mailbox
@@ -107,6 +108,47 @@ KEYRESOLVE="$CREW_BIN_DIR/crew-keyresolve.js"
 
 die(){ echo "[crew] $*" >&2; exit 1; }
 log(){ echo "[crew] $*" >&2; }
+
+# --- version ----------------------------------------------------------------
+# Version is the git commit crew runs from (zero maintenance — no hand-bumped string).
+# REPO = the repo root ($CREW_BIN_DIR is bin/, resolved through symlinks above).
+CREW_REPO="$(cd "$CREW_BIN_DIR/.." 2>/dev/null && pwd)"
+_is_git_repo(){ git -C "$CREW_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; }
+crew_version_str(){
+  if _is_git_repo; then
+    local h d b dirty=""
+    h=$(git -C "$CREW_REPO" rev-parse --short HEAD 2>/dev/null)
+    d=$(git -C "$CREW_REPO" log -1 --format=%cs 2>/dev/null)
+    b=$(git -C "$CREW_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    [ -n "$(git -C "$CREW_REPO" status --porcelain 2>/dev/null)" ] && dirty=" +dirty"
+    printf 'crew %s (%s) [%s]%s' "$h" "$d" "$b" "$dirty"
+  elif [ -f "$CREW_REPO/VERSION" ]; then
+    printf 'crew %s (installed)' "$(head -1 "$CREW_REPO/VERSION" 2>/dev/null)"
+  else
+    printf 'crew (unknown — not a git checkout)'
+  fi
+}
+# Online freshness check vs the tracked upstream. Silent-degrades if offline / no upstream.
+crew_version_check(){
+  if ! _is_git_repo; then log "$(crew_version_str) — 非 git 安装,无法在线比对"; return 0; fi
+  local up rem br
+  up=$(git -C "$CREW_REPO" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)
+  if [ -n "$up" ]; then rem="${up%%/*}"; br="${up#*/}"; else rem="origin"; br="main"; up="$rem/$br"; fi
+  git -C "$CREW_REPO" fetch "$rem" "$br" >/dev/null 2>&1 || { log "$(crew_version_str) — 无法 fetch $rem(离线?),仅显示本地版本"; return 0; }
+  local behind ahead
+  behind=$(git -C "$CREW_REPO" rev-list --count "HEAD..$up" 2>/dev/null || echo 0)
+  ahead=$(git -C "$CREW_REPO" rev-list --count "$up..HEAD" 2>/dev/null || echo 0)
+  if [ "${behind:-0}" -gt 0 ] && [ "${ahead:-0}" -gt 0 ]; then
+    log "⚠ 与 $up 分叉:落后 $behind、领先 $ahead(手动处理:cd $CREW_REPO && git pull --rebase)"
+  elif [ "${behind:-0}" -gt 0 ]; then
+    log "⚠ 落后 $up $behind 个提交 — 更新:cd $CREW_REPO && git pull"
+    git -C "$CREW_REPO" log --oneline "HEAD..$up" 2>/dev/null | head -5 | sed 's/^/    /' >&2
+  elif [ "${ahead:-0}" -gt 0 ]; then
+    log "本地领先 $up $ahead 个提交(有未推送改动)"
+  else
+    log "✓ 已是最新(= $up)"
+  fi
+}
 
 # --- portable helpers (no lsof/ss/node dependency) --------------------------
 gen_uuid(){
@@ -1075,9 +1117,15 @@ EOF
     echo "== prune: released $reaped, kept $kept (threshold ${p_days}d$( [ "$p_dry" = 1 ] && printf ', dry-run'))"
     ;;
   up) crew_dep_up "CCR" "${CREW_CCR_PORT:-3456}" "${CREW_CCR_LABEL:-com.claudecrew.ccr}" "${CREW_CCR_UNIT:-claudecrew-ccr}"; crew_proxy_up; crew_ext_dep_up ""; crew_autoprune;;
+  version|-v|--version)
+    echo "$(crew_version_str)"
+    case "${2:-}" in --check|-c) crew_version_check;; esac
+    ;;
   doctor)
     # Read-only health check: services up? config sane? every key-policy alias resolvable?
     echo "== crew doctor =="
+    echo "  $(crew_version_str)"
+    crew_version_check   # 轻量在线比对(离线静默降级)
     ccrp="${CREW_CCR_PORT:-3456}"; prxp="${CREW_PROXY_PORT:-8788}"
     if port_listening "$ccrp"; then echo "  [ok]   CCR listening on :$ccrp"; else echo "  [WARN] CCR not listening on :$ccrp (crew up, or check launchd/systemd)"; fi
     if port_listening "$prxp"; then echo "  [ok]   crew-proxy listening on :$prxp"; else echo "  [WARN] crew-proxy not listening on :$prxp (optional; presets point here)"; fi
