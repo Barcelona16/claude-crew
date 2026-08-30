@@ -205,6 +205,18 @@ case "$crew_src" in
   *) _ng "kill 拒消息缺 refuse 关键字" "";;
 esac
 
+# --- Case 12: bug ③ 修 tmux 已存在时不 new-session,直接 send-keys(agent-bridge 11:42 派)---
+# 场景:bootstrap 外层已建 tmux work → 内层 crew --no-tmux + pinned 判据走 tmux 分支 →
+# 原来 tmux new-session 撞已存在失败,send-keys 打到空 pane,claude 不起 → 空 pane bug ③。
+# 修:pinned+tmux 分支加 tmux has-session 检测,已存在就跳过 new-session,直接 send-keys。
+echo "--- Case 12: bug ③ 修 tmux 已存在时跳过 new-session ---"
+case "$crew_src" in
+  *"tmux has-session -t \"\$tmux_s\""*) _ok "crew bin pinned tmux 分支加 has-session 检测";;
+  *) _ng "crew bin pinned tmux 分支未加 has-session 检测(bug ③ 未修)" "";;
+esac
+grep -A 4 'if tmux has-session -t "\$tmux_s"' "$(dirname "$0")/../bin/crew" | grep -q "跳过 new-session" && _ok "已存在分支明确 log '跳过 new-session'" || _ng "无 log 跳过 new-session" ""
+grep -A 6 'if tmux has-session -t "\$tmux_s"' "$(dirname "$0")/../bin/crew" | grep -q "tmux -u new-session -d -s" && _ok "不存在分支保留 new-session" || _ng "缺 else 分支(不存在时该起 new-session)" ""
+
 # --- 结果汇总 ---
 echo ""
 echo "=== Total: $total | Pass: $pass | Fail: $fail ==="
