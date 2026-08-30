@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# crew-tmux — tmux 集成层(2026-08-30 crew L 重构 Week 2)
+#
+# 职责:管理 tmux 会话生命周期,防 nesting 死循环
+#
+# 用法:
+#   crew-tmux exists <name>            # session 存在返 exit 0
+#   crew-tmux ensure <name> [--size WxH]  # 不存在就 new-session -d 起空 shell
+#   crew-tmux run <name> <script>      # 在 session 里跑 script(用 send-keys 或 exec-in-pane)
+#   crew-tmux attach <name>            # exec tmux attach(阻塞,取代当前进程)
+#   crew-tmux kill <name>              # kill-session
+#   crew-tmux list                     # list-sessions -F '#{session_name}'
+#   crew-tmux current                  # 当前 shell 所在 tmux session 名(靠 $TMUX + display-message)
+#   crew-tmux is-inside <name>         # 判当前 shell 是否在指定 session 里(B2 防自杀关键)
+#   crew-tmux resolve <name>           # 从 crew name 解析真实 tmux name(处理 adopted / crew-前缀)
+#
+# 特性:
+# - 所有 tmux 命令带 timeout 3s(D2 精神)
+# - 精确名匹配(不用 has-session -t 前缀匹配)
+# - is-inside 帮助上层防自杀(kill 自己 host 死循环)
+# - resolve 支持 adopted 会话(crew-session get <n> tmux 存在时用该值)
+#
+# 环境变量:
+#   CREW_STATE  crew-session 状态目录(resolve 会调 crew-session)
+
+set -uo pipefail
+
+CREW_STATE="${CREW_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/claude-crew}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CREW_SESSION_BIN="$SCRIPT_DIR/crew-session"
+
+# 精确名匹配(不用 has-session -t,它是前缀匹配,踩过 crew-work 中 crew-workflow-code)
+tmux_exact_has() {
+  local target="$1"
+  local names
+  names=$(timeout 3 tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+  echo "$names" | grep -qFx "$target"
+}
+
+# resolve <name> → 真实 tmux name(处理 adopted / crew-前缀)
+# 顺序:crew-session get <name> tmux(adopted 外部 tmux name)→ crew-session get <name> tmuxname → 双前缀查
+cmd_resolve() {
+  local name="$1"
+  [ -z "$name" ] && { echo "usage: crew-tmux resolve <name>" >&2; return 2; }
+  # 1. adopted:tmux 字段存在 → 用它
+  if [ -x "$CREW_SESSION_BIN" ]; then
+    local adopted_tmux
+    adopted_tmux=$("$CREW_SESSION_BIN" get "$name" tmux 2>/dev/null || true)
+    [ -n "$adopted_tmux" ] && { echo "$adopted_tmux"; return 0; }
+    local stored_tmux
+    stored_tmux=$("$CREW_SESSION_BIN" get "$name" tmuxname 2>/dev/null || true)
+    [ -n "$stored_tmux" ] && { echo "$stored_tmux"; return 0; }
+  fi
+  # 2. 双前缀查:name 或 crew-name
+  if tmux_exact_has "$name"; then
+    echo "$name"; return 0
+  fi
+  if tmux_exact_has "crew-$name"; then
+    echo "crew-$name"; return 0
+  fi
+  # 3. 默认返 crew-<name>(crew 起会话时的默认前缀)
+  echo "crew-$name"
+  return 1  # 未 live,但返默认名供上层参考
+}
+
+cmd_exists() {
+  local name="$1"
+  local resolved
+  resolved=$(cmd_resolve "$name" 2>/dev/null || true)
+  [ -z "$resolved" ] && return 1
+  tmux_exact_has "$resolved"
+}
+
+cmd_ensure() {
+  local name="$1"; shift
+  local size="200x50"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --size) size="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  local w="${size%x*}" h="${size#*x}"
+  local resolved
+  resolved=$(cmd_resolve "$name" 2>/dev/null || true)
+  if tmux_exact_has "$resolved"; then
+    echo "[crew-tmux] session '$resolved' 已存在,跳过 new-session"
+    return 0
+  fi
+  # 不存在,起(新 session 名默认 crew-<name>,除非 tmuxname 已设)
+  local target="${resolved:-crew-$name}"
+  timeout 5 env -u TMUX tmux -u new-session -d -s "$target" -x "$w" -y "$h" 2>&1
+  local ec=$?
+  if [ $ec -eq 0 ]; then
+    echo "[crew-tmux] 新起 tmux session '$target'"
+    # 记 tmuxname(供未来 resolve 用)
+    [ -x "$CREW_SESSION_BIN" ] && "$CREW_SESSION_BIN" set "$name" tmuxname "$target" 2>/dev/null || true
+  else
+    echo "[crew-tmux] tmux new-session '$target' 失败 rc=$ec" >&2
+  fi
+  return $ec
+}
+
+# run name script — 在 session 里跑 script(通过 send-keys)
+# 前提:session 已存在(ensure 先),pane 里有空 shell 准备接受输入
+cmd_run() {
+  local name="$1" script="$2"
+  local resolved
+  resolved=$(cmd_resolve "$name")
+  if ! tmux_exact_has "$resolved"; then
+    echo "[crew-tmux] session '$resolved' 不存在,先跑 ensure" >&2
+    return 1
+  fi
+  [ -f "$script" ] || { echo "[crew-tmux] script '$script' 不存在" >&2; return 2; }
+  # send-keys 只传短命令 "bash <script>"(A1 精神),避 quoting
+  timeout 3 tmux send-keys -t "$resolved" -l "bash $script"
+  sleep 0.3
+  timeout 3 tmux send-keys -t "$resolved" Enter
+  echo "[crew-tmux] 灌入 'bash $script' 到 '$resolved'"
+}
+
+cmd_attach() {
+  local name="$1"
+  local resolved
+  resolved=$(cmd_resolve "$name")
+  tmux_exact_has "$resolved" || { echo "[crew-tmux] '$resolved' 不存在" >&2; return 1; }
+  exec tmux -u attach -t "$resolved"
+}
+
+cmd_kill() {
+  local name="$1"
+  local resolved
+  resolved=$(cmd_resolve "$name")
+  if ! tmux_exact_has "$resolved"; then
+    echo "[crew-tmux] '$resolved' 不存在,跳过"
+    return 0
+  fi
+  timeout 3 tmux kill-session -t "$resolved" 2>&1
+}
+
+cmd_list() {
+  timeout 3 tmux list-sessions -F '#{session_name}' 2>/dev/null || true
+}
+
+# current — 当前 shell 所在 tmux session 名(靠 $TMUX + display-message)
+cmd_current() {
+  [ -z "${TMUX:-}" ] && { echo ""; return 1; }
+  timeout 3 tmux display-message -p '#S' 2>/dev/null | tr -d '\n'
+}
+
+# is-inside name — 判当前 shell 是否在指定 session 里(B2 防自杀关键)
+# 匹配规则:current session 等于 resolve(name)
+cmd_is_inside() {
+  local name="$1"
+  local current
+  current=$(cmd_current)
+  [ -z "$current" ] && return 1
+  local resolved
+  resolved=$(cmd_resolve "$name")
+  [ "$current" = "$resolved" ]
+}
+
+case "${1:-}" in
+  exists)    [ $# -ge 2 ] || { echo "usage: crew-tmux exists <name>" >&2; exit 2; }
+             cmd_exists "$2" ;;
+  ensure)    [ $# -ge 2 ] || { echo "usage: crew-tmux ensure <name> [--size WxH]" >&2; exit 2; }
+             shift; cmd_ensure "$@" ;;
+  run)       [ $# -ge 3 ] || { echo "usage: crew-tmux run <name> <script>" >&2; exit 2; }
+             cmd_run "$2" "$3" ;;
+  attach)    [ $# -ge 2 ] || { echo "usage: crew-tmux attach <name>" >&2; exit 2; }
+             cmd_attach "$2" ;;
+  kill)      [ $# -ge 2 ] || { echo "usage: crew-tmux kill <name>" >&2; exit 2; }
+             cmd_kill "$2" ;;
+  list)      cmd_list ;;
+  current)   cmd_current ;;
+  is-inside) [ $# -ge 2 ] || { echo "usage: crew-tmux is-inside <name>" >&2; exit 2; }
+             cmd_is_inside "$2" ;;
+  resolve)   [ $# -ge 2 ] || { echo "usage: crew-tmux resolve <name>" >&2; exit 2; }
+             cmd_resolve "$2" ;;
+  help|--help|-h) sed -n '3,22p' "$0" ;;
+  '') echo "usage: crew-tmux <exists|ensure|run|attach|kill|list|current|is-inside|resolve|help>" >&2; exit 2 ;;
+  *) echo "[crew-tmux] unknown command: $1" >&2; exit 2 ;;
+esac

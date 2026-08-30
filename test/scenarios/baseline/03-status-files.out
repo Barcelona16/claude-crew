@@ -1,0 +1,10 @@
+---state files---
+mock-test2.backend
+mock-test2.fgpid
+mock-test2.notmux
+mock-test2.sid
+registry
+---.backend---
+mock
+---.notmux---
+1

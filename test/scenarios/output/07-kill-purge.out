@@ -1,0 +1,4 @@
+[crew-tmux] 'crew-kill-test' 不存在,跳过
+[crew] deleted session 'kill-test'
+---after kill state files---
+gone

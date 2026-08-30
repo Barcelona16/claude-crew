@@ -1,0 +1,11 @@
+[crew] queued -> inbox of 'inbox-test' (from crew send)
+---peek---
+── #1  0001-2026-08-30T12:55:24+00:00.msg ──
+hello world
+
+---consume---
+── #1  0001-2026-08-30T12:55:24+00:00.msg ──
+hello world
+
+(consumed 1 message(s))
+---after consume peek---

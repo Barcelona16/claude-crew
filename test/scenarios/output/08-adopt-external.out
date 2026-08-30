@@ -1,0 +1,8 @@
+[crew] warn: tmux session 'mock-tmux-name' not live right now (adopting anyway)
+[crew] adopted 'adopt-test' -> tmux 'mock-tmux-name' (sid <SID>); now in crew ls / attach. stop/kill/prune will refuse it. Un-adopt: rm /root/.local/share/claude-crew/adopt-test.tmux
+---state files---
+adopt-test.sid
+adopt-test.tmux
+---sid---
+<SID>---tmux---
+mock-tmux-name
