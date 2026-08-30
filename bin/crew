@@ -191,7 +191,8 @@ wipe_session_state(){
   rm -f "$CREW_STATE/$nm.sid" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" \
         "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid" "$CREW_STATE/$nm.tmuxname" \
         "$CREW_STATE/$nm.pintmux" "$CREW_STATE/$nm.notify" "$CREW_STATE/$nm.notify.seen" \
-        "$CREW_STATE/$nm.settings.json" "$CREW_STATE/$nm.tmux" "$CREW_STATE/$nm.policy"
+        "$CREW_STATE/$nm.settings.json" "$CREW_STATE/$nm.tmux" "$CREW_STATE/$nm.policy" \
+        "$CREW_STATE/$nm.policy_body"
   rm -rf "$CREW_STATE/inbox/$nm" 2>/dev/null || true
 }
 # Portable mtime (epoch seconds): GNU coreutils `stat -c`, else BSD/macOS `stat -f`.
@@ -802,8 +803,17 @@ ensure_session(){
     if [ -n "$_policy_body" ]; then
       case " $flags " in
         *" --append-system-prompt "*) log "WARN: --append-system-prompt already in CLAUDE_FLAGS; skipping AGENT_POLICY injection" ;;
-        *) flags="$flags --append-system-prompt $(printf %q "$_policy_body")"
-           log "AGENT_POLICY=$_eff_policy injected (template: $_policy_tmpl)" ;;
+        *)
+          # A3 修(2026-08-30 agent-bridge workflow-code 落地,规避 tmux send-keys 传超长
+          # markdown 的 quoting bug):把 policy body 写到临时文件,flags 里用 "$(cat FILE)"
+          # 让目标 shell 展开——tmux send-keys 只传短命令行,几 KB markdown 靠文件传递。
+          # 之前 flags="... --append-system-prompt $(printf %q "$_policy_body")" 会把整段
+          # markdown 塞进命令行字符串,tmux send-keys -l 逐字符输入时被 pane 解析打乱,claude 起不来。
+          local _policy_body_file="$CREW_STATE/$name.policy_body"
+          printf '%s' "$_policy_body" > "$_policy_body_file"
+          flags="$flags --append-system-prompt \"\$(cat $(printf %q "$_policy_body_file"))\""
+          log "AGENT_POLICY=$_eff_policy injected (template: $_policy_tmpl; A3 via body-file: $_policy_body_file)"
+          ;;
       esac
     fi
   fi

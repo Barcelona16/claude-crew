@@ -145,6 +145,27 @@ case "$body" in
   *) _ok "body strips pre-'---' frontmatter" ;;
 esac
 
+# --- Case 9: A3 policy body 通过文件传递(agent-bridge workflow-code 2026-08-30 加) ---
+# 目的:crew bin 里 policy 注入应写文件 + flags 里 --append-system-prompt "$(cat FILE)",
+# 规避 tmux send-keys 传超长 markdown 的 quoting bug(D2/坑① 根因)。
+# 断言 crew bin 里有 $CREW_STATE/<name>.policy_body 相关逻辑。
+echo "--- Case 9: A3 body-file policy 注入(规避 send-keys quoting bug)---"
+crew_src=$(cat "$(dirname "$0")/../bin/crew")
+case "$crew_src" in
+  *".policy_body"*) _ok "crew bin 有 .policy_body 文件传递逻辑";;
+  *) _ng "crew bin 缺 .policy_body(A3 修复未落地)" "";;
+esac
+case "$crew_src" in
+  *'--append-system-prompt \"\$(cat '*) _ok "flags 用 --append-system-prompt \"\$(cat FILE)\" 让 shell 展开";;
+  *) _ng "flags 未用 shell 展开文件(仍是长命令行,坑① 未修)" "";;
+esac
+case "$crew_src" in
+  *".policy_body\""*)
+    # kill --purge 时也清 policy_body
+    grep -q 'nm\.policy_body' "$(dirname "$0")/../bin/crew" && _ok "kill --purge 清 .policy_body 文件" || _ng "kill --purge 未清 .policy_body(悬挂文件)" "" ;;
+  *) : ;;
+esac
+
 # --- 结果汇总 ---
 echo ""
 echo "=== Total: $total | Pass: $pass | Fail: $fail ==="
