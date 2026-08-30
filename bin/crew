@@ -1143,6 +1143,17 @@ EOF
     # Stop the running tmux session but KEEP its on-disk state (.sid + transcript),
     # so `crew [--backend X] <name>` resumes it later with full history. This is how
     # you switch a session's model: `crew stop <name>` then `crew --backend Y <name>`.
+    # B2 防自杀检测(2026-08-30 agent-bridge workflow-code 落地):当前 shell 若在
+    # 目标 session 的 tmux 里,stop 会 kill 掉自己的 host pane → 命令终止 → 死循环。
+    # 判 $TMUX 环境变量属于哪个 tmux server + 当前 pane 属于哪个 session,若匹配就拒。
+    # 环境变量 CREW_STOP_ALLOW_SELF_KILL=1 显式绕过(极少用,自愿承担卡死风险)。
+    if [ -n "${TMUX:-}" ] && [ -z "${CREW_STOP_ALLOW_SELF_KILL:-}" ]; then
+      _current_tmux_session=$(tmux display-message -p '#S' 2>/dev/null || echo "")
+      _target_tmux_session=$(tmux_name_for "$2")
+      if [ -n "$_current_tmux_session" ] && [ "$_current_tmux_session" = "$_target_tmux_session" ]; then
+        die "B2: refuse to stop '$2' — you are running inside its tmux session ($_current_tmux_session). Killing it would kill this shell. Run 'crew stop $2' from OUTSIDE the tmux session, or set CREW_STOP_ALLOW_SELF_KILL=1 to override."
+      fi
+    fi
     if is_adopted "$2"; then die "'$2' is adopted/external (tmux '$(tmux_name_for "$2")') — crew won't stop it; manage it where it was started"; fi
     if tmux kill-session -t "$(tmux_name_for "$2")" 2>/dev/null; then
       log "stopped $2 (state kept; resume with: crew $2)"
@@ -1442,6 +1453,15 @@ EOF
     # Fully delete the session so it stops showing in `crew ls`: kill the tmux
     # session (if any) AND remove its on-disk state (.sid + registry line).
     # --purge additionally deletes the saved Claude transcript (irreversible).
+    # B2 防自杀检测(2026-08-30):同 stop —— 拒 kill 自己所在 tmux(会 kill 掉 host)。
+    # CREW_KILL_ALLOW_SELF=1 显式绕过。
+    if [ -n "${TMUX:-}" ] && [ -z "${CREW_KILL_ALLOW_SELF:-}" ]; then
+      _current_tmux_session=$(tmux display-message -p '#S' 2>/dev/null || echo "")
+      _target_tmux_session=$(tmux_name_for "$nm")
+      if [ -n "$_current_tmux_session" ] && [ "$_current_tmux_session" = "$_target_tmux_session" ]; then
+        die "B2: refuse to kill '$nm' — you are running inside its tmux session ($_current_tmux_session). Run 'crew kill $nm' from OUTSIDE, or set CREW_KILL_ALLOW_SELF=1 to override."
+      fi
+    fi
     if is_adopted "$nm"; then die "'$nm' is adopted/external (tmux '$(tmux_name_for "$nm")') — crew won't kill it. Un-adopt: rm $CREW_STATE/$nm.tmux"; fi
     tmux kill-session -t "$(tmux_name_for "$nm")" 2>/dev/null && log "killed tmux session $nm" || true
     if fg_live "$nm"; then kill "$(cat "$CREW_STATE/$nm.fgpid" 2>/dev/null)" 2>/dev/null && log "killed foreground session $nm" || true; fi

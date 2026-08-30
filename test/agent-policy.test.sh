@@ -183,6 +183,28 @@ case "$crew_src" in
   *) _ng "launcher 未 chmod +x" "";;
 esac
 
+# --- Case 11: B2 crew stop/kill 防自杀检测(agent-bridge workflow-code 2026-08-30 加)---
+# 目的:crew stop/kill 前判 $TMUX 是否属目标 session,匹配就拒,避免 kill 掉自己的 host pane
+# 导致命令终止、死循环(用户 09:07 事故根源之一)。
+echo "--- Case 11: B2 crew stop/kill 防自杀 ---"
+case "$crew_src" in
+  *"B2 防自杀检测"*) _ok "crew bin 有 B2 防自杀检测注释(可追溯)";;
+  *) _ng "crew bin 缺 B2 检测(未落地)" "";;
+esac
+# stop 分支应该有 TMUX 检测
+grep -A 10 "^\s*stop)" "$(dirname "$0")/../bin/crew" | grep -q "CREW_STOP_ALLOW_SELF_KILL" && _ok "stop 分支有 CREW_STOP_ALLOW_SELF_KILL 逃生阀" || _ng "stop 分支缺 CREW_STOP_ALLOW_SELF_KILL 逃生阀" ""
+# kill 分支应该有 TMUX 检测
+grep -A 10 "^\s*kill)" "$(dirname "$0")/../bin/crew" | grep -q "CREW_KILL_ALLOW_SELF" && _ok "kill 分支有 CREW_KILL_ALLOW_SELF 逃生阀" || _ng "kill 分支缺 CREW_KILL_ALLOW_SELF 逃生阀" ""
+# 匹配 refuse 消息
+case "$crew_src" in
+  *"refuse to stop"*) _ok "stop 拒消息含 'refuse to stop'";;
+  *) _ng "stop 拒消息缺 refuse 关键字" "";;
+esac
+case "$crew_src" in
+  *"refuse to kill"*) _ok "kill 拒消息含 'refuse to kill'";;
+  *) _ng "kill 拒消息缺 refuse 关键字" "";;
+esac
+
 # --- 结果汇总 ---
 echo ""
 echo "=== Total: $total | Pass: $pass | Fail: $fail ==="
