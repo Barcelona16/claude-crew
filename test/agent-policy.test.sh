@@ -166,6 +166,23 @@ case "$crew_src" in
   *) : ;;
 esac
 
+# --- Case 10: A1 start_cmd 也走文件传递(agent-bridge workflow-code 2026-08-30 加)---
+# 目的:tmux send-keys 只传短命令 "bash /tmp/crew-launch-<name>.sh"(几十字节),彻底
+# 规避 send-keys 传长命令 quoting bug。即使未来 flags 又变长(其他机制加),也不再怕。
+echo "--- Case 10: A1 start_cmd 走 /tmp/crew-launch-<name>.sh 文件 ---"
+case "$crew_src" in
+  *"/tmp/crew-launch-\$name.sh"*|*'/tmp/crew-launch-$name.sh'*) _ok "crew bin 有 /tmp/crew-launch-<name>.sh launcher 文件路径";;
+  *) _ng "crew bin 缺 launcher 文件路径" "";;
+esac
+case "$crew_src" in
+  *'tmux send-keys -t "$tmux_s" -l "bash $_launcher_file"'*) _ok "tmux send-keys 只传短命令 bash <launcher>";;
+  *) _ng "tmux send-keys 仍在传 start_cmd 长命令(A1 未落地)" "";;
+esac
+case "$crew_src" in
+  *"chmod +x \"\$_launcher_file\""*) _ok "launcher 文件 chmod +x";;
+  *) _ng "launcher 未 chmod +x" "";;
+esac
+
 # --- 结果汇总 ---
 echo ""
 echo "=== Total: $total | Pass: $pass | Fail: $fail ==="
