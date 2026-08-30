@@ -221,7 +221,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2-refactor-week3 (commit $commit)"
+  echo "crew v2.0.0 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 cmd_prune() {
