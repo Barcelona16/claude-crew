@@ -203,6 +203,12 @@ cmd_adopt() {
   "$CS" set "$a_name" tmux "$a_tmux"
   [ -n "$a_sid" ] && "$CS" set "$a_name" sid "$a_sid"
   [ -n "$a_model" ] && "$CS" set "$a_name" backend "$a_model"
+  # 2026-08-30 audit-crew A5(P0):adopt 也对称写 registry(clean 会删,起就得补)
+  local reg="$CREW_STATE/registry"
+  mkdir -p "$CREW_STATE"
+  if ! [ -f "$reg" ] || ! awk -F'\t' -v m="$a_name" '$2==m{ok=1}END{exit !ok}' "$reg" 2>/dev/null; then
+    printf '%s\t%s\n' "$DIR" "$a_name" >> "$reg"
+  fi
   log "adopted '$a_name' -> tmux '$a_tmux' (sid ${a_sid:-<none>}); now in crew ls / attach. stop/kill/prune will refuse it. Un-adopt: rm $CREW_STATE/$a_name.tmux"
 }
 
@@ -261,6 +267,8 @@ cmd_models() {
 }
 
 cmd_doctor() {
+  local fix=0
+  [ "${1:-}" = "--fix" ] && fix=1
   echo "== doctor =="
   echo "CREW_STATE: $CREW_STATE $([ -d "$CREW_STATE" ] && echo ✓ || echo ✗)"
   echo "CREW_HOME:  $CREW_HOME $([ -d "$CREW_HOME" ] && echo ✓ || echo ✗)"
@@ -269,6 +277,44 @@ cmd_doctor() {
   echo "CL bin:     $CL $([ -x "$CL" ] && echo ✓ || echo ✗)"
   echo "tmux:       $(command -v tmux || echo '(not found)')"
   echo "sessions:   $("$CS" list 2>/dev/null | wc -l)"
+
+  # 2026-08-30 audit-crew A5(P0):registry 脏行自愈
+  # 脏行 = registry 里有 <cwd,name> 但 state 目录里无任何 <name>.<field> 文件
+  # (crew clean 已删 state 但 registry 行残留;或试错留下的 owkr 等孤儿名)
+  local reg="$CREW_STATE/registry"
+  if [ -f "$reg" ]; then
+    echo "== registry =="
+    local dirty_lines=""
+    while IFS=$'\t' read -r cwd name; do
+      [ -z "$name" ] && continue
+      # state 有任何 <name>.<field> 文件就算干净
+      local has_state
+      has_state=$(find "$CREW_STATE" -maxdepth 1 -name "$name.*" -not -name "*.pending" -not -name "*.tmp*" 2>/dev/null | head -1)
+      if [ -z "$has_state" ]; then
+        dirty_lines="$dirty_lines$cwd	$name"$'\n'
+        echo "  ✗ 脏行 '$name' @ '$cwd'(state 无 $name.* 文件)"
+      fi
+    done < "$reg"
+    if [ -n "$dirty_lines" ]; then
+      if [ "$fix" = "1" ]; then
+        # 用 awk 过滤保留干净行
+        local tmp
+        tmp=$(mktemp)
+        while IFS=$'\t' read -r cwd name; do
+          [ -z "$name" ] && continue
+          local has_state
+          has_state=$(find "$CREW_STATE" -maxdepth 1 -name "$name.*" -not -name "*.pending" -not -name "*.tmp*" 2>/dev/null | head -1)
+          [ -n "$has_state" ] && printf '%s\t%s\n' "$cwd" "$name" >> "$tmp"
+        done < "$reg"
+        mv "$tmp" "$reg"
+        echo "  ✓ --fix:已删脏行"
+      else
+        echo "  (跑 'crew doctor --fix' 清除脏行)"
+      fi
+    else
+      echo "  ✓ registry 干净"
+    fi
+  fi
 }
 
 cmd_version() {
@@ -285,6 +331,16 @@ cmd_spawn() {
   local name="$1"; shift
   local task="$*"
   [ -z "$name" ] && die "no name"
+
+  # 2026-08-30 audit-crew A5(P0):registry 写方收口 —— spawn 起会话时把 <cwd,name>
+  # 落 registry(v2 之前只 clean 删行、从不写入,导致 agent-bridge crew-session-sync 侧
+  # 长期看不见 v2 会话,DIR 兜底靠 /proc)。DIR 用 --dir 或当前 $PWD,与 v1:248 语义对齐。
+  # adopt 走 cmd_adopt 单独入口,不经这里。
+  local reg="$CREW_STATE/registry"
+  mkdir -p "$CREW_STATE"
+  if ! [ -f "$reg" ] || ! awk -F'\t' -v m="$name" '$2==m{ok=1}END{exit !ok}' "$reg" 2>/dev/null; then
+    printf '%s\t%s\n' "$DIR" "$name" >> "$reg"
+  fi
 
   # 2026-08-30 修:v1 语义——crew <name> 无 task 且 tmux 已 live 时,attach 而非新起
   # (踩坑:用户跑 crew work,v2 无脑 spawn 灌新 launcher → 新起 crew-work tmux,
@@ -340,7 +396,7 @@ case "$CMD" in
   inbox)        cmd_inbox "$@" ;;
   log)          cmd_log "$@" ;;
   models|backends) cmd_models ;;
-  doctor)       cmd_doctor ;;
+  doctor)       cmd_doctor "$@" ;;
   version)      cmd_version "$@" ;;
   prune)        cmd_prune "$@" ;;
   help|--help|-h) sed -n '3,22p' "$0" ;;
