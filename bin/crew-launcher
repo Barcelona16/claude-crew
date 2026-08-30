@@ -58,13 +58,28 @@ load_backend_conf() {
   backend=$("$CS" get "$name" backend 2>/dev/null || echo "")
   [ -z "$backend" ] && { echo "[crew-launcher] no backend for '$name'(先 crew-session set <n> backend X)" >&2; return 1; }
   local conf="$CREW_HOME/backends/$backend.conf"
-  # v1 兼容(2026-08-30 切换 work 时踩):conf 缺失不 fail,继续用空默认值
-  # v1 载 conf 用 while read source,缺文件时 BK_ 变量都空,claude 命令仍可拼
-  # 但 model 字段丢 → claude 走默认。历史生产就这么跑的
+  # v1 兼容(2026-08-30 切换 work 时踩):conf 缺失时按 v1 双路径判:
+  # 1) backend 名带逗号(如 "joycode-oai,GLM-5.3") → 合成 ccr backend(BASE_URL=crew-proxy:8788,
+  #    MODEL 保全串,TOKEN=test,KEY_MODE=ccr)—— 让 CCR 路由
+  # 2) backend 名无逗号 → 报错让用户显式传 --model provider,model
   if [ ! -f "$conf" ]; then
-    echo "[crew-launcher] warn: backend conf '$conf' not found, using empty defaults (v1 兼容)" >&2
-    BK_BASE_URL=""; BK_MODEL="$backend"; BK_TOKEN=""; BK_KEY_MODE=""; BK_ENV_EXTRA=""; BK_CLAUDE_FLAGS=""
-    return 0
+    case "$backend" in
+      *,*)
+        # v1 line 313-315 逻辑:合成 ccr backend
+        BK_BASE_URL="http://127.0.0.1:${CREW_PROXY_PORT:-8788}"
+        BK_MODEL="$backend"
+        BK_TOKEN="test"
+        BK_ENV_EXTRA="MAX_THINKING_TOKENS=0 CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1"
+        BK_KEY_MODE="ccr"
+        BK_CLAUDE_FLAGS=""
+        echo "[crew-launcher] backend '$backend' 无 conf 文件,按 v1 语义合成 ccr backend(via crew-proxy:8788)" >&2
+        return 0
+        ;;
+      *)
+        echo "[crew-launcher] backend '$backend' 无 conf 且不含逗号,拒起。用 --model provider,model(例:joycode-oai,GLM-5.3)或添加 conf 到 $CREW_HOME/backends/" >&2
+        return 1
+        ;;
+    esac
   fi
   # 只 source 已知字段,防注入
   local line k v

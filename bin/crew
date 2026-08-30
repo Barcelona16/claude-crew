@@ -39,6 +39,7 @@ die() { log "$*"; exit 1; }
 # 全局 flags 解析
 BACKEND=""
 KEY=""
+POLICY=""
 NO_TMUX=0
 FRESH=0
 SAFE=0
@@ -47,6 +48,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --model) BACKEND="$2"; shift 2 ;;
     --key) KEY="$2"; shift 2 ;;
+    --policy) POLICY="$2"; shift 2 ;;
     --tmux) NO_TMUX=0; shift ;;
     --no-tmux) NO_TMUX=1; shift ;;
     --fresh) FRESH=1; shift ;;
@@ -67,14 +69,38 @@ CMD="$1"; shift
 cmd_ls() {
   local live_sessions
   live_sessions=$("$CT" list 2>/dev/null || echo "")
+  local kr="$SCRIPT_DIR/crew-keyresolve.js"
   printf '  %-20s %-9s %-56s %-10s %-30s\n' "NAME" "STATUS" "MODEL" "KEY" "DIR"
   "$CS" list 2>/dev/null | while IFS=$'\t' read -r name rest; do
     [ -z "$name" ] && continue
-    local sid backend key tmuxname
+    local sid backend key tmuxname dir
     sid=$("$CS" get "$name" sid 2>/dev/null || echo "")
     backend=$("$CS" get "$name" backend 2>/dev/null || echo "?")
-    key=$("$CS" get "$name" key 2>/dev/null || echo "-")
     tmuxname=$("$CT" resolve "$name" 2>/dev/null || echo "")
+    # KEY:优先用 crew-keyresolve.js 反查真 key(与 statusline 一致);失败回落文件
+    if [ -f "$kr" ] && command -v node >/dev/null 2>&1; then
+      # 2026-08-30 修:v2 ls KEY 列硬编码文件读 → 现走 keyresolve 反查真 key alias(19aa...191→joycode)
+      # env -i 隔离当前 shell 的 CREW_MODEL/CREW_KEY 泄漏(否则所有会话都显本会话 model/key)
+      local kr_out
+      kr_out=$(env -i HOME="$HOME" PATH="$PATH" CREW_STATE="$CREW_STATE" CREW_HOME="$CREW_HOME" SESS="$name" node "$kr" "$name" 2>/dev/null)
+      if [ -n "$kr_out" ]; then
+        # 输出 "model<TAB>key"
+        local m_kr k_kr
+        m_kr=$(printf '%s' "$kr_out" | cut -f1)
+        k_kr=$(printf '%s' "$kr_out" | cut -f2)
+        # backend 空/"?" 时用 keyresolve 的 model
+        [ "$backend" = "?" ] && [ -n "$m_kr" ] && [ "$m_kr" != "?" ] && backend="$m_kr"
+        [ -n "$k_kr" ] && [ "$k_kr" != "?" ] && key="$k_kr"
+      fi
+    fi
+    [ -z "$key" ] && key=$("$CS" get "$name" key 2>/dev/null || echo "-")
+    # DIR:从 registry 反查(cwd<TAB>name)
+    dir="-"
+    if [ -f "$CREW_STATE/registry" ]; then
+      local reg_dir
+      reg_dir=$(awk -F'\t' -v n="$name" '$2==n{print $1; exit}' "$CREW_STATE/registry" 2>/dev/null)
+      [ -n "$reg_dir" ] && dir="$reg_dir"
+    fi
     local status="new"
     if echo "$live_sessions" | grep -qFx "$tmuxname"; then
       status="live"
@@ -82,7 +108,7 @@ cmd_ls() {
     elif [ -n "$sid" ]; then
       status="resumable"
     fi
-    printf '  %-20s %-9s %-56s %-10s %-30s\n' "$name" "$status" "$backend" "$key" "-"
+    printf '  %-20s %-9s %-56s %-10s %-30s\n' "$name" "$status" "$backend" "$key" "$dir"
   done
 }
 
@@ -233,8 +259,31 @@ cmd_spawn() {
   local task="$*"
   [ -z "$name" ] && die "no name"
 
+  # 2026-08-30 修:v1 语义——crew <name> 无 task 且 tmux 已 live 时,attach 而非新起
+  # (踩坑:用户跑 crew work,v2 无脑 spawn 灌新 launcher → 新起 crew-work tmux,
+  # 而真 work tmux 还活着,claude 被分叉;pinned adopt 会话尤其危险)
+  # 有 --fresh / 有 task / --no-tmux 时不走 attach,按用户显式意图 spawn
+  if [ -z "$task" ] && [ "$FRESH" = 0 ] && [ "$NO_TMUX" = 0 ]; then
+    local existing
+    existing=$("$CT" resolve "$name" 2>/dev/null || true)
+    if [ -n "$existing" ] && "$CT" list 2>/dev/null | grep -qFx "$existing"; then
+      log "'$name' 已 live (tmux=$existing) → attach(要新起加 --fresh 或 crew kill 后再来)"
+      exec "$CT" attach "$name"
+    fi
+  fi
+
   [ -n "$BACKEND" ] && "$CS" set "$name" backend "$BACKEND"
   [ -n "$KEY" ] && "$CS" set "$name" key "$KEY"
+  # --policy X:设 per-session policy 文件(v2 修② 2026-08-30)
+  if [ -n "$POLICY" ]; then
+    if [ "$POLICY" = "-" ]; then
+      "$CS" del "$name" policy
+      log "AGENT_POLICY session pin cleared for '$name'"
+    else
+      "$CS" set "$name" policy "$POLICY"
+      log "AGENT_POLICY pinned for '$name' -> $POLICY"
+    fi
+  fi
 
   local mode="tmux"
   if [ "$NO_TMUX" = 1 ]; then
