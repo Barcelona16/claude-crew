@@ -1,8 +1,9 @@
-== crew doctor ==
-  crew 0d98e34 (2026-08-30) [main]
-[crew] ✓ 已是最新(= origin/main)
-  [ok]   CCR listening on :3456
-  [ok]   crew-proxy listening on :8788
-  [WARN] no keys.conf at /root/.config/claude-crew/keys.conf
-  [ok]   no key-policy.conf (single-key passthrough — nothing to check)
+== doctor ==
+CREW_STATE: /root/.local/share/claude-crew ✓
+CREW_HOME:  /root/.config/claude-crew ✓
+CS bin:     /work/claude-crew-v2/bin/crew-session ✓
+CT bin:     /work/claude-crew-v2/bin/crew-tmux ✓
+CL bin:     /work/claude-crew-v2/bin/crew-launcher ✓
+tmux:       /usr/bin/tmux
+sessions:   0
 ---exit=0---

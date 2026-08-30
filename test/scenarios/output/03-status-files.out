@@ -1,10 +1,5 @@
 ---state files---
-mock-test2.backend
-mock-test2.fgpid
-mock-test2.notmux
-mock-test2.sid
-registry
 ---.backend---
-mock
+cat: /root/.local/share/claude-crew/mock-test2.backend: No such file or directory
 ---.notmux---
-1
+cat: /root/.local/share/claude-crew/mock-test2.notmux: No such file or directory
