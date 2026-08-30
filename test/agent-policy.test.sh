@@ -113,6 +113,38 @@ out=$(resolve_policy_template "balanced" 2>/dev/null)
 [ -z "$out" ] && _ok "missing template returns empty (not fail)" || _ng "missing template returned non-empty" "out=$out"
 mv "$TEMPLATES/policy-balanced.md.bak" "$TEMPLATES/policy-balanced.md"
 
+# --- Case 7: 反 crew 爆炸铁律 关键字必须存在(2026-08-30 用户拍板) ---
+echo "--- Case 7: anti-crew-explosion rule keywords in templates ---"
+body=$(extract_policy_body "$TEMPLATES/policy-balanced.md")
+case "$body" in
+  *"防 crew 循环创建"*|*"防止 crew"*|*"crew 爆炸"*) _ok "balanced contains anti-crew-explosion keyword";;
+  *) _ng "balanced missing anti-crew-explosion rule" "body: $(echo "$body" | grep -i 'crew' | head -5)";;
+esac
+case "$body" in
+  *"无权直接"*"crew"*) _ok "balanced denies direct crew create";;
+  *) _ng "balanced missing 'no direct crew create' rule" "";;
+esac
+
+body=$(extract_policy_body "$TEMPLATES/policy-aggressive.md")
+case "$body" in
+  *"crew 创建授权"*|*"唯一有 crew create 授权"*) _ok "aggressive contains crew create authority rule";;
+  *) _ng "aggressive missing crew create authority rule" "";;
+esac
+
+body=$(extract_policy_body "$TEMPLATES/policy-conservative.md")
+case "$body" in
+  *"无权直接"*"crew"*|*"防止 crew 循环创建"*) _ok "conservative denies direct crew create";;
+  *) _ng "conservative missing 'no direct crew create' rule" "";;
+esac
+
+# --- Case 8: extract_policy_body 只输出 --- 之后的内容,不输出 frontmatter ---
+echo "--- Case 8: extract_policy_body strips frontmatter ---"
+body=$(extract_policy_body "$TEMPLATES/policy-balanced.md")
+case "$body" in
+  *"crew 启动时拼进"*) _ng "body still contains pre-'---' frontmatter" "首行:$(echo "$body" | head -1)";;
+  *) _ok "body strips pre-'---' frontmatter" ;;
+esac
+
 # --- 结果汇总 ---
 echo ""
 echo "=== Total: $total | Pass: $pass | Fail: $fail ==="

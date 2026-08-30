@@ -191,7 +191,7 @@ wipe_session_state(){
   rm -f "$CREW_STATE/$nm.sid" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key" \
         "$CREW_STATE/$nm.notmux" "$CREW_STATE/$nm.fgpid" "$CREW_STATE/$nm.tmuxname" \
         "$CREW_STATE/$nm.pintmux" "$CREW_STATE/$nm.notify" "$CREW_STATE/$nm.notify.seen" \
-        "$CREW_STATE/$nm.settings.json" "$CREW_STATE/$nm.tmux"
+        "$CREW_STATE/$nm.settings.json" "$CREW_STATE/$nm.tmux" "$CREW_STATE/$nm.policy"
   rm -rf "$CREW_STATE/inbox/$nm" 2>/dev/null || true
 }
 # Portable mtime (epoch seconds): GNU coreutils `stat -c`, else BSD/macOS `stat -f`.
@@ -722,6 +722,18 @@ ensure_session(){
   local keyalias="${KEY:-}"
   if [ "${KEY_EXPLICIT:-0}" = 1 ]; then printf '%s\n' "$keyalias" > "$keyf"
   elif [ -f "$keyf" ]; then keyalias=$(cat "$keyf"); fi
+  # Per-session AGENT_POLICY memory(2026-08-30 per-session 覆盖层):`--policy <val>` 写文件,
+  # `--policy -` 清 pin(回落到 backend conf 的 AGENT_POLICY)。文件位置和 .key/.backend 同目录。
+  local policyf="$CREW_STATE/$name.policy"
+  if [ "${POLICY_EXPLICIT:-0}" = 1 ]; then
+    if [ "$POLICY" = "-" ] || [ -z "$POLICY" ]; then
+      rm -f "$policyf" 2>/dev/null || true
+      log "AGENT_POLICY session pin cleared for '$name' (falling back to backend conf or none)"
+    else
+      printf '%s\n' "$POLICY" > "$policyf"
+      log "AGENT_POLICY pinned for '$name' -> $POLICY (persisted: $policyf)"
+    fi
+  fi
   # Friendly label for launch logs: the pinned alias name, or "<backend default>"
   # when no key is pinned (empty or "-" => fall back to the backend's own token).
   local keydisp="<backend default>"; [ -n "$keyalias" ] && [ "$keyalias" != "-" ] && keydisp="$keyalias"
@@ -769,18 +781,29 @@ ensure_session(){
   local modelarg=""; [ -n "$BK_MODEL" ] && modelarg="--model $BK_MODEL"
 
   # AGENT_POLICY 分层派发注入(2026-08-30 方案 2 落地)
-  # backends/*.conf 声明 AGENT_POLICY=balanced 等 → 读 templates/policy-<value>.md 拼进 --append-system-prompt
+  # 解析优先级:per-session .policy 文件 > backend conf 的 AGENT_POLICY > 无(缺省 none)
+  # per-session 文件位置:$CREW_STATE/<name>.policy(和 .sid/.backend/.key 同目录)
+  #   用户操作:echo balanced > $CREW_STATE/workflow-code.policy(或 crew <name> --policy balanced)
   # 缺省 none 或未声明 → 跳过(21 个存量 crew 零改动)
   # CREW_POLICY_DISABLE=1 → 应急旁路
+  local _sess_policy="" _eff_policy=""
+  local policyf="$CREW_STATE/$name.policy"
+  [ -f "$policyf" ] && _sess_policy=$(tr -d '[:space:]' < "$policyf" 2>/dev/null || echo "")
+  if [ -n "$_sess_policy" ]; then
+    _eff_policy="$_sess_policy"
+    log "AGENT_POLICY resolved from session file $policyf: $_eff_policy"
+  else
+    _eff_policy="$BK_AGENT_POLICY"
+  fi
   local _policy_tmpl _policy_body
-  _policy_tmpl="$(resolve_policy_template "$BK_AGENT_POLICY")"
+  _policy_tmpl="$(resolve_policy_template "$_eff_policy")"
   if [ -n "$_policy_tmpl" ]; then
     _policy_body="$(extract_policy_body "$_policy_tmpl")"
     if [ -n "$_policy_body" ]; then
       case " $flags " in
         *" --append-system-prompt "*) log "WARN: --append-system-prompt already in CLAUDE_FLAGS; skipping AGENT_POLICY injection" ;;
         *) flags="$flags --append-system-prompt $(printf %q "$_policy_body")"
-           log "AGENT_POLICY=$BK_AGENT_POLICY injected (template: $_policy_tmpl)" ;;
+           log "AGENT_POLICY=$_eff_policy injected (template: $_policy_tmpl)" ;;
       esac
     fi
   fi
@@ -974,13 +997,15 @@ crew_log(){
 }
 
 # --- arg parsing ------------------------------------------------------------
-BACKEND="${CREW_BACKEND:-}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; NO_TMUX="${CREW_NO_TMUX:-0}"; NO_TMUX_EXPLICIT=0; PICK=0; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; NOTIFY=""; NOTIFY_EXPLICIT=0; POS=()
+BACKEND="${CREW_BACKEND:-}"; BACKEND_EXPLICIT=0; KEY=""; KEY_EXPLICIT=0; FRESH=0; YOLO="${CREW_YOLO:-1}"; NO_TMUX="${CREW_NO_TMUX:-0}"; NO_TMUX_EXPLICIT=0; PICK=0; FROM=""; NUDGE=0; PEEK=0; ALLTGT=0; RAW=0; LOGTAIL=0; NOTIFY=""; NOTIFY_EXPLICIT=0; POLICY=""; POLICY_EXPLICIT=0; POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --model|--backend) BACKEND="${2:?--model needs a value (see: crew models)}"; BACKEND_EXPLICIT=1; shift 2;;
     --model=*|--backend=*) BACKEND="${1#*=}"; BACKEND_EXPLICIT=1; shift;;
     --key) KEY="${2:?--key needs an alias (or - to clear)}"; KEY_EXPLICIT=1; shift 2;;
     --key=*) KEY="${1#*=}"; KEY_EXPLICIT=1; shift;;
+    --policy) POLICY="${2:?--policy needs a value (none|conservative|balanced|aggressive, or - to clear)}"; POLICY_EXPLICIT=1; shift 2;;
+    --policy=*) POLICY="${1#*=}"; POLICY_EXPLICIT=1; shift;;
     --fresh) FRESH=1; shift;;
     --yolo)  YOLO=1; shift;;
     --safe|--no-yolo) YOLO=0; shift;;

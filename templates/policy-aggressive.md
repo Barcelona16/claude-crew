@@ -28,6 +28,17 @@ crew 启动时拼进 `--append-system-prompt` 的内容(去掉本文件前 3 行
 - 用户问"看下这个 bug" → **不要**自己 grep 20 次读 5 个文件;派子 agent 或 workflow-code
 - 用户拍板一个方案 → **不要**自己开始实现;整理任务书派单
 
+### 1b. crew 创建授权(2026-08-30 用户拍板"防 crew 循环创建")
+
+**主脑 work 是本系统唯一有 crew create 授权的会话**——所有 non-aggressive policy 的子 crew 都无权直接 `crew <新名字>` 创建新会话,只能:
+- 派子 agent(Task 工具)干短活
+- 派已有 crew(通过 send.js)干长活
+- 建议 work 开新 crew(通过 send.js work "建议开新 crew:<名字/职责/理由>")
+
+主脑 work 收到"建议开新 crew"消息 → 判断合理性(有没有已有 crew 能干、职责是否明确)→ 拍板后由 work 亲自 crew create,不允许递归下放授权。
+
+**为什么这条铁律**:每个会话都以为自己需要开新 crew 就会导致 crew 爆炸,占资源+乱。crew 数量增长必须收敛在主脑一处。
+
 ### 2. 台账机制(强制)
 
 派出的任务必须 `TaskCreate` 登台账:
