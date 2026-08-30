@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# crew-session — 纯状态管理层(2026-08-30 crew L 重构 Week 1)
+#
+# 职责:管理 $CREW_STATE/<name>.* 状态文件,无 side effect(不 spawn 进程/不 tmux 操作)
+#
+# 用法:
+#   crew-session get <name> <field>            # 读某字段,输出到 stdout,不存在返 exit 1
+#   crew-session set <name> <field> <value>    # 写某字段
+#   crew-session has <name> <field>            # 存在返 exit 0,不存在返 exit 1(测试用)
+#   crew-session del <name> <field>            # 删单字段(pintmux/notify 之类可单独删)
+#   crew-session clean <name> [--purge-transcript]  # 清所有状态文件 + registry 行
+#   crew-session list                          # 遍历所有 name 输出 tsv(name field:val ...)
+#   crew-session fields                        # 列所有支持的字段名
+#
+# 字段(13 种):
+#   sid          claude 会话 uuid(--resume 值)
+#   backend      backend 名(如 GLM-5.3 / Claude-Opus-4.7-joybuilder)
+#   key          key 别名(如 joycode / personal)
+#   notmux       "0" 或 "1"(会话跑在 tmux 还是 foreground)
+#   pintmux      "1" 存在=pin 到 tmux(强制常驻,拒 --no-tmux)
+#   fgpid        foreground 模式的 claude pid
+#   tmux         adopted 会话:外部 tmux name(存在=收编模式)
+#   tmuxname     crew 自己起的 tmux 会话名(区分 adopted)
+#   policy       AGENT_POLICY 名(aggressive/balanced/conservative/none)
+#   policy_body  policy 全文(A3 修加,markdown 文件,几 KB)
+#   notify       Stop hook 完成通知目标(erp 或群 id)
+#   settings     per-session settings.json(Stop hook 用)
+#   nohup        某类历史遗留 marker(极少用)
+#
+# 环境变量:
+#   CREW_STATE   状态目录,默认 $XDG_DATA_HOME/claude-crew 或 $HOME/.local/share/claude-crew
+#   CREW_HOME    模板目录,默认 $HOME/.config/claude-crew(policy 模板从这里读)
+
+set -uo pipefail
+
+CREW_STATE="${CREW_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/claude-crew}"
+mkdir -p "$CREW_STATE" 2>/dev/null || true
+
+# 所有支持的字段(按类型分:普通 vs 大文件 body)
+readonly VALID_FIELDS="sid backend key notmux pintmux fgpid tmux tmuxname policy policy_body notify settings nohup"
+
+# name 合法性:字母数字下划线短横,不含 . / \0
+validate_name() {
+  local n="$1"
+  case "$n" in
+    ''|*[!a-zA-Z0-9_-]*) echo "[crew-session] invalid name: '$n'(仅字母数字_-)" >&2; return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+validate_field() {
+  local f="$1"
+  for valid in $VALID_FIELDS; do
+    [ "$valid" = "$f" ] && return 0
+  done
+  echo "[crew-session] invalid field: '$f'(必须为 $VALID_FIELDS 之一)" >&2
+  return 1
+}
+
+# get name field → stdout content or exit 1
+cmd_get() {
+  local name="$1" field="$2"
+  validate_name "$name" || return 1
+  validate_field "$field" || return 1
+  local f="$CREW_STATE/$name.$field"
+  [ -f "$f" ] || return 1
+  cat "$f"
+}
+
+# has name field → exit 0/1
+cmd_has() {
+  local name="$1" field="$2"
+  validate_name "$name" || return 1
+  validate_field "$field" || return 1
+  [ -f "$CREW_STATE/$name.$field" ]
+}
+
+# set name field value
+cmd_set() {
+  local name="$1" field="$2" value="$3"
+  validate_name "$name" || return 1
+  validate_field "$field" || return 1
+  # 特殊字段:pintmux 只存在与否,值恒为 "1"
+  case "$field" in
+    pintmux) printf '1' > "$CREW_STATE/$name.pintmux" ;;
+    *) printf '%s' "$value" > "$CREW_STATE/$name.$field" ;;
+  esac
+}
+
+# del name field
+cmd_del() {
+  local name="$1" field="$2"
+  validate_name "$name" || return 1
+  validate_field "$field" || return 1
+  rm -f "$CREW_STATE/$name.$field"
+}
+
+# clean name [--purge-transcript]
+# 删所有 <name>.* 状态文件 + registry 行 + inbox 目录
+# --purge-transcript 额外删 ~/.claude/projects/*/<sid>.jsonl(不可逆)
+cmd_clean() {
+  local name="$1" purge_transcript=0
+  [ "${2:-}" = "--purge-transcript" ] && purge_transcript=1
+  validate_name "$name" || return 1
+
+  # 记录 sid 供 --purge-transcript 用
+  local sid=""
+  [ -f "$CREW_STATE/$name.sid" ] && sid=$(cat "$CREW_STATE/$name.sid" 2>/dev/null)
+
+  # 删所有 <name>.* 状态文件
+  local field
+  for field in $VALID_FIELDS; do
+    rm -f "$CREW_STATE/$name.$field" 2>/dev/null
+  done
+
+  # 删 inbox 目录
+  rm -rf "$CREW_STATE/inbox/$name" 2>/dev/null
+
+  # 从 registry 删该 name 行
+  local reg="$CREW_STATE/registry"
+  if [ -f "$reg" ]; then
+    local tmp=$(mktemp)
+    awk -F'\t' -v m="$name" '$2!=m' "$reg" > "$tmp" && mv "$tmp" "$reg"
+  fi
+
+  # --purge-transcript:删 claude transcript(用 sid 精确匹配)
+  if [ "$purge_transcript" = 1 ] && [ -n "$sid" ]; then
+    rm -f "$HOME"/.claude/projects/*/"$sid".jsonl 2>/dev/null || true
+    echo "[crew-session] purged transcript $sid"
+  fi
+}
+
+# list — 输出 tsv:name<TAB>field:value<TAB>field:value...
+cmd_list() {
+  declare -A seen
+  local f base name field
+  # 找所有 <name>.<field> 文件
+  shopt -s nullglob
+  for f in "$CREW_STATE"/*.*; do
+    [ -f "$f" ] || continue
+    base=$(basename "$f")
+    # 拆 name.field(取最后一个 . 为分隔)
+    field="${base##*.}"
+    name="${base%.*}"
+    validate_name "$name" 2>/dev/null || continue
+    validate_field "$field" 2>/dev/null || continue
+    seen[$name]="1"
+  done
+  shopt -u nullglob
+
+  # 对每个 name 输出所有字段
+  local n
+  for n in "${!seen[@]}"; do
+    printf '%s' "$n"
+    for field in $VALID_FIELDS; do
+      if [ -f "$CREW_STATE/$n.$field" ]; then
+        # policy_body 太长只显示 <exists>;其他显示短值
+        if [ "$field" = "policy_body" ] || [ "$field" = "settings" ]; then
+          printf '\t%s:<exists>' "$field"
+        else
+          local v
+          v=$(cat "$CREW_STATE/$n.$field" 2>/dev/null | head -c 60 | tr '\n' ' ')
+          printf '\t%s:%s' "$field" "$v"
+        fi
+      fi
+    done
+    printf '\n'
+  done | sort
+}
+
+# fields — 列所有支持的字段名(测试友好)
+cmd_fields() {
+  printf '%s\n' $VALID_FIELDS
+}
+
+# 主分发
+case "${1:-}" in
+  get)     [ $# -ge 3 ] || { echo "usage: crew-session get <name> <field>" >&2; exit 2; }
+           cmd_get "$2" "$3" ;;
+  has)     [ $# -ge 3 ] || { echo "usage: crew-session has <name> <field>" >&2; exit 2; }
+           cmd_has "$2" "$3" ;;
+  set)     [ $# -ge 4 ] || { echo "usage: crew-session set <name> <field> <value>" >&2; exit 2; }
+           cmd_set "$2" "$3" "$4" ;;
+  del)     [ $# -ge 3 ] || { echo "usage: crew-session del <name> <field>" >&2; exit 2; }
+           cmd_del "$2" "$3" ;;
+  clean)   [ $# -ge 2 ] || { echo "usage: crew-session clean <name> [--purge-transcript]" >&2; exit 2; }
+           cmd_clean "$2" "${3:-}" ;;
+  list)    cmd_list ;;
+  fields)  cmd_fields ;;
+  help|--help|-h) sed -n '3,32p' "$0" ;;
+  '') echo "usage: crew-session <get|has|set|del|clean|list|fields|help>" >&2; exit 2 ;;
+  *) echo "[crew-session] unknown command: $1" >&2; exit 2 ;;
+esac
