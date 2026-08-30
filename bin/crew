@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# crew — 顶层 CLI,兼容旧 API 21 命令(2026-08-30 crew L 重构 Week 3)
+#
+# 分发到三个独立工具:
+#   crew-session   状态管理
+#   crew-tmux      tmux 集成
+#   crew-launcher  claude 启动
+#
+# 21 兼容命令:
+#   crew <name> [task]       起会话(默认 tmux 模式,已存在则 attach)
+#   crew ls [--json]         列会话
+#   crew attach <name>       attach tmux
+#   crew stop <name>         停 tmux 保状态(B2 防自杀:CREW_STOP_ALLOW_SELF_KILL=1 绕过)
+#   crew kill <name> [--purge]  删会话
+#   crew pin/unpin <name>    pin/unpin tmux
+#   crew adopt <name> <tmux> [--sid X] [--dir P] [--model M]
+#   crew send <name> "msg"   给会话 inbox 灌消息
+#   crew inbox <name> [--peek]  读 inbox
+#   crew log <name>          看 transcript
+#   crew models|backends     列 backends
+#   crew doctor              自检
+#   crew version [--check]   版本
+#
+# 全局 flags:
+#   --model M --key K --tmux --no-tmux --fresh --safe --pick --dir P
+
+set -uo pipefail
+
+CREW_STATE="${CREW_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/claude-crew}"
+CREW_HOME="${CREW_HOME:-$HOME/.config/claude-crew}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CS="$SCRIPT_DIR/crew-session"
+CT="$SCRIPT_DIR/crew-tmux"
+CL="$SCRIPT_DIR/crew-launcher"
+
+log() { echo "[crew] $*" >&2; }
+die() { log "$*"; exit 1; }
+
+# 全局 flags 解析
+BACKEND=""
+KEY=""
+NO_TMUX=0
+FRESH=0
+SAFE=0
+DIR="$PWD"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --model) BACKEND="$2"; shift 2 ;;
+    --key) KEY="$2"; shift 2 ;;
+    --tmux) NO_TMUX=0; shift ;;
+    --no-tmux) NO_TMUX=1; shift ;;
+    --fresh) FRESH=1; shift ;;
+    --safe) SAFE=1; shift ;;
+    --dir) DIR="$2"; shift 2 ;;
+    --pick) shift ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+
+if [ $# -eq 0 ]; then
+  set -- ls
+fi
+
+CMD="$1"; shift
+
+cmd_ls() {
+  local live_sessions
+  live_sessions=$("$CT" list 2>/dev/null || echo "")
+  printf '  %-20s %-9s %-56s %-10s %-30s\n' "NAME" "STATUS" "MODEL" "KEY" "DIR"
+  "$CS" list 2>/dev/null | while IFS=$'\t' read -r name rest; do
+    [ -z "$name" ] && continue
+    local sid backend key tmuxname
+    sid=$("$CS" get "$name" sid 2>/dev/null || echo "")
+    backend=$("$CS" get "$name" backend 2>/dev/null || echo "?")
+    key=$("$CS" get "$name" key 2>/dev/null || echo "-")
+    tmuxname=$("$CT" resolve "$name" 2>/dev/null || echo "")
+    local status="new"
+    if echo "$live_sessions" | grep -qFx "$tmuxname"; then
+      status="live"
+      "$CS" has "$name" pintmux 2>/dev/null && status="live 📌"
+    elif [ -n "$sid" ]; then
+      status="resumable"
+    fi
+    printf '  %-20s %-9s %-56s %-10s %-30s\n' "$name" "$status" "$backend" "$key" "-"
+  done
+}
+
+cmd_attach() {
+  local name="$1"
+  [ -z "$name" ] && die "usage: crew attach <name>"
+  "$CT" attach "$name"
+}
+
+cmd_stop() {
+  local name="$1"
+  [ -z "$name" ] && die "usage: crew stop <name>"
+  if [ -z "${CREW_STOP_ALLOW_SELF_KILL:-}" ] && "$CT" is-inside "$name" 2>/dev/null; then
+    die "B2: refuse to stop '$name' — you are running inside its tmux session. Run 'crew stop $name' from OUTSIDE, or set CREW_STOP_ALLOW_SELF_KILL=1 to override."
+  fi
+  "$CT" kill "$name"
+  log "stopped $name (state kept; resume with: crew $name)"
+}
+
+cmd_kill() {
+  local name="$1"; shift
+  local purge=0
+  [ "${1:-}" = "--purge" ] && purge=1
+  [ -z "$name" ] && die "usage: crew kill <name> [--purge]"
+  if [ -z "${CREW_KILL_ALLOW_SELF:-}" ] && "$CT" is-inside "$name" 2>/dev/null; then
+    die "B2: refuse to kill '$name' — you are running inside its tmux session. Run 'crew kill $name' from OUTSIDE, or set CREW_KILL_ALLOW_SELF=1 to override."
+  fi
+  "$CT" kill "$name"
+  if [ "$purge" = 1 ]; then
+    "$CS" clean "$name" --purge-transcript
+  else
+    "$CS" clean "$name"
+  fi
+  log "deleted session '$name'"
+}
+
+cmd_pin() {
+  local name="$1"
+  [ -z "$name" ] && die "usage: crew pin <name>"
+  "$CS" set "$name" pintmux 1
+  log "'$name' pinned to tmux — --no-tmux will be refused. Un-pin: crew unpin $name"
+}
+cmd_unpin() {
+  local name="$1"
+  [ -z "$name" ] && die "usage: crew unpin <name>"
+  "$CS" del "$name" pintmux
+  log "'$name' un-pinned — --no-tmux (foreground) is allowed again"
+}
+
+cmd_adopt() {
+  local a_name="$1" a_tmux="$2"; shift 2
+  local a_sid="" a_model=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --sid) a_sid="$2"; shift 2 ;;
+      --dir) shift 2 ;;
+      --model) a_model="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -z "$a_name" ] || [ -z "$a_tmux" ] && die "usage: crew adopt <name> <tmux-session>"
+  if ! "$CT" list 2>/dev/null | grep -qFx "$a_tmux"; then
+    log "warn: tmux session '$a_tmux' not live right now (adopting anyway)"
+  fi
+  "$CS" set "$a_name" tmux "$a_tmux"
+  [ -n "$a_sid" ] && "$CS" set "$a_name" sid "$a_sid"
+  [ -n "$a_model" ] && "$CS" set "$a_name" backend "$a_model"
+  log "adopted '$a_name' -> tmux '$a_tmux' (sid ${a_sid:-<none>}); now in crew ls / attach. stop/kill/prune will refuse it. Un-adopt: rm $CREW_STATE/$a_name.tmux"
+}
+
+cmd_send() {
+  local name="$1"; shift
+  local msg="$*"
+  [ -z "$name" ] && die "usage: crew send <name> \"msg\""
+  mkdir -p "$CREW_STATE/inbox/$name"
+  local idx
+  idx=$(ls "$CREW_STATE/inbox/$name/" 2>/dev/null | wc -l)
+  idx=$((idx+1))
+  local ts
+  ts=$(date -Iseconds)
+  printf '%s\n' "$msg" > "$CREW_STATE/inbox/$name/$(printf '%04d' $idx)-$ts.msg"
+  log "queued -> inbox of '$name' (from ${CREW_SESSION_NAME:-crew send})"
+}
+
+cmd_inbox() {
+  local name="$1"; shift
+  local peek=0
+  [ "${1:-}" = "--peek" ] && peek=1
+  [ -z "$name" ] && die "usage: crew inbox <name> [--peek]"
+  local dir="$CREW_STATE/inbox/$name"
+  [ -d "$dir" ] || { echo "(no messages)"; return 0; }
+  local n=0
+  for f in "$dir"/*.msg; do
+    [ -f "$f" ] || continue
+    n=$((n+1))
+    echo "── #$n  $(basename "$f") ──"
+    cat "$f"
+    echo
+  done
+  if [ "$peek" = 0 ] && [ $n -gt 0 ]; then
+    rm -f "$dir"/*.msg
+    echo "(consumed $n message(s))"
+  fi
+}
+
+cmd_log() {
+  local name="$1"
+  [ -z "$name" ] && die "usage: crew log <name>"
+  local sid
+  sid=$("$CS" get "$name" sid 2>/dev/null) || die "no sid for '$name'"
+  for f in "$HOME"/.claude/projects/*/"$sid".jsonl; do
+    [ -f "$f" ] && { echo "$f"; return 0; }
+  done
+  die "transcript for sid '$sid' not found"
+}
+
+cmd_models() {
+  echo "== backends =="
+  for f in "$CREW_HOME"/backends/*.conf; do
+    [ -f "$f" ] || continue
+    basename "$f" .conf | sed 's/^/  /'
+  done
+}
+
+cmd_doctor() {
+  echo "== doctor =="
+  echo "CREW_STATE: $CREW_STATE $([ -d "$CREW_STATE" ] && echo ✓ || echo ✗)"
+  echo "CREW_HOME:  $CREW_HOME $([ -d "$CREW_HOME" ] && echo ✓ || echo ✗)"
+  echo "CS bin:     $CS $([ -x "$CS" ] && echo ✓ || echo ✗)"
+  echo "CT bin:     $CT $([ -x "$CT" ] && echo ✓ || echo ✗)"
+  echo "CL bin:     $CL $([ -x "$CL" ] && echo ✓ || echo ✗)"
+  echo "tmux:       $(command -v tmux || echo '(not found)')"
+  echo "sessions:   $("$CS" list 2>/dev/null | wc -l)"
+}
+
+cmd_version() {
+  local commit
+  commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+  echo "crew v2-refactor-week3 (commit $commit)"
+}
+
+cmd_prune() {
+  echo "[crew] prune not implemented in v2 skeleton" >&2
+}
+
+cmd_spawn() {
+  local name="$1"; shift
+  local task="$*"
+  [ -z "$name" ] && die "no name"
+
+  [ -n "$BACKEND" ] && "$CS" set "$name" backend "$BACKEND"
+  [ -n "$KEY" ] && "$CS" set "$name" key "$KEY"
+
+  local mode="tmux"
+  if [ "$NO_TMUX" = 1 ]; then
+    if "$CS" has "$name" pintmux 2>/dev/null; then
+      log "'$name' is pinned to tmux (always-on); ignoring --no-tmux."
+    else
+      mode="fg"
+    fi
+  fi
+
+  local -a extra_args=()
+  [ "$FRESH" = 1 ] && extra_args+=(--fresh)
+  [ -n "$task" ] && extra_args+=(--task "$task")
+
+  "$CL" spawn --name "$name" --mode "$mode" "${extra_args[@]}"
+}
+
+case "$CMD" in
+  ls|list)      cmd_ls "$@" ;;
+  attach)       cmd_attach "$@" ;;
+  stop)         cmd_stop "$@" ;;
+  kill)         cmd_kill "$@" ;;
+  pin)          cmd_pin "$@" ;;
+  unpin)        cmd_unpin "$@" ;;
+  adopt)        cmd_adopt "$@" ;;
+  send)         cmd_send "$@" ;;
+  inbox)        cmd_inbox "$@" ;;
+  log)          cmd_log "$@" ;;
+  models|backends) cmd_models ;;
+  doctor)       cmd_doctor ;;
+  version)      cmd_version "$@" ;;
+  prune)        cmd_prune "$@" ;;
+  help|--help|-h) sed -n '3,22p' "$0" ;;
+  *)            cmd_spawn "$CMD" "$@" ;;
+esac

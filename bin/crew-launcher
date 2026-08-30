@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# crew-launcher — claude 启动层(2026-08-30 crew L 重构 Week 3)
+#
+# 职责:把 backend/key/policy/sid 组装成 claude 命令,exec 起来
+#
+# 用法:
+#   crew-launcher spawn --name <name> --mode <fg|tmux> [--fresh] [--task "..."]
+#
+#   --mode fg:foreground,exec 替换当前 shell 成 claude(需 pty)
+#   --mode tmux:调 crew-tmux ensure + run,让 tmux pane 里的 shell 跑 claude
+#
+# 读的 crew-session 字段:sid/backend/key/policy(自动读 policy_body 若有)
+# 写的 crew-session 字段:sid(初次)/fgpid(fg 模式)/notmux(mode 记忆)
+#
+# 环境变量:
+#   CREW_STATE       (透传)
+#   CREW_HOME        backends/policy 模板目录
+#   CREW_CLAUDE_BIN  claude 二进制路径(默认 /work/node20/bin/claude 或 claude-yolo)
+
+set -uo pipefail
+
+CREW_STATE="${CREW_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/claude-crew}"
+CREW_HOME="${CREW_HOME:-$HOME/.config/claude-crew}"
+CLAUDE_BIN="${CREW_CLAUDE_BIN:-${CLAUDE_BIN:-/work/node20/bin/claude}}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CS="$SCRIPT_DIR/crew-session"
+CT="$SCRIPT_DIR/crew-tmux"
+
+usage() {
+  cat <<EOF >&2
+usage: crew-launcher spawn --name <name> --mode <fg|tmux> [--fresh] [--task "..."]
+
+  --name <name>     必需,crew 会话名
+  --mode fg|tmux    必需,启动模式
+  --fresh           生成新 sid(不 resume 老)
+  --task "..."      起后灌一段初始任务(tmux 模式:send-keys;fg 模式:忽略)
+EOF
+  exit 2
+}
+
+# 生成随机 uuid(用 /proc/sys/kernel/random/uuid,依赖 kernel)
+gen_uuid() {
+  if [ -r /proc/sys/kernel/random/uuid ]; then
+    cat /proc/sys/kernel/random/uuid
+  else
+    # fallback:用 openssl 或 uuidgen
+    command -v uuidgen >/dev/null 2>&1 && uuidgen || \
+      command -v openssl >/dev/null 2>&1 && openssl rand -hex 16 | sed 's/\(........\)\(....\)\(....\)\(....\)\(............\)/\1-\2-\3-\4-\5/' || \
+      { echo "no uuid source" >&2; return 1; }
+  fi
+}
+
+# 读 backend conf(BASE_URL/MODEL/TOKEN/KEY_MODE)—— 老 crew 兼容
+load_backend_conf() {
+  local name="$1"
+  local backend
+  backend=$("$CS" get "$name" backend 2>/dev/null || echo "")
+  [ -z "$backend" ] && { echo "[crew-launcher] no backend for '$name'(先 crew-session set <n> backend X)" >&2; return 1; }
+  local conf="$CREW_HOME/backends/$backend.conf"
+  [ -f "$conf" ] || { echo "[crew-launcher] backend conf '$conf' not found" >&2; return 1; }
+  # 只 source 已知字段,防注入
+  local line k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      BASE_URL|MODEL|TOKEN|KEY_MODE|ENV_EXTRA|CLAUDE_FLAGS)
+        # 去掉两端空白
+        v=$(echo "$v" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//')
+        eval "BK_$k=\"\$v\""
+        ;;
+    esac
+  done < "$conf"
+}
+
+# 组装 claude 命令行(数组形式,避 quoting)
+build_claude_argv() {
+  local name="$1" fresh="$2"
+  local -a argv=()
+  # model
+  [ -n "${BK_MODEL:-}" ] && argv+=( --model "$BK_MODEL" )
+  # dangerously-skip-permissions(默认加,除非 conf 说别)
+  case " ${BK_CLAUDE_FLAGS:-} " in
+    *" --dangerously-skip-permissions "*) : ;;
+    *) argv+=( --dangerously-skip-permissions ) ;;
+  esac
+  # sid: --resume 老 sid,或 --session-id 新 uuid
+  local sid=""
+  if [ "$fresh" != "1" ]; then
+    sid=$("$CS" get "$name" sid 2>/dev/null || true)
+  fi
+  if [ -n "$sid" ]; then
+    argv+=( --resume "$sid" )
+  else
+    sid=$(gen_uuid) || return 1
+    argv+=( --session-id "$sid" )
+    "$CS" set "$name" sid "$sid" >/dev/null
+  fi
+  # policy(--append-system-prompt "$(cat FILE)")—— 通过 shell 展开,launcher 里用数组不能展开,写 wrapper 处理
+  # 输出 argv 到 stdout(空格分隔,shell-quote 化,调用方 eval 或 array)
+  printf '%s\n' "${argv[@]}"
+}
+
+# spawn --name X --mode fg|tmux [...]
+cmd_spawn() {
+  local name="" mode="" fresh=0 task=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name="$2"; shift 2 ;;
+      --mode) mode="$2"; shift 2 ;;
+      --fresh) fresh=1; shift ;;
+      --task) task="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -z "$name" ] || [ -z "$mode" ] && usage
+  case "$mode" in fg|tmux) : ;; *) echo "[crew-launcher] mode 必须 fg 或 tmux" >&2; usage ;; esac
+
+  # 加载 backend
+  load_backend_conf "$name" || return 1
+
+  # 处理 policy body(A3):policy 字段存在 → 用 policy_body 文件传给 --append-system-prompt
+  local policy_body_arg=""
+  if "$CS" has "$name" policy 2>/dev/null; then
+    local pol
+    pol=$("$CS" get "$name" policy)
+    # 从模板生成 body 落文件(如果 policy_body 字段不存在)
+    if ! "$CS" has "$name" policy_body 2>/dev/null; then
+      local tmpl="$CREW_HOME/templates/policy-$pol.md"
+      [ -f "$tmpl" ] || tmpl="$SCRIPT_DIR/../templates/policy-$pol.md"
+      if [ -f "$tmpl" ]; then
+        # 提取 --- 后正文(和老 extract_policy_body 一致)
+        local body
+        body=$(awk '/^---$/{flag=1; next} flag' "$tmpl")
+        [ -n "$body" ] && "$CS" set "$name" policy_body "$body" >/dev/null
+      fi
+    fi
+    if "$CS" has "$name" policy_body 2>/dev/null; then
+      policy_body_arg="$CREW_STATE/$name.policy_body"
+    fi
+  fi
+
+  # 组装 argv(不含 policy)—— 输出数组
+  local argv_lines
+  argv_lines=$(build_claude_argv "$name" "$fresh") || return 1
+  # 转数组
+  local -a argv=()
+  while IFS= read -r line; do
+    argv+=("$line")
+  done <<< "$argv_lines"
+  # 加 policy(如果有 body 文件,通过 wrapper 让 shell 展开)
+  local extra_policy=""
+  [ -n "$policy_body_arg" ] && extra_policy=" --append-system-prompt \"\$(cat $(printf %q "$policy_body_arg"))\""
+
+  # env 前缀
+  local envp=""
+  [ -n "${BK_BASE_URL:-}" ] && envp+=" ANTHROPIC_BASE_URL=$(printf %q "$BK_BASE_URL")"
+  [ -n "${BK_TOKEN:-}" ] && envp+=" ANTHROPIC_AUTH_TOKEN=$(printf %q "$BK_TOKEN")"
+  [ -n "${BK_ENV_EXTRA:-}" ] && envp+=" $BK_ENV_EXTRA"
+
+  # 拼完整命令(每次生成 launcher 脚本文件传 tmux/fg,避 quoting)
+  local launcher="/tmp/crew-launch-$name.sh"
+  {
+    echo "#!/bin/bash"
+    echo "# generated by crew-launcher for '$name' mode=$mode"
+    echo "export PATH=/work/node20/bin:\$PATH LANG=C.UTF-8 LC_ALL=C.UTF-8 IS_SANDBOX=1"
+    printf 'exec env%s "%s"' "$envp" "$CLAUDE_BIN"
+    for a in "${argv[@]}"; do
+      printf ' %s' "$(printf %q "$a")"
+    done
+    printf '%s' "$extra_policy"
+    echo
+  } > "$launcher"
+  chmod +x "$launcher"
+
+  # mode fg:exec launcher(取代当前 shell)
+  # mode tmux:调 crew-tmux ensure + run
+  case "$mode" in
+    fg)
+      "$CS" set "$name" notmux "1" >/dev/null
+      "$CS" set "$name" fgpid "$$" >/dev/null
+      exec bash "$launcher"
+      ;;
+    tmux)
+      "$CS" set "$name" notmux "0" >/dev/null
+      "$CT" ensure "$name" || { echo "[crew-launcher] ensure tmux 失败" >&2; return 1; }
+      # 等 pane 里 shell 准备好(输出 prompt)
+      local resolved
+      resolved=$("$CT" resolve "$name")
+      for i in $(seq 1 20); do
+        timeout 3 tmux capture-pane -t "$resolved" -p 2>/dev/null | grep -qE '\$|#|❯' && break
+        sleep 0.15
+      done
+      "$CT" run "$name" "$launcher"
+      # task:launcher 起 claude 后,再 send-keys task(在 claude REPL 里)
+      if [ -n "$task" ]; then
+        sleep 2  # 等 claude 起来
+        timeout 3 tmux send-keys -t "$resolved" -l "$task"
+        sleep 0.3
+        timeout 3 tmux send-keys -t "$resolved" Enter
+      fi
+      echo "[crew-launcher] '$name' mode=tmux ready (tmux=$resolved, launcher=$launcher)"
+      ;;
+  esac
+}
+
+case "${1:-}" in
+  spawn)  shift; cmd_spawn "$@" ;;
+  help|--help|-h) sed -n '3,15p' "$0" ;;
+  '') usage ;;
+  *) echo "[crew-launcher] unknown command: $1" >&2; exit 2 ;;
+esac
