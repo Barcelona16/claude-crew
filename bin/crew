@@ -88,6 +88,11 @@ set -uo pipefail
 CREW_HOME="${CREW_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-crew}"
 CREW_STATE="${CREW_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/claude-crew}"
 BACKEND_DIR="$CREW_HOME/backends"
+# AGENT_POLICY 模板目录:优先 user 覆盖($CREW_HOME/templates),回落到仓内 templates/。
+# 2026-08-30 用户拍板"方案 2 AGENT_POLICY 分层派发"落地。缺省 none=不注入 --append-system-prompt。
+CREW_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
+POLICY_DIR_USER="$CREW_HOME/templates"
+POLICY_DIR_REPO="$CREW_SCRIPT_DIR/templates"
 KEYS_FILE="$CREW_HOME/keys.conf"                 # lines: <alias>=<api-key>  (full-line # comments ok)
 REG="$CREW_STATE/registry"                       # lines: <cwd>\t<name>
 CLAUDE_BIN="${CREW_CLAUDE_BIN:-$(command -v claude || echo claude)}"
@@ -275,13 +280,14 @@ model_for_backend(){
 # (e.g. joycode models). It routes through crew-proxy (:8788) -> CCR just like the ccr presets.
 load_backend(){
   local b="$1" f="$BACKEND_DIR/$1.conf"
-  BK_BASE_URL=""; BK_MODEL=""; BK_TOKEN=""; BK_TOKEN_CMD=""; BK_TOKEN_ENV=""; BK_ENSURE_CMD=""; BK_ENV_EXTRA=""; BK_DANGEROUS=""; BK_CLAUDE_FLAGS=""; BK_KEY_MODE=""
+  BK_BASE_URL=""; BK_MODEL=""; BK_TOKEN=""; BK_TOKEN_CMD=""; BK_TOKEN_ENV=""; BK_ENSURE_CMD=""; BK_ENV_EXTRA=""; BK_DANGEROUS=""; BK_CLAUDE_FLAGS=""; BK_KEY_MODE=""; BK_AGENT_POLICY=""
   if [ -f "$f" ]; then
-    local BASE_URL="" MODEL="" TOKEN="" TOKEN_CMD="" TOKEN_ENV="" ENSURE_CMD="" ENV_EXTRA="" DANGEROUS="" CLAUDE_FLAGS="" KEY_MODE=""
+    local BASE_URL="" MODEL="" TOKEN="" TOKEN_CMD="" TOKEN_ENV="" ENSURE_CMD="" ENV_EXTRA="" DANGEROUS="" CLAUDE_FLAGS="" KEY_MODE="" AGENT_POLICY=""
     # shellcheck disable=SC1090
     . "$f"
     BK_BASE_URL="$BASE_URL"; BK_MODEL="$MODEL"; BK_TOKEN="$TOKEN"; BK_TOKEN_CMD="$TOKEN_CMD"; BK_TOKEN_ENV="$TOKEN_ENV"
     BK_ENSURE_CMD="$ENSURE_CMD"; BK_ENV_EXTRA="$ENV_EXTRA"; BK_DANGEROUS="$DANGEROUS"; BK_CLAUDE_FLAGS="$CLAUDE_FLAGS"; BK_KEY_MODE="$KEY_MODE"
+    BK_AGENT_POLICY="$AGENT_POLICY"
   elif case "$b" in *,*) true;; *) false;; esac; then
     # synthesized ccr backend "provider,realmodel" (no preset file)
     BK_BASE_URL="http://127.0.0.1:${CREW_PROXY_PORT:-8788}"; BK_MODEL="$b"; BK_TOKEN="test"
@@ -289,6 +295,45 @@ load_backend(){
   else
     die "backend '$b' not found ($f); pass --model <backend> or --pick. available: $(list_backends_inline)"
   fi
+}
+
+# 解析 AGENT_POLICY 值 → 输出对应模板文件路径(找不到/未知/none 时空输出且返 0)
+# 2026-08-30 用户拍板方案 2:分层派发规则从 CLAUDE.md 提到 crew system prompt 层。
+# 缺省 policy=none 或未设 → 不注入(向后兼容 21 个存量 crew)
+# 未知值 → 报警回落 none(crew doctor 也会报)
+# CREW_POLICY_DISABLE=1 → 强制跳过(应急旁路)
+resolve_policy_template(){
+  local policy="${1:-}"
+  # 应急旁路:整体禁 policy 注入
+  [ "${CREW_POLICY_DISABLE:-0}" = "1" ] && return 0
+  # 缺省或显式 none:不注入
+  [ -z "$policy" ] && return 0
+  [ "$policy" = "none" ] && return 0
+  # 校验合法值(未知回落 none 并报警)
+  case "$policy" in
+    conservative|balanced|aggressive) : ;;
+    *) log "WARN: unknown AGENT_POLICY '$policy' (must be one of: none/conservative/balanced/aggressive); falling back to none"; return 0 ;;
+  esac
+  # 找模板文件:user 覆盖优先,回落到仓内
+  local f
+  for d in "$POLICY_DIR_USER" "$POLICY_DIR_REPO"; do
+    f="$d/policy-$policy.md"
+    if [ -f "$f" ]; then
+      printf '%s' "$f"
+      return 0
+    fi
+  done
+  log "WARN: AGENT_POLICY=$policy but no template found at $POLICY_DIR_USER or $POLICY_DIR_REPO; skipping injection"
+  return 0
+}
+
+# 从模板文件抽出 --- 之后的正文(前面是元数据/警告不注入 claude)
+extract_policy_body(){
+  local f="$1"
+  [ -f "$f" ] || return 0
+  # awk:遇到第一行 "---" 之后开始输出,直到遇到第二行 "---" 停(与 markdown frontmatter 语义一致,但用第一段 --- 之间为元数据)
+  # 本仓模板约定:第一个 --- 之后是要注入的正文,不再有第二个 ---(注入到文件末尾)
+  awk 'seen==1 { print } /^---$/ && seen==0 { seen=1 }' "$f"
 }
 
 # --- api keys (switchable, independent of backend) --------------------------
@@ -722,6 +767,23 @@ ensure_session(){
     case " $flags " in *" --dangerously-skip-permissions "*) :;; *) flags="$flags --dangerously-skip-permissions";; esac
   fi
   local modelarg=""; [ -n "$BK_MODEL" ] && modelarg="--model $BK_MODEL"
+
+  # AGENT_POLICY 分层派发注入(2026-08-30 方案 2 落地)
+  # backends/*.conf 声明 AGENT_POLICY=balanced 等 → 读 templates/policy-<value>.md 拼进 --append-system-prompt
+  # 缺省 none 或未声明 → 跳过(21 个存量 crew 零改动)
+  # CREW_POLICY_DISABLE=1 → 应急旁路
+  local _policy_tmpl _policy_body
+  _policy_tmpl="$(resolve_policy_template "$BK_AGENT_POLICY")"
+  if [ -n "$_policy_tmpl" ]; then
+    _policy_body="$(extract_policy_body "$_policy_tmpl")"
+    if [ -n "$_policy_body" ]; then
+      case " $flags " in
+        *" --append-system-prompt "*) log "WARN: --append-system-prompt already in CLAUDE_FLAGS; skipping AGENT_POLICY injection" ;;
+        *) flags="$flags --append-system-prompt $(printf %q "$_policy_body")"
+           log "AGENT_POLICY=$BK_AGENT_POLICY injected (template: $_policy_tmpl)" ;;
+      esac
+    fi
+  fi
 
   # Completion-notify Stop hook (ONLY for sessions that have a .notify target): inject a
   # per-session settings.json whose Stop hook calls `crew __notify-hook`. That hook scans

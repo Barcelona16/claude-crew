@@ -51,3 +51,15 @@ DANGEROUS=
 
 # Override the flags passed to `claude` entirely (advanced).
 CLAUDE_FLAGS=
+
+# AGENT_POLICY — 分层派发规则(2026-08-30 用户拍板方案 2 落地)
+# crew 启动时把 templates/policy-<value>.md 的正文拼进 --append-system-prompt,让
+# 智能体从'main-loop 干重活'过渡到'派子 agent/新 crew 干重活,主脑保持轻'。
+# 合法值:none/conservative/balanced/aggressive(未知会告警回落 none)
+#   none         (默认) 不注入任何附加 system prompt,行为等同于本字段未加时。存量 21 个 crew 就用这档保持零改动
+#   conservative 轻提示,推荐大 IO 派子 agent 但不强制。适合长稳业务(dongkv/chaos/drc)
+#   balanced     标准分层,判据明确(grep 3+ 文件派子 agent、跑测试派 crew 等)。适合 workflow-code/review-*/verify
+#   aggressive   主脑档硬约束,强度最高。仅推荐主脑 work
+# 应急旁路:环境变量 CREW_POLICY_DISABLE=1 全局跳过 policy 注入(不改 conf)
+# 模板搜索顺序:$CREW_HOME/templates/policy-<value>.md → 仓内 templates/(fallback)
+AGENT_POLICY=
