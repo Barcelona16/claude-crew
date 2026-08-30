@@ -1,0 +1,4 @@
+[crew] backend 'Claude-Opus-4.8-joybuilder' not found (/root/.config/claude-crew/backends/Claude-Opus-4.8-joybuilder.conf); pass --model <backend> or --pick. available: mock 
+---exit=0---
+---state files---
+registry

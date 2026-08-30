@@ -1,0 +1,8 @@
+== crew doctor ==
+  crew 0d98e34 (2026-08-30) [main]
+[crew] ✓ 已是最新(= origin/main)
+  [ok]   CCR listening on :3456
+  [ok]   crew-proxy listening on :8788
+  [WARN] no keys.conf at /root/.config/claude-crew/keys.conf
+  [ok]   no key-policy.conf (single-key passthrough — nothing to check)
+---exit=0---

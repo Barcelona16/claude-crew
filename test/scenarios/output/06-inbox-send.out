@@ -1,0 +1,13 @@
+[crew] queued -> inbox of 'inbox-test' (from workflow-code)
+---peek---
+── #1  from workflow-code  at 2026-08-30 12:36:40 ──
+hello world
+
+(peeked 1; not consumed — omit --peek to consume)
+---consume---
+── #1  from workflow-code  at 2026-08-30 12:36:40 ──
+hello world
+
+(consumed 1 message(s))
+---after consume peek---
+(inbox empty for 'inbox-test')
