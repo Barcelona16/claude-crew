@@ -53,6 +53,10 @@ FRESH=0
 SAFE=0
 USE_CUR_TMUX=0  # 2026-08-31 audit-crew P2-b:--use-current-tmux flag
 DIR="$PWD"
+# 2026-08-31:全程扫描 flags(与 v1 一致)——flag 可出现在会话名之后,如 `crew t1 --model X`。
+# 非 flag(子命令/会话名/task)收进 POS,flag 在任意位置都被吃掉。避免 `crew <name> --model X`
+# 里 --model 被当位置参数吞掉、静默不生效(换模型看似没反应)的坑。
+POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --model) BACKEND="$2"; shift 2 ;;
@@ -65,10 +69,11 @@ while [ $# -gt 0 ]; do
     --safe) SAFE=1; shift ;;
     --dir) DIR="$2"; shift 2 ;;
     --pick) shift ;;
-    --) shift; break ;;
-    *) break ;;
+    --) shift; while [ $# -gt 0 ]; do POS+=("$1"); shift; done; break ;;
+    *) POS+=("$1"); shift ;;
   esac
 done
+set -- "${POS[@]}"
 
 if [ $# -eq 0 ]; then
   set -- ls
@@ -360,8 +365,24 @@ cmd_spawn() {
     local existing
     existing=$("$CT" resolve "$name" 2>/dev/null || true)
     if [ -n "$existing" ] && "$CT" list 2>/dev/null | grep -qFx "$existing"; then
-      log "'$name' 已 live (tmux=$existing) → attach(要新起加 --fresh 或 crew kill 后再来)"
-      exec "$CT" attach "$name"
+      # 2026-08-31:补回 v1 的"live 会话就地换 model/key"语义(v2 重构时丢了)。
+      # 显式传了 --model/--key 且与 state 现值不同 → 停旧的、写新值、往下 spawn(sid 在→launcher
+      # 自动 --resume,历史保留)。没传(纯 crew <name>)→ 仍 attach,不动。
+      local _cur_backend _cur_key _want_restart=0
+      _cur_backend=$("$CS" get "$name" backend 2>/dev/null || echo "")
+      _cur_key=$("$CS" get "$name" key 2>/dev/null || echo "")
+      if [ -n "$BACKEND" ] && [ "$BACKEND" != "$_cur_backend" ]; then
+        log "切换 '$name' 模型: ${_cur_backend:-<无>} -> $BACKEND(重启,--resume 保历史)"; _want_restart=1
+      fi
+      if [ -n "$KEY" ] && [ "$KEY" != "$_cur_key" ]; then
+        log "切换 '$name' key: ${_cur_key:-<无>} -> $KEY(重启,--resume 保历史)"; _want_restart=1
+      fi
+      if [ "$_want_restart" = 1 ]; then
+        "$CT" kill "$name" 2>/dev/null || true   # 停旧的;sid/state 保留,下面 spawn 会 --resume
+      else
+        log "'$name' 已 live (tmux=$existing) → attach(换模型/key 加 --model/--key;要新起加 --fresh 或 crew kill 后再来)"
+        exec "$CT" attach "$name"
+      fi
     fi
   fi
 

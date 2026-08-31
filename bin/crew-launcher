@@ -21,7 +21,10 @@ set -uo pipefail
 
 CREW_STATE="${CREW_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/claude-crew}"
 CREW_HOME="${CREW_HOME:-$HOME/.config/claude-crew}"
-CLAUDE_BIN="${CREW_CLAUDE_BIN:-${CLAUDE_BIN:-/work/node20/bin/claude}}"
+# CLAUDE_BIN: CREW_CLAUDE_BIN 覆盖 > CLAUDE_BIN 覆盖 > PATH 里的 claude > 云端容器默认路径。
+# (2026-08-31 修:原默认硬编码 /work/node20/bin/claude 是云端路径,mac 上没有 —— 没设
+#  CREW_CLAUDE_BIN 时 mac 会找不到 claude 起不来会话。改为先探 PATH,回落云端路径。)
+CLAUDE_BIN="${CREW_CLAUDE_BIN:-${CLAUDE_BIN:-$(command -v claude 2>/dev/null || echo /work/node20/bin/claude)}}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CS="$SCRIPT_DIR/crew-session"
