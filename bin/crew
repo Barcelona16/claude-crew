@@ -84,7 +84,9 @@ done
 set -- "${POS[@]}"
 
 if [ $# -eq 0 ]; then
-  set -- ls
+  # 2026-09-01:crew 空参 → 交互(选已有会话 attach,或"+ 新建")。非交互(脚本/无 tty)回落 ls
+  # (保持管道/脚本行为不变)。CREW_NO_MENU=1 也强制 ls。
+  if [ -t 0 ] && [ -z "${CREW_NO_MENU:-}" ]; then set -- menu; else set -- ls; fi
 fi
 
 CMD="$1"; shift
@@ -178,6 +180,38 @@ cmd_attach() {
   local name="$1"
   [ -z "$name" ] && die "usage: crew attach <name>"
   "$CT" attach "$name"
+}
+
+# crew(空参)交互菜单:列已有会话选一个 attach,或选"+ 新建会话"进创建流程(问名 → spawn,
+# 新起会走 cmd_spawn 里"没输入就弹菜单选模型")。需交互终端(入口已保证)。
+cmd_menu() {
+  [ -t 0 ] || { cmd_ls; return 0; }   # 无 tty:回落 ls,不去读 /dev/tty(会崩)
+  local live_sessions; live_sessions=$("$CT" list 2>/dev/null || echo "")
+  # 会话选项:每行 "会话名   (状态·模型)",带一个新建项。用 tab 后缀藏真实会话名便于回取。
+  local opts="+ 新建会话" nm st be tn
+  while IFS= read -r nm; do
+    [ -n "$nm" ] || continue
+    tn=""
+    if [ -f "$CREW_STATE/$nm.tmux" ]; then tn=$(cat "$CREW_STATE/$nm.tmux" 2>/dev/null)
+    elif [ -f "$CREW_STATE/$nm.tmuxname" ]; then tn=$(cat "$CREW_STATE/$nm.tmuxname" 2>/dev/null)
+    elif echo "$live_sessions" | grep -qFx "$nm"; then tn="$nm"
+    elif echo "$live_sessions" | grep -qFx "crew-$nm"; then tn="crew-$nm"; fi
+    st="resumable"; echo "$live_sessions" | grep -qFx "$tn" && st="live"
+    be=$("$CS" get "$nm" backend 2>/dev/null || echo "?")
+    opts+=$'\n'"$nm   ($st · $be)"
+  done < <("$CS" list 2>/dev/null | cut -f1 | sort -u)
+
+  local chosen; chosen=$(printf '%s\n' "$opts" | _pick_one "crew 会话(选一个 attach,或新建)" "+ 新建会话")
+  [ -z "$chosen" ] && return 0
+  if [ "$chosen" = "+ 新建会话" ]; then
+    local newname=""; printf '新会话名 > ' >&2; read -r newname </dev/tty 2>/dev/null || true
+    [ -z "$newname" ] && { log "取消"; return 0; }
+    cmd_spawn "$newname"   # 新起:cmd_spawn 里没传 --model 会自动弹选模型
+  else
+    # 取回真实会话名(截 "名   (..." 前段)
+    local pick_name; pick_name="${chosen%%   (*}"
+    cmd_spawn "$pick_name"  # 已有 live → attach;resumable → 重起
+  fi
 }
 
 cmd_stop() {
@@ -400,7 +434,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.0.8 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.0.9 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 # 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
@@ -792,6 +826,7 @@ case "$CMD" in prune) : ;; *) crew_autoprune ;; esac
 
 case "$CMD" in
   ls|list)      cmd_ls "$@" ;;
+  menu)         cmd_menu ;;
   attach)       cmd_attach "$@" ;;
   stop)         cmd_stop "$@" ;;
   kill)         cmd_kill "$@" ;;
