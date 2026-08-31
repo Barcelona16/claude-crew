@@ -74,7 +74,7 @@ if (ci >= 0) { dprov = rdef.slice(0, ci); dmodel = rdef.slice(ci + 1); }
 // ("joycode-oai,Kimi-K3" -> "joycode-oai"), so a policy-less model can still resolve the
 // key its CCR provider actually uses (crew-proxy passthrough rides that provider's key).
 function deriveBaseFromBackends(rm) {
-  var out = { base: "", prov: "" };
+  var out = { base: "", prov: "", model: "" };
   if (!rm || rm === "?") return out;
   try {
     var dir = CONF + "/backends", files, i, txt, m, mm, c, bu;
@@ -86,8 +86,11 @@ function deriveBaseFromBackends(rm) {
       if (m) {
         mm = m[2].trim(); c = mm.indexOf(",");
         if (c >= 0) { out.prov = mm.slice(0, c).trim(); mm = mm.slice(c + 1); }
+        // The conf's real model segment — lets callers replace a backend NAME (opus47)
+        // with the model it actually routes to (Claude-Opus-4.7-joybuilder) for display.
+        out.model = mm.trim();
         out.base = ((/(^|\n)[ \t]*BASE_URL[ \t]*=[ \t]*([^\n]+)/.exec(txt) || [])[2] || "").trim();
-        if (out.prov || out.base) return out;
+        if (out.prov || out.base || out.model) return out;
       }
     }
     files = fs.readdirSync(dir);
@@ -98,6 +101,7 @@ function deriveBaseFromBackends(rm) {
       mm = m[2].trim(); c = mm.indexOf(",");
       if (c >= 0) { out.prov = mm.slice(0, c).trim(); mm = mm.slice(c + 1); }
       if (mm.trim() !== rm) { out.prov = ""; continue; }
+      out.model = mm.trim();
       bu = /(^|\n)[ \t]*BASE_URL[ \t]*=[ \t]*([^\n]+)/.exec(txt);
       out.base = bu ? bu[2].trim() : "";
       return out;
@@ -115,7 +119,15 @@ var realmodel = model;
 
 // ---- routing mode: live ANTHROPIC_BASE_URL wins; else derive from conf; else proxy default ----
 var base = process.env.ANTHROPIC_BASE_URL || "";
-var bconf = base ? { base: "", prov: "" } : deriveBaseFromBackends(realmodel);
+// Always resolve the backend conf: even when live env gives us the base, the model value may be
+// a backend NAME ("opus47") — the conf tells us the real model it routes to for display.
+var bconf = deriveBaseFromBackends(realmodel);
+// If model was a backend NAME whose conf carries a different real model segment, show the real
+// one (opus47 -> Claude-Opus-4.7-joybuilder). Also adopt its provider prefix for key derivation.
+if (bconf.model && bconf.model !== realmodel) {
+  realmodel = bconf.model; model = bconf.model;
+  if (!mprov && bconf.prov) mprov = bconf.prov;
+}
 if (!base) base = bconf.base;
 var isProxy = /:8788/.test(base), isCCR = /:3456/.test(base);
 if (!base && !isProxy && !isCCR) isProxy = true;   // crew standard: all backends route via :8788
