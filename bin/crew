@@ -28,7 +28,7 @@ set -uo pipefail
 
 CREW_STATE="${CREW_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/claude-crew}"
 CREW_HOME="${CREW_HOME:-$HOME/.config/claude-crew}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"  # 2026-08-31:readlink -f resolve 软链(PATH crew 软链调用时 SCRIPT_DIR 误指 /root/.local/bin 找不到 crew-session,咚咚 crew 命令 exit 127 根因)
 CS="$SCRIPT_DIR/crew-session"
 CT="$SCRIPT_DIR/crew-tmux"
 CL="$SCRIPT_DIR/crew-launcher"
