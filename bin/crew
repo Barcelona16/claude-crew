@@ -52,7 +52,8 @@ NO_TMUX=0
 FRESH=0
 SAFE=0
 USE_CUR_TMUX=0  # 2026-08-31 audit-crew P2-b:--use-current-tmux flag
-DIR="$PWD"
+DIR=""          # 2026-08-31:默认空 = "未显式传 --dir"(区分于 "传了 = $PWD")。cmd_spawn
+                # 里按 显式--dir > registry反查 > $PWD 解析真实工作目录。
 # 2026-08-31:全程扫描 flags(与 v1 一致)——flag 可出现在会话名之后,如 `crew t1 --model X`。
 # 非 flag(子命令/会话名/task)收进 POS,flag 在任意位置都被吃掉。避免 `crew <name> --model X`
 # 里 --model 被当位置参数吞掉、静默不生效(换模型看似没反应)的坑。
@@ -335,11 +336,27 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.0.1 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.0.2 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 cmd_prune() {
   echo "[crew] prune not implemented in v2 skeleton" >&2
+}
+
+# 2026-08-31:解析会话真实工作目录。优先级(对齐 v1 path_for_name + $PWD 回落):
+#   显式 --dir($DIR 非空) > registry 里 <cwd>\t<name> 按 name 反查 > state.dir > $PWD。
+# 换模型/重启 live 会话时不应丢工作目录 —— 会话早在 registry(首次 spawn 时写入),从那反查
+# 回它原来的目录;claude 的 --resume 也依赖在正确 cwd 起(否则按错 project 目录找历史崩)。
+resolve_session_dir() {
+  local name="$1" d=""
+  if [ -n "$DIR" ]; then echo "$DIR"; return; fi
+  local reg="$CREW_STATE/registry"
+  if [ -f "$reg" ]; then
+    d=$(awk -F'\t' -v n="$name" '$2==n{print $1; exit}' "$reg" 2>/dev/null)
+  fi
+  [ -z "$d" ] && d=$("$CS" get "$name" dir 2>/dev/null || echo "")
+  [ -z "$d" ] && d="$PWD"
+  echo "$d"
 }
 
 cmd_spawn() {
@@ -349,12 +366,23 @@ cmd_spawn() {
 
   # 2026-08-30 audit-crew A5(P0):registry 写方收口 —— spawn 起会话时把 <cwd,name>
   # 落 registry(v2 之前只 clean 删行、从不写入,导致 agent-bridge crew-session-sync 侧
-  # 长期看不见 v2 会话,DIR 兜底靠 /proc)。DIR 用 --dir 或当前 $PWD,与 v1:248 语义对齐。
-  # adopt 走 cmd_adopt 单独入口,不经这里。
+  # 长期看不见 v2 会话,DIR 兜底靠 /proc)。
+  # 2026-08-31:解析真实工作目录(显式--dir > registry反查 > state.dir > $PWD),供 registry
+  # 写入与传给 launcher 共用。显式 --dir 且与 registry 现值不同时,更新该行(原逻辑只首次写,
+  # 导致换模型重启时 --dir 被忽略、会话掉回 /work)。
   local reg="$CREW_STATE/registry"
   mkdir -p "$CREW_STATE"
+  local session_dir; session_dir=$(resolve_session_dir "$name")
   if ! [ -f "$reg" ] || ! awk -F'\t' -v m="$name" '$2==m{ok=1}END{exit !ok}' "$reg" 2>/dev/null; then
-    printf '%s\t%s\n' "$DIR" "$name" >> "$reg"
+    printf '%s\t%s\n' "$session_dir" "$name" >> "$reg"
+  elif [ -n "$DIR" ]; then
+    # 显式 --dir:若 registry 里该 name 的 cwd 与之不同,重写该行
+    local cur_reg_dir
+    cur_reg_dir=$(awk -F'\t' -v n="$name" '$2==n{print $1; exit}' "$reg" 2>/dev/null)
+    if [ "$cur_reg_dir" != "$DIR" ]; then
+      awk -F'\t' -v n="$name" -v d="$DIR" 'BEGIN{OFS="\t"} $2==n{$1=d} {print}' "$reg" > "$reg.tmp" 2>/dev/null \
+        && mv "$reg.tmp" "$reg"
+    fi
   fi
 
   # 2026-08-30 修:v1 语义——crew <name> 无 task 且 tmux 已 live 时,attach 而非新起
@@ -419,7 +447,7 @@ cmd_spawn() {
   [ "$FRESH" = 1 ] && extra_args+=(--fresh)
   [ -n "$task" ] && extra_args+=(--task "$task")
 
-  "$CL" spawn --name "$name" --mode "$mode" "${extra_args[@]}"
+  "$CL" spawn --name "$name" --mode "$mode" --dir "$session_dir" "${extra_args[@]}"
 }
 
 case "$CMD" in

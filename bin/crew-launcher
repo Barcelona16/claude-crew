@@ -119,7 +119,15 @@ build_claude_argv() {
     sid=$("$CS" get "$name" sid 2>/dev/null || true)
   fi
   if [ -n "$sid" ]; then
-    argv+=( --resume "$sid" )
+    # 2026-08-31 修 Bug B:sid 存在不代表历史文件在(换目录/历史被清时,claude 按 cwd 的
+    # project 目录找不到该 sid,会 "No conversation found" 直接退出)。对齐 v1:757——先探
+    # $HOME/.claude/projects/*/<sid>.jsonl 存在才 --resume,否则复用 sid 但当新起
+    # (--session-id),历史文件之后自然生成。避免换模型/换目录重启崩溃。
+    if ls "$HOME"/.claude/projects/*/"$sid".jsonl >/dev/null 2>&1; then
+      argv+=( --resume "$sid" )
+    else
+      argv+=( --session-id "$sid" )
+    fi
   else
     sid=$(gen_uuid) || return 1
     argv+=( --session-id "$sid" )
@@ -132,13 +140,14 @@ build_claude_argv() {
 
 # spawn --name X --mode fg|tmux [...]
 cmd_spawn() {
-  local name="" mode="" fresh=0 task=""
+  local name="" mode="" fresh=0 task="" dir=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
       --mode) mode="$2"; shift 2 ;;
       --fresh) fresh=1; shift ;;
       --task) task="$2"; shift 2 ;;
+      --dir) dir="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
@@ -147,6 +156,10 @@ cmd_spawn() {
 
   # 加载 backend
   load_backend_conf "$name" || return 1
+
+  # dir 回写 state,供 crew ls / 下次重启复用(crew-session 是通用 kv;crew ls 已有从
+  # /proc/cwd 与 registry 反查 dir 的逻辑,state.dir 作为额外来源不冲突)。
+  [ -n "$dir" ] && "$CS" set "$name" dir "$dir" >/dev/null 2>&1 || true
 
   # 处理 policy body(A3):policy 字段存在 → 用 policy_body 文件传给 --append-system-prompt
   local policy_body_arg=""
@@ -205,6 +218,9 @@ cmd_spawn() {
       echo 'rm -f "$0" 2>/dev/null || true'
     fi
     echo "export PATH=/work/node20/bin:\$PATH LANG=C.UTF-8 LC_ALL=C.UTF-8 IS_SANDBOX=1"
+    # 2026-08-31 修 Bug A:在起 claude 前 cd 到会话工作目录(对齐 v1:858/888)。v2 之前直接
+    # 在 tmux pane 当前目录起 claude → 换模型/重启会话丢工作目录,且 --resume 按错目录找历史崩。
+    [ -n "$dir" ] && printf 'cd %s || { echo "[crew] cannot cd to %s" >&2; exit 1; }\n' "$(printf %q "$dir")" "$(printf %q "$dir")"
     printf 'exec env%s "%s"' "$envp" "$CLAUDE_BIN"
     for a in "${argv[@]}"; do
       printf ' %s' "$(printf %q "$a")"
