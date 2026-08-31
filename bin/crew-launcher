@@ -199,6 +199,16 @@ cmd_spawn() {
   [ -n "${BK_BASE_URL:-}" ] && envp+=" ANTHROPIC_BASE_URL=$(printf %q "$BK_BASE_URL")"
   [ -n "${BK_TOKEN:-}" ] && envp+=" ANTHROPIC_AUTH_TOKEN=$(printf %q "$BK_TOKEN")"
   [ -n "${BK_ENV_EXTRA:-}" ] && envp+=" $BK_ENV_EXTRA"
+  # 2026-08-31 修 statusline 显示 bug:v2 重构时丢了 v1(crew.v1:775-776)对 CREW_* 的注入,
+  # 导致 claude 子进程不知道自己属于哪个 crew 会话 → crew-statusline.sh 认不出会话、回落到
+  # CCR Router.default(显示成 Claude-Opus-4.8-joybuilder + 默认 key)。补回:让 statusline /
+  # keyresolve 能拿到本会话真实 model/key。CREW_STATE 也让子进程内的 crew 命令指对状态目录。
+  local _sess_backend _sess_key
+  _sess_backend=$("$CS" get "$name" backend 2>/dev/null || echo "")
+  _sess_key=$("$CS" get "$name" key 2>/dev/null || echo "")
+  envp+=" CREW_SESSION=$(printf %q "$name") CREW_HOME=$(printf %q "$CREW_HOME") CREW_STATE=$(printf %q "$CREW_STATE")"
+  [ -n "$_sess_backend" ] && envp+=" CREW_MODEL=$(printf %q "$_sess_backend")"
+  [ -n "$_sess_key" ] && envp+=" CREW_KEY=$(printf %q "$_sess_key")"
 
   # 拼完整命令(每次生成 launcher 脚本文件传 tmux/fg,避 quoting)
   # 2026-08-30 audit-crew C4(P0):
