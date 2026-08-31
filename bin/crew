@@ -18,11 +18,14 @@
 #   crew inbox <name> [--peek]  读 inbox
 #   crew log <name>          看 transcript
 #   crew models|backends     列 backends
+#   crew keys                列 key 别名(值脱敏)
+#   crew addkey <key> [别名] 加一把 key 到 keys.conf(别名不给则自动派生)
 #   crew doctor              自检
 #   crew version [--check]   版本
 #
 # 全局 flags:
 #   --model M --key K --tmux --no-tmux --fresh --safe --pick --dir P
+#   --pick  交互选 model+key(菜单);crew <会话> 不带 --model 新起时也会自动弹菜单选
 
 set -uo pipefail
 
@@ -52,6 +55,7 @@ NO_TMUX=0
 FRESH=0
 SAFE=0
 USE_CUR_TMUX=0  # 2026-08-31 audit-crew P2-b:--use-current-tmux flag
+PICK=0          # 2026-08-31:--pick 强制弹交互菜单(即使已传 --model/--key)
 DIR=""          # 2026-08-31:默认空 = "未显式传 --dir"(区分于 "传了 = $PWD")。cmd_spawn
                 # 里按 显式--dir > registry反查 > $PWD 解析真实工作目录。
 # 2026-08-31:全程扫描 flags(与 v1 一致)——flag 可出现在会话名之后,如 `crew t1 --model X`。
@@ -69,7 +73,7 @@ while [ $# -gt 0 ]; do
     --fresh) FRESH=1; shift ;;
     --safe) SAFE=1; shift ;;
     --dir) DIR="$2"; shift 2 ;;
-    --pick) shift ;;
+    --pick) PICK=1; shift ;;
     --) shift; while [ $# -gt 0 ]; do POS+=("$1"); shift; done; break ;;
     *) POS+=("$1"); shift ;;
   esac
@@ -294,6 +298,51 @@ cmd_models() {
   done
 }
 
+# crew keys —— 列 key 别名(值脱敏)
+cmd_keys() {
+  local kf="$CREW_HOME/keys.conf"
+  echo "== keys =="
+  [ -f "$kf" ] || { echo "  (无 keys.conf)"; return 0; }
+  awk -F= '
+    /^[[:space:]]*#/ {next} /=/ {
+      a=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",a); if(a=="") next;
+      v=substr($0, index($0,"=")+1); gsub(/^[[:space:]]+|[[:space:]]+$/,"",v);
+      m = (length(v)>10) ? substr(v,1,4) "…" substr(v,length(v)-2) : "****";
+      printf "  %-14s %s\n", a, m;
+    }' "$kf"
+}
+
+# crew addkey <key> [别名] —— 简化加 key:写进 keys.conf。别名不给则从 key 派生。
+# 只做"写别名=key",不拉 /v1/models、不建 backend(那是 v1 add-key 的重活;此处按用户要的极简)。
+cmd_addkey() {
+  local key="$1" alias="${2:-}"
+  [ -z "$key" ] && die "usage: crew addkey <key> [别名]"
+  # 别名默认:key- + key 的 sha256 前 6(稳定、不含明文)
+  if [ -z "$alias" ]; then
+    local h
+    h=$(printf '%s' "$key" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } | cut -c1-6)
+    alias="key-$h"
+  fi
+  # 别名校验(与 crew-session 名规则一致:字母数字._-)
+  case "$alias" in *[!A-Za-z0-9._-]*) die "别名 '$alias' 含非法字符(仅允许 A-Za-z0-9._-)";; esac
+  local kf="$CREW_HOME/keys.conf"
+  mkdir -p "$CREW_HOME"
+  [ -f "$kf" ] || : > "$kf"
+  # 已存在同别名?覆盖其行(保留其余),否则追加。
+  if grep -qE "^[[:space:]]*$alias[[:space:]]*=" "$kf" 2>/dev/null; then
+    awk -v a="$alias" -v k="$key" '
+      { line=$0; t=$0; sub(/^[[:space:]]+/,"",t);
+        if (index(t, a "=")==1 || index(t, a " =")==1) { print a "=" k } else { print line } }
+    ' "$kf" > "$kf.tmp" && mv "$kf.tmp" "$kf"
+    log "更新 key 别名 '$alias'(覆盖旧值)"
+  else
+    printf '%s=%s\n' "$alias" "$key" >> "$kf"
+    log "加了 key 别名 '$alias'"
+  fi
+  chmod 600 "$kf" 2>/dev/null || true
+  echo "现有 key 别名:"; cmd_keys | grep -v '== keys =='
+}
+
 cmd_doctor() {
   local fix=0
   [ "${1:-}" = "--fix" ] && fix=1
@@ -348,7 +397,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.0.5 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.0.6 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 cmd_prune() {
@@ -359,6 +408,52 @@ cmd_prune() {
 #   显式 --dir($DIR 非空) > registry 里 <cwd>\t<name> 按 name 反查 > state.dir > $PWD。
 # 换模型/重启 live 会话时不应丢工作目录 —— 会话早在 registry(首次 spawn 时写入),从那反查
 # 回它原来的目录;claude 的 --resume 也依赖在正确 cwd 起(否则按错 project 目录找历史崩)。
+# --- 交互选择器(移植自 v1 --pick)------------------------------------------
+# _pick_one <title> <default>:选项从 stdin(每行一个),选中值到 stdout。fzf 优先,否则编号菜单
+# (接受编号、选项原文、唯一前缀;Enter 保持默认)。所有提示走 stderr,只有选中值进 stdout。
+_pick_one() {
+  local title="$1" def="$2" chosen=""
+  local opts=() line
+  while IFS= read -r line; do [ -n "$line" ] && opts+=("$line"); done
+  [ "${#opts[@]}" -eq 0 ] && { printf '%s' "$def"; return; }
+  if command -v fzf >/dev/null 2>&1; then
+    local ordered; ordered=$( { [ -n "$def" ] && printf '%s\n' "$def"; local o; for o in "${opts[@]}"; do [ "$o" = "$def" ] || printf '%s\n' "$o"; done; } )
+    chosen=$(printf '%s\n' "$ordered" | fzf --height=40% --reverse --prompt="$title > " \
+            --header="Enter=选中  Esc=保持默认 [$def]" 2>/dev/tty) || chosen=""
+  else
+    local i
+    printf '\n== %s ==  (输编号,或 Enter 保持默认: %s)\n' "$title" "$def" >&2
+    i=1; for line in "${opts[@]}"; do printf '  %2d) %s%s\n' "$i" "$line" "$([ "$line" = "$def" ] && printf '  (默认)')" >&2; i=$((i+1)); done
+    local reply; printf '  选 > ' >&2; read -r reply </dev/tty
+    if [ -z "$reply" ]; then chosen="$def"
+    elif [ "$reply" -ge 1 ] 2>/dev/null && [ "$reply" -le "${#opts[@]}" ] 2>/dev/null; then chosen="${opts[$((reply-1))]}"
+    else
+      local o m="" hits=0 h="" rl; rl=$(printf '%s' "$reply" | tr 'A-Z' 'a-z')
+      for o in "${opts[@]}"; do [ "$o" = "$reply" ] && { m="$o"; break; }; done
+      if [ -z "$m" ]; then
+        for o in "${opts[@]}"; do case "$(printf '%s' "$o" | tr 'A-Z' 'a-z')" in "$rl"*) hits=$((hits+1)); h="$o";; esac; done
+        [ "$hits" = 1 ] && m="$h"
+      fi
+      if [ -n "$m" ]; then chosen="$m"; else printf '  无匹配 "%s" — 保持默认: %s\n' "$reply" "$def" >&2; chosen="$def"; fi
+    fi
+  fi
+  [ -z "$chosen" ] && chosen="$def"
+  printf '%s' "$chosen"
+}
+# backend 名列表(backends/*.conf 去 .conf),每行一个
+_list_backends() {
+  local f
+  for f in "$CREW_HOME"/backends/*.conf; do
+    [ -f "$f" ] || continue
+    basename "$f" .conf
+  done | sort -u
+}
+# key 别名列表(keys.conf 的 alias=... 左侧),每行一个
+_list_keys() {
+  [ -f "$CREW_HOME/keys.conf" ] || return 0
+  awk -F= '/^[[:space:]]*#/{next} /=/{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$1); if($1)print $1}' "$CREW_HOME/keys.conf" | sort -u
+}
+
 resolve_session_dir() {
   local name="$1" d=""
   if [ -n "$DIR" ]; then echo "$DIR"; return; fi
@@ -375,6 +470,19 @@ cmd_spawn() {
   local name="$1"; shift
   local task="$*"
   [ -z "$name" ] && die "no name"
+
+  # 2026-08-31:--pick 强制交互选 model/key(换模型/新起的交互入口)。默认值取会话现有 backend/key
+  # (换模型时预选当前)。放在 attach 判断【之前】跑,这样选完的 BACKEND/KEY 能被下面的 live 换模型
+  # 逻辑识别(触发重启换模型)。仅 --pick 触发,避免误伤纯 `crew <会话>` attach。
+  # 需交互终端(-t 0);非交互(脚本)即使传 --pick 也跳过(无 tty 没法选)。
+  if [ "$PICK" = 1 ] && [ -t 0 ]; then
+    local _def_be; _def_be=$("$CS" get "$name" backend 2>/dev/null || echo "")
+    local _picked_be; _picked_be=$(_list_backends | _pick_one "选模型 backend ($name)" "$_def_be")
+    [ -n "$_picked_be" ] && BACKEND="$_picked_be"
+    local _def_key; _def_key=$("$CS" get "$name" key 2>/dev/null || echo "")
+    local _picked_key; _picked_key=$(_list_keys | _pick_one "选 key ($name)" "$_def_key")
+    [ -n "$_picked_key" ] && KEY="$_picked_key"
+  fi
 
   # 2026-08-30 audit-crew A5(P0):registry 写方收口 —— spawn 起会话时把 <cwd,name>
   # 落 registry(v2 之前只 clean 删行、从不写入,导致 agent-bridge crew-session-sync 侧
@@ -426,6 +534,20 @@ cmd_spawn() {
     fi
   fi
 
+  # 2026-08-31:走到这 = 确定要 spawn(没被 attach exec 掉)。若没传 --model 且会话也没记忆过
+  # backend、又是交互终端 → 弹菜单选(新起会话"没输入就交互")。已有记忆 backend 的(如重起旧会话)
+  # 不打扰,沿用记忆值。非交互(脚本)不弹,让下游按 state/报错处理。
+  if [ -z "$BACKEND" ] && [ -t 0 ] && ! "$CS" has "$name" backend 2>/dev/null; then
+    local _def_be2 _picked_be2
+    _def_be2=$(_list_backends | head -1)
+    _picked_be2=$(_list_backends | _pick_one "选模型 backend ($name)" "$_def_be2")
+    [ -n "$_picked_be2" ] && BACKEND="$_picked_be2"
+    if [ -z "$KEY" ] && ! "$CS" has "$name" key 2>/dev/null; then
+      local _picked_key2; _picked_key2=$(_list_keys | _pick_one "选 key ($name)" "")
+      [ -n "$_picked_key2" ] && KEY="$_picked_key2"
+    fi
+  fi
+
   [ -n "$BACKEND" ] && "$CS" set "$name" backend "$BACKEND"
   [ -n "$KEY" ] && "$CS" set "$name" key "$KEY"
   # --policy X:设 per-session policy 文件(v2 修② 2026-08-30)
@@ -474,6 +596,8 @@ case "$CMD" in
   inbox)        cmd_inbox "$@" ;;
   log)          cmd_log "$@" ;;
   models|backends) cmd_models ;;
+  keys)         cmd_keys ;;
+  addkey|add-key) cmd_addkey "$@" ;;
   doctor)       cmd_doctor "$@" ;;
   version)      cmd_version "$@" ;;
   prune)        cmd_prune "$@" ;;
