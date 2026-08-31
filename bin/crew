@@ -24,7 +24,8 @@
 #   crew addkey <key> [别名] 加一把 key 到 keys.conf(别名不给则自动派生)
 #   crew switch <会话>       交互切 key→model(都默认当前值,选完重启换)
 #   crew find <描述...>      搜已有会话历史,返回 Top5(会话名+概要+打开命令)
-#   crew prune [--dry-run]   清陈旧会话(>7d 删状态、>30d 连历史删;live/pinned 不删,平时自动跑)
+#   crew prune [--dry-run] [--days N] [--purge-days M]  清陈旧会话(默认>7d 删状态、>30d 连历史删;
+#                            live/pinned 不删,平时自动跑;每会话打空闲天数+结果)
 #   crew doctor              自检
 #   crew version [--check]   版本
 #
@@ -670,7 +671,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.2.1 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.2.2 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 # 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
@@ -715,6 +716,8 @@ cmd_prune() {
   local cut_state=$(( now - p_days*86400 )) cut_purge=$(( now - p_purge_days*86400 ))
   local live_sessions; live_sessions=$("$CT" list 2>/dev/null || echo "")
   local reaped=0 purged=0 kept=0 nm
+  # 每个会话打一行明细:空闲天数 + 动作/保留原因,一眼看清"为什么没删"。
+  printf '  %-20s %-10s %s\n' "会话" "空闲" "结果" >&2
   while IFS= read -r nm; do
     [ -n "$nm" ] || continue
     # live?(tmux 在跑)→ keep
@@ -724,27 +727,33 @@ cmd_prune() {
     elif echo "$live_sessions" | grep -qFx "$nm"; then tn="$nm"
     elif echo "$live_sessions" | grep -qFx "crew-$nm"; then tn="crew-$nm"
     fi
-    if [ -n "$tn" ] && echo "$live_sessions" | grep -qFx "$tn"; then kept=$((kept+1)); continue; fi
-    # pinned?→ keep(常驻会话如 work)
-    if "$CS" has "$nm" pintmux 2>/dev/null; then kept=$((kept+1)); continue; fi
-    local last; last=$(session_activity "$nm")
-    case "$last" in ''|*[!0-9]*) last=0;; esac
-    [ "$last" = 0 ] && { kept=$((kept+1)); continue; }   # 判不出活跃时间 → 保守 keep
-    local age_d=$(( (now-last)/86400 ))
+    local last age_d age_s
+    last=$(session_activity "$nm"); case "$last" in ''|*[!0-9]*) last=0;; esac
+    if [ "$last" = 0 ]; then age_s="?"; else age_d=$(( (now-last)/86400 )); age_s="${age_d}d"; fi
+    # live → keep
+    if [ -n "$tn" ] && echo "$live_sessions" | grep -qFx "$tn"; then
+      printf '  %-20s %-10s %s\n' "$nm" "$age_s" "保留(live)"; kept=$((kept+1)); continue
+    fi
+    # pinned → keep(常驻会话如 work)
+    if "$CS" has "$nm" pintmux 2>/dev/null; then
+      printf '  %-20s %-10s %s\n' "$nm" "$age_s" "保留(pinned)"; kept=$((kept+1)); continue
+    fi
+    # 判不出活跃时间 → 保守 keep
+    [ "$last" = 0 ] && { printf '  %-20s %-10s %s\n' "$nm" "$age_s" "保留(无活跃时间)"; kept=$((kept+1)); continue; }
     if [ "$last" -lt "$cut_purge" ]; then
-      # > 30 天:连 transcript 删
-      if [ "$p_dry" = 1 ]; then echo "  would PURGE '$nm' (idle ${age_d}d, +transcript)"; purged=$((purged+1)); continue; fi
+      # > purge_days:连 transcript 删
+      if [ "$p_dry" = 1 ]; then printf '  %-20s %-10s %s\n' "$nm" "$age_s" "将连历史删(>${p_purge_days}d)"; purged=$((purged+1)); continue; fi
       "$CT" kill "$nm" 2>/dev/null || true
       "$CS" clean "$nm" --purge-transcript >/dev/null 2>&1 || true
-      echo "  purged '$nm' (idle ${age_d}d, transcript deleted)"; purged=$((purged+1))
+      printf '  %-20s %-10s %s\n' "$nm" "$age_s" "已连历史删"; purged=$((purged+1))
     elif [ "$last" -lt "$cut_state" ]; then
-      # 7~30 天:只删状态,留 transcript
-      if [ "$p_dry" = 1 ]; then echo "  would release '$nm' (idle ${age_d}d, keep transcript)"; reaped=$((reaped+1)); continue; fi
+      # state_days~purge_days:只删状态,留 transcript
+      if [ "$p_dry" = 1 ]; then printf '  %-20s %-10s %s\n' "$nm" "$age_s" "将删状态(>${p_days}d,留历史)"; reaped=$((reaped+1)); continue; fi
       "$CT" kill "$nm" 2>/dev/null || true
       "$CS" clean "$nm" >/dev/null 2>&1 || true
-      echo "  released '$nm' (idle ${age_d}d, transcript kept)"; reaped=$((reaped+1))
+      printf '  %-20s %-10s %s\n' "$nm" "$age_s" "已删状态(留历史)"; reaped=$((reaped+1))
     else
-      kept=$((kept+1))
+      printf '  %-20s %-10s %s\n' "$nm" "$age_s" "保留(未超 ${p_days}d)"; kept=$((kept+1))
     fi
   done < <("$CS" list 2>/dev/null | cut -f1 | sort -u)
   echo "== prune: 删状态 $reaped, 连历史删 $purged, 保留 $kept (状态>${p_days}d, 历史>${p_purge_days}d$( [ "$p_dry" = 1 ] && printf ', dry-run'))"
@@ -1086,6 +1095,6 @@ case "$CMD" in
   switch)       cmd_switch "$@" ;;
   find)         cmd_find "$@" ;;
   prune)        cmd_prune "$@" ;;
-  help|--help|-h) sed -n '9,33p' "$0" | sed 's/^# \{0,1\}//' ;;
+  help|--help|-h) sed -n '9,34p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)            cmd_spawn "$CMD" "$@" ;;
 esac
