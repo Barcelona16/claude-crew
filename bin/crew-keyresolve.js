@@ -110,54 +110,91 @@ function deriveBaseFromBackends(rm) {
   return out;
 }
 
-// ---- model ----
-var model = process.env.CREW_MODEL || process.env.CREW_BACKEND || "";
-if (!model && sess) model = rd(STATE + "/" + sess + ".backend").trim();
-if (model === "" || model === "-" || model === "default") model = dmodel;   // ambient plain -> concrete
-var mprov = ""; var mi = model.indexOf(","); if (mi >= 0) { mprov = model.slice(0, mi); model = model.slice(mi + 1); }
-var realmodel = model;
+// ---- resolve one session's EFFECTIVE {model, key} ----
+// opts: { backend, key, base } — explicit overrides. Single-session mode fills them from the
+// live process env (CREW_MODEL/CREW_KEY/ANTHROPIC_BASE_URL — statusline runs inside the claude
+// process, so its env IS the truth). Batch mode passes backend explicitly (the real model crew
+// ls scraped from /proc) and leaves key/base empty (no per-session live env in a batch call),
+// so key is derived structurally. keys/policy/ccr are module-level (parsed once, reused here).
+function resolveOne(sess, opts) {
+  opts = opts || {};
+  // ---- model ----
+  var model = opts.backend || "";
+  if (!model && sess) model = rd(STATE + "/" + sess + ".backend").trim();
+  if (model === "" || model === "-" || model === "default") model = dmodel;   // ambient plain -> concrete
+  var mprov = ""; var mi = model.indexOf(","); if (mi >= 0) { mprov = model.slice(0, mi); model = model.slice(mi + 1); }
+  var realmodel = model;
 
-// ---- routing mode: live ANTHROPIC_BASE_URL wins; else derive from conf; else proxy default ----
-var base = process.env.ANTHROPIC_BASE_URL || "";
-// Always resolve the backend conf: even when live env gives us the base, the model value may be
-// a backend NAME ("opus47") — the conf tells us the real model it routes to for display.
-var bconf = deriveBaseFromBackends(realmodel);
-// If model was a backend NAME whose conf carries a different real model segment, show the real
-// one (opus47 -> Claude-Opus-4.7-joybuilder). Also adopt its provider prefix for key derivation.
-if (bconf.model && bconf.model !== realmodel) {
-  realmodel = bconf.model; model = bconf.model;
-  if (!mprov && bconf.prov) mprov = bconf.prov;
-}
-if (!base) base = bconf.base;
-var isProxy = /:8788/.test(base), isCCR = /:3456/.test(base);
-if (!base && !isProxy && !isCCR) isProxy = true;   // crew standard: all backends route via :8788
-
-// ---- key ----
-var key = process.env.CREW_KEY || "";
-if ((!key || key === "-") && sess) key = rd(STATE + "/" + sess + ".key").trim();
-if (key === "-") key = "";
-if (!key) {
-  if (isProxy) {
-    var mname = realmodel || dmodel;
-    var pol = policy[mname] || null;
-    if (pol && pol.length) key = pol[0];
-    // No policy line for this model -> crew-proxy passes it through to CCR, where the
-    // provider named in the backend conf (or the CCR model string) supplies the real key.
-    // Derive THAT — never fall back to policy[CREW_BACKEND]: that ambient env var leaks in
-    // from whatever crew session ran `crew ls` and would mislabel unrelated sessions
-    // (e.g. a joycode-keyed session displaying "personal").
-    if (!key) {
-      var pprov = mprov || bconf.prov || dprov, ptok = provKey(pprov) || provKey(dprov);
-      if (ptok) key = tok2alias[ptok] || (ptok.length > 10 ? (ptok.slice(0, 4) + "…" + ptok.slice(-3)) : ptok);
-    }
-  } else if (isCCR) {
-    var prov = mprov || dprov, tok = provKey(prov) || provKey(dprov);
-    if (tok) key = tok2alias[tok] || (tok.length > 10 ? (tok.slice(0, 4) + "…" + tok.slice(-3)) : tok);
-  } else {
-    var at = process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY || "";
-    if (at) key = tok2alias[at] || (at.length > 10 ? (at.slice(0, 4) + "…" + at.slice(-3)) : at);
+  // ---- routing mode: live ANTHROPIC_BASE_URL wins; else derive from conf; else proxy default ----
+  var base = opts.base || "";
+  // Always resolve the backend conf: even when live env gives us the base, the model value may be
+  // a backend NAME ("opus47") — the conf tells us the real model it routes to for display.
+  var bconf = deriveBaseFromBackends(realmodel);
+  // If model was a backend NAME whose conf carries a different real model segment, show the real
+  // one (opus47 -> Claude-Opus-4.7-joybuilder). Also adopt its provider prefix for key derivation.
+  if (bconf.model && bconf.model !== realmodel) {
+    realmodel = bconf.model; model = bconf.model;
+    if (!mprov && bconf.prov) mprov = bconf.prov;
   }
+  if (!base) base = bconf.base;
+  var isProxy = /:8788/.test(base), isCCR = /:3456/.test(base);
+  if (!base && !isProxy && !isCCR) isProxy = true;   // crew standard: all backends route via :8788
+
+  // ---- key ----
+  var key = opts.key || "";
+  if ((!key || key === "-") && sess) key = rd(STATE + "/" + sess + ".key").trim();
+  if (key === "-") key = "";
+  if (!key) {
+    if (isProxy) {
+      var mname = realmodel || dmodel;
+      var pol = policy[mname] || null;
+      if (pol && pol.length) key = pol[0];
+      // No policy line for this model -> crew-proxy passes it through to CCR, where the
+      // provider named in the backend conf (or the CCR model string) supplies the real key.
+      // Derive THAT — never fall back to policy[CREW_BACKEND]: that ambient env var leaks in
+      // from whatever crew session ran `crew ls` and would mislabel unrelated sessions
+      // (e.g. a joycode-keyed session displaying "personal").
+      if (!key) {
+        var pprov = mprov || bconf.prov || dprov, ptok = provKey(pprov) || provKey(dprov);
+        if (ptok) key = tok2alias[ptok] || (ptok.length > 10 ? (ptok.slice(0, 4) + "…" + ptok.slice(-3)) : ptok);
+      }
+    } else if (isCCR) {
+      var prov = mprov || dprov, tok = provKey(prov) || provKey(dprov);
+      if (tok) key = tok2alias[tok] || (tok.length > 10 ? (tok.slice(0, 4) + "…" + tok.slice(-3)) : tok);
+    } else {
+      var at = opts.authToken || "";
+      if (at) key = tok2alias[at] || (at.length > 10 ? (at.slice(0, 4) + "…" + at.slice(-3)) : at);
+    }
+  }
+  if (!model) model = "?";
+  if (!key) key = "?";
+  return { model: model, key: key };
 }
-if (!model) model = "?";
-if (!key) key = "?";
-process.stdout.write(model + "\t" + key);
+
+// ---- entry: single-session (statusline/compat) vs --batch (crew ls: one node for all) ----
+if (process.argv[2] === "--batch") {
+  // stdin: lines "name\tbackend" (backend = real model crew ls scraped, may be empty).
+  // stdout: lines "name\tmodel\tkey". One node process resolves every session (files read once).
+  var input = "";
+  try { input = fs.readFileSync(0, "utf8"); } catch (e) { input = ""; }
+  var lines = input.split("\n"), out = [];
+  for (var li = 0; li < lines.length; li++) {
+    var ln = lines[li]; if (!ln) continue;
+    var tab = ln.indexOf("\t");
+    var nm = tab >= 0 ? ln.slice(0, tab) : ln;
+    var bk = tab >= 0 ? ln.slice(tab + 1) : "";
+    if (!nm) continue;
+    var r = resolveOne(nm, { backend: bk });   // batch: no live env, key derived structurally
+    out.push(nm + "\t" + r.model + "\t" + r.key);
+  }
+  process.stdout.write(out.join("\n"));
+} else {
+  // Single session: env is the live truth (statusline runs inside the claude process).
+  var r1 = resolveOne(sess, {
+    backend: process.env.CREW_MODEL || process.env.CREW_BACKEND || "",
+    key: process.env.CREW_KEY || "",
+    base: process.env.ANTHROPIC_BASE_URL || "",
+    authToken: process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY || "",
+  });
+  process.stdout.write(r1.model + "\t" + r1.key);
+}

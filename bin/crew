@@ -87,32 +87,26 @@ cmd_ls() {
   live_sessions=$("$CT" list 2>/dev/null || echo "")
   local kr="$SCRIPT_DIR/crew-keyresolve.js"
   printf '  %-20s %-9s %-56s %-10s %-30s\n' "NAME" "STATUS" "MODEL" "KEY" "DIR"
-  "$CS" list 2>/dev/null | while IFS=$'\t' read -r name rest; do
+
+  # 2026-08-31 perf:两遍式 —— 第一遍纯 bash/proc 收集每会话 name/sid/backend(真模型)/dir/tmuxname
+  # 到数组;然后【一次】node --batch 解析所有会话的 model/key(原来每会话 spawn 一次 node ≈占 ls
+  # 耗时一半);第二遍打印。用 `< <(...)` 让循环在主 shell 跑(避免 `list | while` 的 subshell 吞数组)。
+  local -a NAMES=() SIDS=() BACKENDS=() DIRS=() TMUXNS=()
+  local name rest
+  while IFS=$'\t' read -r name rest; do
     [ -z "$name" ] && continue
-    local sid backend key tmuxname dir
+    local sid backend tmuxname dir claude_pid=""
     sid=$("$CS" get "$name" sid 2>/dev/null || echo "")
     backend=$("$CS" get "$name" backend 2>/dev/null || echo "?")
-    # 2026-08-31 perf:内联 resolve(原每会话 fork `crew-tmux resolve`,它又 fork 2×crew-session
-    # + 2×tmux list-sessions ≈250ms/会话 → 14 会话 ~1.7s)。改为直接读 state 文件 + 复用已有的
-    # live_sessions(一次性 tmux 列表),零 per-session fork。逻辑对齐 crew-tmux cmd_resolve:
-    #   adopted(.tmux)> .tmuxname > live_sessions 里查 name / crew-name。
+    # 内联 resolve(见前注):adopted(.tmux)> .tmuxname > live_sessions 查 name/crew-name
     tmuxname=""
-    if [ -f "$CREW_STATE/$name.tmux" ]; then
-      tmuxname=$(cat "$CREW_STATE/$name.tmux" 2>/dev/null)
-    elif [ -f "$CREW_STATE/$name.tmuxname" ]; then
-      tmuxname=$(cat "$CREW_STATE/$name.tmuxname" 2>/dev/null)
-    elif echo "$live_sessions" | grep -qFx "$name"; then
-      tmuxname="$name"
-    elif echo "$live_sessions" | grep -qFx "crew-$name"; then
-      tmuxname="crew-$name"
+    if [ -f "$CREW_STATE/$name.tmux" ]; then tmuxname=$(cat "$CREW_STATE/$name.tmux" 2>/dev/null)
+    elif [ -f "$CREW_STATE/$name.tmuxname" ]; then tmuxname=$(cat "$CREW_STATE/$name.tmuxname" 2>/dev/null)
+    elif echo "$live_sessions" | grep -qFx "$name"; then tmuxname="$name"
+    elif echo "$live_sessions" | grep -qFx "crew-$name"; then tmuxname="crew-$name"
     fi
     dir=""
-    key=""
-    # 2026-08-30 修:tmux live 时优先从 /proc/PID/cmdline 反查真 --model + /proc/PID/cwd 反查真 dir。
-    # state 里 <name>.backend 是 crew 起会话时写的期望值,但会话可能已经被 v1 时代 crew_ext_dep_up
-    # 或裸 claude-yolo 用不同 model 起过 —— 真值只有运行时 claude 进程知道。crew ls 是"看",
-    # 应显示真值,不是 state 记忆值。
-    local claude_pid=""
+    # tmux live 时从 /proc 抠真 --model + 真 cwd(见前注)
     if [ -n "$tmuxname" ] && echo "$live_sessions" | grep -qFx "$tmuxname"; then
       local pane_pid
       pane_pid=$(tmux list-panes -t "$tmuxname" -F '#{pane_pid}' 2>/dev/null | head -1)
@@ -120,35 +114,14 @@ cmd_ls() {
         claude_pid=$(ps --no-headers -o pid,cmd --ppid "$pane_pid" 2>/dev/null | awk '/bin\/claude/{print $1; exit}')
       fi
       if [ -n "$claude_pid" ] && [ -r "/proc/$claude_pid/cmdline" ]; then
-        # 抠 --model 后的一个参数(cmdline 是 \0 分隔)
-        local real_model
+        local real_model real_cwd
         real_model=$(cat "/proc/$claude_pid/cmdline" 2>/dev/null | tr '\0' '\n' | awk '/^--model$/{getline; print; exit}')
         [ -n "$real_model" ] && backend="$real_model"
-        # dir 从 /proc/PID/cwd 拿(比 registry 准 —— 会话可能已换 dir)
-        local real_cwd
         real_cwd=$(readlink "/proc/$claude_pid/cwd" 2>/dev/null)
         [ -n "$real_cwd" ] && dir="$real_cwd"
       fi
     fi
-    # KEY:优先用 crew-keyresolve.js 反查真 key(与 statusline 一致);失败回落文件
-    if [ -f "$kr" ] && command -v node >/dev/null 2>&1; then
-      # 2026-08-30 修:v2 ls KEY 列硬编码文件读 → 现走 keyresolve 反查真 key alias(19aa...191→joycode)
-      # env -i 隔离当前 shell 的 CREW_MODEL/CREW_KEY 泄漏(否则所有会话都显本会话 model/key)
-      # 传 CREW_BACKEND=真实 model,让 keyresolve 从"真 model"起解析,而不是回落 Router.default
-      local kr_out
-      kr_out=$(env -i HOME="$HOME" PATH="$PATH" CREW_STATE="$CREW_STATE" CREW_HOME="$CREW_HOME" SESS="$name" CREW_BACKEND="$backend" node "$kr" "$name" 2>/dev/null)
-      if [ -n "$kr_out" ]; then
-        # 输出 "model<TAB>key"
-        local m_kr k_kr
-        m_kr=$(printf '%s' "$kr_out" | cut -f1)
-        k_kr=$(printf '%s' "$kr_out" | cut -f2)
-        # backend 仍空/"?" 时用 keyresolve 的 model 兜底(通常 /proc 抠到就不需要)
-        [ "$backend" = "?" ] && [ -n "$m_kr" ] && [ "$m_kr" != "?" ] && backend="$m_kr"
-        [ -n "$k_kr" ] && [ "$k_kr" != "?" ] && key="$k_kr"
-      fi
-    fi
-    [ -z "$key" ] && key=$("$CS" get "$name" key 2>/dev/null || echo "-")
-    # DIR 兜底:/proc 抠不到 → 从 registry 反查(cwd<TAB>name)
+    # DIR 兜底:/proc 抠不到 → registry 反查
     if [ -z "$dir" ] || [ "$dir" = "-" ]; then
       dir="-"
       if [ -f "$CREW_STATE/registry" ]; then
@@ -157,6 +130,32 @@ cmd_ls() {
         [ -n "$reg_dir" ] && dir="$reg_dir"
       fi
     fi
+    NAMES+=("$name"); SIDS+=("$sid"); BACKENDS+=("$backend"); DIRS+=("$dir"); TMUXNS+=("$tmuxname")
+  done < <("$CS" list 2>/dev/null)
+
+  # 一次批量 keyresolve:喂 name<TAB>backend,拿回 name<TAB>model<TAB>key。存进两个"并行数组"式查表。
+  local -A KR_MODEL=() KR_KEY=()
+  if [ -f "$kr" ] && command -v node >/dev/null 2>&1 && [ "${#NAMES[@]}" -gt 0 ]; then
+    local batch_in="" i
+    for i in "${!NAMES[@]}"; do batch_in+="${NAMES[$i]}"$'\t'"${BACKENDS[$i]}"$'\n'; done
+    local batch_out
+    batch_out=$(printf '%s' "$batch_in" | env -i HOME="$HOME" PATH="$PATH" CREW_STATE="$CREW_STATE" CREW_HOME="$CREW_HOME" node "$kr" --batch 2>/dev/null)
+    local bn bm bk
+    while IFS=$'\t' read -r bn bm bk; do
+      [ -z "$bn" ] && continue
+      KR_MODEL["$bn"]="$bm"; KR_KEY["$bn"]="$bk"
+    done <<< "$batch_out"
+  fi
+
+  # 第二遍:打印(查批量表;缺则回落 state)
+  local i
+  for i in "${!NAMES[@]}"; do
+    name="${NAMES[$i]}"
+    local sid="${SIDS[$i]}" backend="${BACKENDS[$i]}" dir="${DIRS[$i]}" tmuxname="${TMUXNS[$i]}" key=""
+    local m_kr="${KR_MODEL[$name]:-}" k_kr="${KR_KEY[$name]:-}"
+    [ "$backend" = "?" ] && [ -n "$m_kr" ] && [ "$m_kr" != "?" ] && backend="$m_kr"
+    [ -n "$k_kr" ] && [ "$k_kr" != "?" ] && key="$k_kr"
+    [ -z "$key" ] && key=$("$CS" get "$name" key 2>/dev/null || echo "-")
     local status="new"
     if echo "$live_sessions" | grep -qFx "$tmuxname"; then
       status="live"
@@ -349,7 +348,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.0.4 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.0.5 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 cmd_prune() {
