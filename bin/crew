@@ -18,6 +18,7 @@
 #   crew inbox <name> [--peek]  读 inbox
 #   crew log <name>          看 transcript
 #   crew models|backends     列 backends
+#   crew models <key>        列该 key 能路由的模型(从 CCR provider 反查;joycode 系含全部)
 #   crew keys                列 key 别名(值脱敏)
 #   crew addkey <key> [别名] 加一把 key 到 keys.conf(别名不给则自动派生)
 #   crew switch <会话>       交互切 key→model(都默认当前值,选完重启换)
@@ -327,7 +328,63 @@ cmd_log() {
   die "transcript for sid '$sid' not found"
 }
 
+# 某 key(别名)能路由的模型:CCR 里凡 api_key 匹配该别名【真值】的 provider,union 其 models[]。
+# (v1 ccr_models_for_key 补回 —— v2 重构丢了)。别名→真值查 keys.conf;provider.api_key 存的
+# 是真 token(joycode 的真值恰好也叫 joycode)。joycode 系还可从 :8765 /v1/models 实时拉(更全),
+# 但 CCR models[] 已够用且不依赖代理在线,优先用它。
+ccr_models_for_key() {
+  local alias="$1" cfg="$HOME/.claude-code-router/config.json"
+  [ -f "$cfg" ] || return 0; command -v node >/dev/null 2>&1 || return 0
+  # 别名 → 真值(keys.conf: alias=token);查不到就用别名本身当值(joycode 那种)
+  local kv=""
+  if [ -f "$CREW_HOME/keys.conf" ]; then
+    kv=$(awk -F= -v a="$alias" '/^[[:space:]]*#/{next} {k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k); if(k==a){v=substr($0,index($0,"=")+1); gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); print v; exit}}' "$CREW_HOME/keys.conf")
+  fi
+  [ -z "$kv" ] && kv="$alias"
+  KEY="$kv" node -e '
+    const fs=require("fs");
+    const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    const ps=c.Providers||c.providers||[];
+    const out=[];
+    for(const p of ps){ if((p.api_key||p.apiKey)===process.env.KEY) for(const m of (p.models||[])) if(out.indexOf(m)<0) out.push(m); }
+    process.stdout.write(out.join("\n"));
+  ' "$cfg" 2>/dev/null
+}
+
+# 同上,但返回 "provider,model" 全名(可直接当 backend / --model 用,让 CCR 精确路由)。
+# switch/pick 菜单用这个 —— 选中即得可用的 backend 值,无需再拼 provider。
+ccr_models_for_key_full() {
+  local alias="$1" cfg="$HOME/.claude-code-router/config.json"
+  [ -f "$cfg" ] || return 0; command -v node >/dev/null 2>&1 || return 0
+  local kv=""
+  if [ -f "$CREW_HOME/keys.conf" ]; then
+    kv=$(awk -F= -v a="$alias" '/^[[:space:]]*#/{next} {k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k); if(k==a){v=substr($0,index($0,"=")+1); gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); print v; exit}}' "$CREW_HOME/keys.conf")
+  fi
+  [ -z "$kv" ] && kv="$alias"
+  KEY="$kv" node -e '
+    const fs=require("fs");
+    const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    const ps=c.Providers||c.providers||[];
+    const out=[];
+    for(const p of ps){ if((p.api_key||p.apiKey)===process.env.KEY) for(const m of (p.models||[])){ var full=p.name+","+m; if(out.indexOf(full)<0) out.push(full); } }
+    process.stdout.write(out.join("\n"));
+  ' "$cfg" 2>/dev/null
+}
+
 cmd_models() {
+  local key="${1:-}"
+  if [ -n "$key" ]; then
+    # crew models <key别名>:列该 key 在 CCR 里能路由的模型(joycode/newkey/... 通用)
+    local ms; ms=$(ccr_models_for_key "$key")
+    if [ -z "$ms" ]; then
+      echo "== '$key' 支持的模型 =="
+      echo "  (CCR 里没有 api_key 匹配 '$key' 的 provider;或未装 CCR/node)"
+      return 0
+    fi
+    echo "== '$key' 支持的模型 =="
+    printf '%s\n' "$ms" | sed 's/^/  /'
+    return 0
+  fi
   echo "== backends =="
   for f in "$CREW_HOME"/backends/*.conf; do
     [ -f "$f" ] || continue
@@ -434,7 +491,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.0.9 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.1.0 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 # 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
@@ -537,7 +594,12 @@ cmd_switch() {
   cur_key=$("$CS" get "$name" key 2>/dev/null || echo "")
   cur_be=$("$CS" get "$name" backend 2>/dev/null || echo "")
   picked_key=$(_list_keys | _pick_one "选 key ($name,当前: ${cur_key:-无})" "$cur_key")
-  picked_be=$(_list_backends | _pick_one "选模型 backend ($name,当前: ${cur_be:-无})" "$cur_be")
+  # model 菜单:优先列【该 key 支持的模型】(ccr_models_for_key,含 provider,model 全名,直接可用作
+  # backend);拿不到(该 key 无 CCR provider)才回落全量 backend 名。默认预选当前 model。
+  local model_opts
+  model_opts=$(ccr_models_for_key_full "$picked_key")
+  [ -z "$model_opts" ] && model_opts=$(_list_backends)
+  picked_be=$(printf '%s\n' "$model_opts" | _pick_one "选模型 ($name,当前: ${cur_be:-无})" "$cur_be")
   # 设全局 BACKEND/KEY,走 cmd_spawn 的 live 换模型逻辑(它会判与现值不同才重启)
   [ -n "$picked_key" ] && KEY="$picked_key"
   [ -n "$picked_be" ] && BACKEND="$picked_be"
@@ -836,7 +898,7 @@ case "$CMD" in
   send)         cmd_send "$@" ;;
   inbox)        cmd_inbox "$@" ;;
   log)          cmd_log "$@" ;;
-  models|backends) cmd_models ;;
+  models|backends) cmd_models "$@" ;;
   keys)         cmd_keys ;;
   addkey|add-key) cmd_addkey "$@" ;;
   doctor)       cmd_doctor "$@" ;;
