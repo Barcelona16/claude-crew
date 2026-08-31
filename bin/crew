@@ -400,11 +400,19 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.0.7 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.0.8 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 # 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
-_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+# _mtime 跨平台:Linux `stat -c %Y`,macOS/BSD `stat -f %m`。注意 Linux 上 `stat -f` 是"文件系统
+# 信息"(不报错但输出多行文本!),故必须先试 -c、再试 -f,且校验结果是纯数字(不是就当 0)。
+_mtime() {
+  local m
+  m=$(stat -c %Y "$1" 2>/dev/null) || m=""
+  case "$m" in ''|*[!0-9]*) m=$(stat -f %m "$1" 2>/dev/null) || m="";; esac
+  case "$m" in ''|*[!0-9]*) m=0;; esac
+  echo "$m"
+}
 session_activity() {
   local nm="$1" last=0 s m f
   s=$("$CS" get "$nm" sid 2>/dev/null || echo "")
