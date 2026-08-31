@@ -1449,6 +1449,9 @@ class Handler(BaseHTTPRequestHandler):
             self._api_register(body); return
         # Only /v1/messages and /v1/chat/completions carry a model to route on.
         if path.endswith("/messages") or path.endswith("/chat/completions"):
+            if path.endswith("/messages"):
+                # 清洗 tool id 里的非法冒号(如 Bash:0),否则严格网关(4.7-joybuilder)会 400。
+                body = self._sanitize_tool_ids(body)
             self._route(body)
         else:
             self._passthrough(body)
@@ -1458,6 +1461,50 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(body or b"{}")
         except json.JSONDecodeError:
             return None
+
+    def _sanitize_tool_ids(self, body):
+        """Replace ':' with '_' in tool_use.id / tool_result.tool_use_id inside messages.
+
+        Some upstream gateways (e.g. llm-gw's *-joybuilder) enforce tool id pattern
+        ^[a-zA-Z0-9_-]+$ and 400 on ids like 'Bash:0' / 'TaskCreate:12' (produced by the
+        joycode OpenAI->Anthropic path). A tool_use.id and its paired tool_result.tool_use_id
+        get the SAME deterministic replace(':','_'), so they stay matched — no orphaned
+        tool_result. Legal ids (no colon) are untouched; if nothing changed, the original
+        bytes are returned so usage/billing parsing is byte-identical.
+        """
+        try:
+            payload = json.loads(body or b"{}")
+        except (json.JSONDecodeError, ValueError):
+            return body
+        if not isinstance(payload, dict):
+            return body
+        msgs = payload.get("messages")
+        if not isinstance(msgs, list):
+            return body
+        changed = False
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            content = m.get("content")
+            if not isinstance(content, list):
+                continue
+            for blk in content:
+                if not isinstance(blk, dict):
+                    continue
+                t = blk.get("type")
+                if t == "tool_use":
+                    _id = blk.get("id")
+                    if isinstance(_id, str) and ":" in _id:
+                        blk["id"] = _id.replace(":", "_")
+                        changed = True
+                elif t == "tool_result":
+                    _tid = blk.get("tool_use_id")
+                    if isinstance(_tid, str) and ":" in _tid:
+                        blk["tool_use_id"] = _tid.replace(":", "_")
+                        changed = True
+        if not changed:
+            return body
+        return json.dumps(payload).encode()
 
     # -- stage B: kill a session (delegates to `crew kill`, the canonical teardown) --
     def _api_session_kill(self, body):
