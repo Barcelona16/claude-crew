@@ -29,12 +29,17 @@ CT="$SCRIPT_DIR/crew-tmux"
 
 usage() {
   cat <<EOF >&2
-usage: crew-launcher spawn --name <name> --mode <fg|tmux> [--fresh] [--task "..."]
+usage: crew-launcher spawn --name <name> --mode <fg|tmux|use-current-tmux> [--fresh] [--task "..."]
 
-  --name <name>     必需,crew 会话名
-  --mode fg|tmux    必需,启动模式
-  --fresh           生成新 sid(不 resume 老)
-  --task "..."      起后灌一段初始任务(tmux 模式:send-keys;fg 模式:忽略)
+  --name <name>            必需,crew 会话名
+  --mode fg|tmux|use-current-tmux  必需,启动模式
+    fg              exec bash launcher 到当前 shell(前台)
+    tmux            crew-tmux ensure + run(新起 tmux session)
+    use-current-tmux 已在 tmux pane 里(bootstrap 起的外壳 tmux),不再 new-session,直接
+                     exec bash launcher 到当前 pane —— B2 修(2026-08-31 audit-crew P2-b),
+                     根治 pinned + bootstrap 外壳 tmux 打架的五概念纠缠;pinned 状态不动
+  --fresh                  生成新 sid(不 resume 老)
+  --task "..."             起后灌一段初始任务(tmux 模式:send-keys;fg/use-current-tmux:忽略)
 EOF
   exit 2
 }
@@ -135,7 +140,7 @@ cmd_spawn() {
     esac
   done
   [ -z "$name" ] || [ -z "$mode" ] && usage
-  case "$mode" in fg|tmux) : ;; *) echo "[crew-launcher] mode 必须 fg 或 tmux" >&2; usage ;; esac
+  case "$mode" in fg|tmux|use-current-tmux) : ;; *) echo "[crew-launcher] mode 必须 fg / tmux / use-current-tmux" >&2; usage ;; esac
 
   # 加载 backend
   load_backend_conf "$name" || return 1
@@ -208,10 +213,31 @@ cmd_spawn() {
 
   # mode fg:exec launcher(取代当前 shell)
   # mode tmux:调 crew-tmux ensure + run
+  # mode use-current-tmux(2026-08-31 audit-crew P2-b):已在 tmux pane 里,不 new-session,
+  #   直接 exec bash launcher —— 根治 pinned + bootstrap 外壳 tmux 打架的五概念纠缠。
+  #   pinned 状态不动(不 unpin/re-pin);notmux 设 0(未来 crew ls 判 live 靠 tmux 存在性)
   case "$mode" in
     fg)
       "$CS" set "$name" notmux "1" >/dev/null
       "$CS" set "$name" fgpid "$$" >/dev/null
+      exec bash "$launcher"
+      ;;
+    use-current-tmux)
+      # 前置检查:必须在 tmux pane 里(否则等同 fg,提示更清晰)
+      if [ -z "${TMUX:-}" ]; then
+        echo "[crew-launcher] --mode use-current-tmux 需要在 tmux pane 里跑(当前 \$TMUX 未设),回落 fg 模式" >&2
+        "$CS" set "$name" notmux "1" >/dev/null
+        exec bash "$launcher"
+      fi
+      # 记 tmuxname 为当前 pane 所在 session(方便 crew ls / crew-tmux resolve 认它)
+      _cur_sess=$(tmux display-message -p '#S' 2>/dev/null)
+      if [ -n "$_cur_sess" ]; then
+        "$CS" set "$name" tmuxname "$_cur_sess" >/dev/null
+        # 顺手写 .tmux(adopt marker),让 crew ls 认它;pinned 状态保持
+        "$CS" set "$name" tmux "$_cur_sess" >/dev/null
+      fi
+      "$CS" set "$name" notmux "0" >/dev/null
+      echo "[crew-launcher] '$name' mode=use-current-tmux ready (pane=$_cur_sess, launcher=$launcher)"
       exec bash "$launcher"
       ;;
     tmux)

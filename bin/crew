@@ -43,6 +43,7 @@ POLICY=""
 NO_TMUX=0
 FRESH=0
 SAFE=0
+USE_CUR_TMUX=0  # 2026-08-31 audit-crew P2-b:--use-current-tmux flag
 DIR="$PWD"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -51,6 +52,7 @@ while [ $# -gt 0 ]; do
     --policy) POLICY="$2"; shift 2 ;;
     --tmux) NO_TMUX=0; shift ;;
     --no-tmux) NO_TMUX=1; shift ;;
+    --use-current-tmux) USE_CUR_TMUX=1; shift ;;
     --fresh) FRESH=1; shift ;;
     --safe) SAFE=1; shift ;;
     --dir) DIR="$2"; shift 2 ;;
@@ -368,8 +370,15 @@ cmd_spawn() {
     fi
   fi
 
+  # 2026-08-31 audit-crew P2-b:mode 决策(五概念解耦)
+  #   --use-current-tmux 最高优先(用户显式意图 = 已在 tmux pane 里,别再 new-session)
+  #   --no-tmux 次之:pinned 时忽略(pinned 语义 = "always on tmux"),否则 fg
+  #   默认 tmux(new-session)
   local mode="tmux"
-  if [ "$NO_TMUX" = 1 ]; then
+  if [ "$USE_CUR_TMUX" = 1 ]; then
+    mode="use-current-tmux"
+    log "'$name' 使用当前 tmux pane 起 claude(不 new-session,pinned 状态不动)"
+  elif [ "$NO_TMUX" = 1 ]; then
     if "$CS" has "$name" pintmux 2>/dev/null; then
       log "'$name' is pinned to tmux (always-on); ignoring --no-tmux."
     else
