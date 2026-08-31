@@ -20,6 +20,9 @@
 #   crew models|backends     列 backends
 #   crew keys                列 key 别名(值脱敏)
 #   crew addkey <key> [别名] 加一把 key 到 keys.conf(别名不给则自动派生)
+#   crew switch <会话>       交互切 key→model(都默认当前值,选完重启换)
+#   crew find <描述...>      搜已有会话历史,返回 Top5(会话名+概要+打开命令)
+#   crew prune [--dry-run]   清陈旧会话(>7d 删状态、>30d 连历史删;live/pinned 不删,平时自动跑)
 #   crew doctor              自检
 #   crew version [--check]   版本
 #
@@ -397,11 +400,202 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.0.6 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.0.7 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
+# 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
+_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+session_activity() {
+  local nm="$1" last=0 s m f
+  s=$("$CS" get "$nm" sid 2>/dev/null || echo "")
+  if [ -n "$s" ]; then
+    for f in "$HOME"/.claude/projects/*/"$s".jsonl; do
+      [ -f "$f" ] || continue; m=$(_mtime "$f"); [ "$m" -gt "$last" ] 2>/dev/null && last=$m
+    done
+  fi
+  for f in "$CREW_STATE/$nm.sid" "$CREW_STATE/$nm.backend" "$CREW_STATE/$nm.key"; do
+    [ -f "$f" ] || continue; m=$(_mtime "$f"); [ "$m" -gt "$last" ] 2>/dev/null && last=$m
+  done
+  echo "$last"
+}
+
+# 自动清理陈旧会话(分级):transcript/state 最后活跃 > STATE_DAYS(默认7)天 → 删 crew 状态(留
+# transcript,可 find/resume 找回);> PURGE_DAYS(默认30)天 → 连 transcript 一起删(彻底)。
+# 铁律:live(tmux 在跑)/ pinned 会话【绝不删】。不碰 send/inbox/--model 等接口。
+# crew <name> [--days N] [--purge-days M] [--dry-run]
 cmd_prune() {
-  echo "[crew] prune not implemented in v2 skeleton" >&2
+  local p_days="${CREW_PRUNE_DAYS:-7}" p_purge_days="${CREW_PURGE_DAYS:-30}" p_dry=0
+  while [ $# -gt 0 ]; do case "$1" in
+    --days) p_days="$2"; shift 2;;
+    --days=*) p_days="${1#*=}"; shift;;
+    --purge-days) p_purge_days="$2"; shift 2;;
+    --purge-days=*) p_purge_days="${1#*=}"; shift;;
+    --dry-run|-n) p_dry=1; shift;;
+    *) shift;;
+  esac; done
+  local now; now=$(date +%s 2>/dev/null || echo 0); [ "$now" = 0 ] && return 0
+  local cut_state=$(( now - p_days*86400 )) cut_purge=$(( now - p_purge_days*86400 ))
+  local live_sessions; live_sessions=$("$CT" list 2>/dev/null || echo "")
+  local reaped=0 purged=0 kept=0 nm
+  while IFS= read -r nm; do
+    [ -n "$nm" ] || continue
+    # live?(tmux 在跑)→ keep
+    local tn=""
+    if [ -f "$CREW_STATE/$nm.tmux" ]; then tn=$(cat "$CREW_STATE/$nm.tmux" 2>/dev/null)
+    elif [ -f "$CREW_STATE/$nm.tmuxname" ]; then tn=$(cat "$CREW_STATE/$nm.tmuxname" 2>/dev/null)
+    elif echo "$live_sessions" | grep -qFx "$nm"; then tn="$nm"
+    elif echo "$live_sessions" | grep -qFx "crew-$nm"; then tn="crew-$nm"
+    fi
+    if [ -n "$tn" ] && echo "$live_sessions" | grep -qFx "$tn"; then kept=$((kept+1)); continue; fi
+    # pinned?→ keep(常驻会话如 work)
+    if "$CS" has "$nm" pintmux 2>/dev/null; then kept=$((kept+1)); continue; fi
+    local last; last=$(session_activity "$nm")
+    case "$last" in ''|*[!0-9]*) last=0;; esac
+    [ "$last" = 0 ] && { kept=$((kept+1)); continue; }   # 判不出活跃时间 → 保守 keep
+    local age_d=$(( (now-last)/86400 ))
+    if [ "$last" -lt "$cut_purge" ]; then
+      # > 30 天:连 transcript 删
+      if [ "$p_dry" = 1 ]; then echo "  would PURGE '$nm' (idle ${age_d}d, +transcript)"; purged=$((purged+1)); continue; fi
+      "$CT" kill "$nm" 2>/dev/null || true
+      "$CS" clean "$nm" --purge-transcript >/dev/null 2>&1 || true
+      echo "  purged '$nm' (idle ${age_d}d, transcript deleted)"; purged=$((purged+1))
+    elif [ "$last" -lt "$cut_state" ]; then
+      # 7~30 天:只删状态,留 transcript
+      if [ "$p_dry" = 1 ]; then echo "  would release '$nm' (idle ${age_d}d, keep transcript)"; reaped=$((reaped+1)); continue; fi
+      "$CT" kill "$nm" 2>/dev/null || true
+      "$CS" clean "$nm" >/dev/null 2>&1 || true
+      echo "  released '$nm' (idle ${age_d}d, transcript kept)"; reaped=$((reaped+1))
+    else
+      kept=$((kept+1))
+    fi
+  done < <("$CS" list 2>/dev/null | cut -f1 | sort -u)
+  echo "== prune: 删状态 $reaped, 连历史删 $purged, 保留 $kept (状态>${p_days}d, 历史>${p_purge_days}d$( [ "$p_dry" = 1 ] && printf ', dry-run'))"
+}
+
+# 机会式节流自动清理:每 CREW_PRUNE_EVERY 秒(默认1天)最多一次,后台静默跑 prune。搭 spawn/ls 触发,
+# 无需 cron。CREW_PRUNE_AUTO=0 关闭。绝不 delay 前台操作(后台 &)。
+crew_autoprune() {
+  [ "${CREW_PRUNE_AUTO:-1}" = 1 ] || return 0
+  local every="${CREW_PRUNE_EVERY:-86400}" stamp="$CREW_STATE/.last-prune" last now
+  last=$(cat "$stamp" 2>/dev/null || echo 0); case "$last" in ''|*[!0-9]*) last=0;; esac
+  now=$(date +%s 2>/dev/null || echo 0); [ "$now" = 0 ] && return 0
+  [ $((now - last)) -ge "$every" ] || return 0
+  printf '%s' "$now" > "$stamp" 2>/dev/null || true
+  ( "$SCRIPT_DIR/crew" prune >/dev/null 2>&1 & ) 2>/dev/null || true
+}
+
+# crew switch <会话> —— 交互切 key→model(都默认当前值),选完走 live 换模型路径重启。
+# 顺序:先选 key(默认会话现 key),再选 model(默认会话现 model)。等价 `crew <会话> --key K --model M`,
+# 但交互、免背参数。非交互(无 tty)报错提示用带参形式。
+cmd_switch() {
+  local name="$1"
+  [ -z "$name" ] && die "usage: crew switch <会话>"
+  [ -t 0 ] || die "crew switch 需交互终端;非交互请用: crew $name --key <K> --model <M>"
+  local cur_key cur_be picked_key picked_be
+  cur_key=$("$CS" get "$name" key 2>/dev/null || echo "")
+  cur_be=$("$CS" get "$name" backend 2>/dev/null || echo "")
+  picked_key=$(_list_keys | _pick_one "选 key ($name,当前: ${cur_key:-无})" "$cur_key")
+  picked_be=$(_list_backends | _pick_one "选模型 backend ($name,当前: ${cur_be:-无})" "$cur_be")
+  # 设全局 BACKEND/KEY,走 cmd_spawn 的 live 换模型逻辑(它会判与现值不同才重启)
+  [ -n "$picked_key" ] && KEY="$picked_key"
+  [ -n "$picked_be" ] && BACKEND="$picked_be"
+  if [ "$BACKEND" = "$cur_be" ] && [ "$KEY" = "$cur_key" ]; then
+    log "'$name' key/model 未变(key=$KEY model=$BACKEND),不重启"
+    return 0
+  fi
+  log "switch '$name' → key=$KEY model=$BACKEND"
+  cmd_spawn "$name"
+}
+
+# crew find <描述...> —— 快搜已有 crew 会话历史,返回 Top5 候选(会话名+概要+打开命令)。
+# 重点是快:每会话只 tail transcript 最近片段(不读大 .jsonl 全文)grep 粗筛;按命中数+最近活跃
+# 排序;概要取首个命中行的 user 文本(疑似密钥脱敏)。纯 grep 路径,零模型依赖。
+# CREW_FIND_TAIL(默认 200000 字节)控制每会话读多少最近内容。
+cmd_find() {
+  [ $# -eq 0 ] && die "usage: crew find <描述...>"
+  local q="$*" tailb="${CREW_FIND_TAIL:-200000}"
+  local live_sessions; live_sessions=$("$CT" list 2>/dev/null || echo "")
+  # 收集 name→sid→transcript,grep 粗筛计分。结果行:"命中数<TAB>mtime<TAB>name<TAB>transcript"
+  local scored="" name sid j hits mt words w
+  # 拆词(空格分),任一命中计一分
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    sid=$("$CS" get "$name" sid 2>/dev/null || echo "")
+    [ -z "$sid" ] && continue
+    j=""
+    for f in "$HOME"/.claude/projects/*/"$sid".jsonl; do [ -f "$f" ] && { j="$f"; break; }; done
+    [ -z "$j" ] && continue
+    # 只读最近 tailb 字节(快)。多词累计命中(每词 grep -ic 计数)。
+    local recent; recent=$(tail -c "$tailb" "$j" 2>/dev/null)
+    hits=0
+    for w in $q; do
+      local c; c=$(printf '%s' "$recent" | grep -ic -- "$w" 2>/dev/null)
+      case "$c" in ''|*[!0-9]*) c=0;; esac
+      hits=$((hits + c))
+    done
+    [ "$hits" -eq 0 ] && continue
+    mt=$(_mtime "$j")
+    scored+="$hits"$'\t'"$mt"$'\t'"$name"$'\t'"$j"$'\n'
+  done < <("$CS" list 2>/dev/null | cut -f1 | sort -u)
+
+  if [ -z "$scored" ]; then
+    echo "没找到匹配 '$q' 的会话。换个关键词?(find 只搜每个会话最近的对话片段)"
+    return 0
+  fi
+
+  # 排序:命中数降序,再 mtime 降序;取 Top5
+  local top; top=$(printf '%s' "$scored" | sort -t$'\t' -k1,1nr -k2,2nr | head -5)
+
+  # 输出候选块
+  local rank=0 c_dim=$'\033[2m' c_reset=$'\033[0m' c_name=$'\033[36m' c_cmd=$'\033[2m'
+  while IFS=$'\t' read -r hits mt name j; do
+    [ -n "$name" ] || continue
+    rank=$((rank+1))
+    # 状态/model/cwd
+    local st="resumable" tn=""
+    if [ -f "$CREW_STATE/$name.tmux" ]; then tn=$(cat "$CREW_STATE/$name.tmux" 2>/dev/null)
+    elif [ -f "$CREW_STATE/$name.tmuxname" ]; then tn=$(cat "$CREW_STATE/$name.tmuxname" 2>/dev/null)
+    elif echo "$live_sessions" | grep -qFx "$name"; then tn="$name"
+    elif echo "$live_sessions" | grep -qFx "crew-$name"; then tn="crew-$name"; fi
+    echo "$live_sessions" | grep -qFx "$tn" && st="live"
+    local be; be=$("$CS" get "$name" backend 2>/dev/null || echo "?")
+    local cwd; cwd=$(awk -F'\t' -v n="$name" '$2==n{print $1; exit}' "$CREW_STATE/registry" 2>/dev/null)
+    local cwdb; cwdb=$(basename "${cwd:-?}")
+    # 概要:node 直接读 transcript 末尾片段(不用 stdin 管道 —— 在 `while <<<` 循环里 node 会
+    # 继承循环的 here-string stdin,读不到管道数据,故传文件路径让 node 自己 fs 读末尾 tailb 字节)。
+    # 抠首个含【任一】查询词的文本(与计分一致,不只首词);疑似密钥脱敏;失败回落。
+    local gist
+    gist=$(node -e '
+      var fs=require("fs"), file=process.argv[1], tailb=+process.argv[2]||200000;
+      var words=process.argv.slice(3).map(function(w){return w.toLowerCase()});
+      var buf="";
+      try{ var fd=fs.openSync(file,"r"), sz=fs.fstatSync(fd).size, start=Math.max(0,sz-tailb), len=sz-start;
+           var b=Buffer.alloc(len); fs.readSync(fd,b,0,len,start); fs.closeSync(fd); buf=b.toString("utf8"); }catch(e){}
+      var lines=buf.split("\n"), found="";
+      for(var i=0;i<lines.length && !found;i++){
+        try{var m=JSON.parse(lines[i]); var c=m.message&&m.message.content;
+          var t = typeof c==="string" ? c : (Array.isArray(c)? c.map(function(bl){return bl&&bl.text||""}).join(" ") : "");
+          if(!t) continue; var lt=t.toLowerCase();
+          for(var k=0;k<words.length;k++){ if(words[k] && lt.indexOf(words[k])>=0){ found=t.replace(/\s+/g," ").trim().slice(0,120); break; } }
+        }catch(e){}
+      }
+      if(found) process.stdout.write(found);
+    ' "$j" "$tailb" $q 2>/dev/null)
+    # 脱敏:疑似 token(sk-/长 hex/长 base64)打码
+    gist=$(printf '%s' "$gist" | sed -E 's/(sk-[A-Za-z0-9_-]{6})[A-Za-z0-9_-]+/\1…/g; s/[A-Za-z0-9]{32,}/<REDACTED>/g')
+    if [ -z "$gist" ]; then
+      # content 里没抠到(命中可能在工具输出/路径等非对话文本)→ 回落:抽首个命中词所在原始行的
+      # 可读片段(去 JSON 转义噪音,截断),让用户仍能看到匹配上下文。
+      local w1b; w1b=$(printf '%s' "$q" | awk '{print $1}')
+      gist=$(tail -c "$tailb" "$j" 2>/dev/null | grep -i -m1 -- "$w1b" 2>/dev/null \
+        | sed -E 's/\\[a-z]//g; s/[{}"]//g; s/\s+/ /g' | cut -c1-110)
+      [ -n "$gist" ] && gist="~ $gist"
+    fi
+    [ -z "$gist" ] && gist="(命中 $hits 处)"
+    printf '%s#%d%s  %s%s%s  %s(%s · %s · %s)%s\n' "$c_dim" "$rank" "$c_reset" "$c_name" "$name" "$c_reset" "$c_dim" "$st" "$be" "$cwdb" "$c_reset"
+    printf '    概要: %s\n' "$gist"
+    printf '    打开: %screw %s%s\n\n' "$c_cmd" "$name" "$c_reset"
+  done <<< "$top"
 }
 
 # 2026-08-31:解析会话真实工作目录。优先级(对齐 v1 path_for_name + $PWD 回落):
@@ -584,6 +778,10 @@ cmd_spawn() {
   "$CL" spawn --name "$name" --mode "$mode" --dir "$session_dir" "${extra_args[@]}"
 }
 
+# 2026-09-01:机会式自动清理陈旧会话(节流每天一次,后台跑)。排除 prune 自身避免递归;
+# 排除纯读命令无妨(它也只是后台触发一次)。live/pinned 绝不删,见 cmd_prune。
+case "$CMD" in prune) : ;; *) crew_autoprune ;; esac
+
 case "$CMD" in
   ls|list)      cmd_ls "$@" ;;
   attach)       cmd_attach "$@" ;;
@@ -600,6 +798,8 @@ case "$CMD" in
   addkey|add-key) cmd_addkey "$@" ;;
   doctor)       cmd_doctor "$@" ;;
   version)      cmd_version "$@" ;;
+  switch)       cmd_switch "$@" ;;
+  find)         cmd_find "$@" ;;
   prune)        cmd_prune "$@" ;;
   help|--help|-h) sed -n '3,22p' "$0" ;;
   *)            cmd_spawn "$CMD" "$@" ;;
