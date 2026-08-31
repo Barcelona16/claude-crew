@@ -28,7 +28,15 @@ set -uo pipefail
 
 CREW_STATE="${CREW_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/claude-crew}"
 CREW_HOME="${CREW_HOME:-$HOME/.config/claude-crew}"
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"  # 2026-08-31:readlink -f resolve 软链(PATH crew 软链调用时 SCRIPT_DIR 误指 /root/.local/bin 找不到 crew-session,咚咚 crew 命令 exit 127 根因)
+# SCRIPT_DIR = 真实 bin/ 目录。crew 常经软链调用(~/.local/bin/crew -> <clone>/bin/crew),
+# 需先解析软链链,否则 SCRIPT_DIR 会误指 ~/.local/bin(那里没有 crew-* 兄弟工具)→ exit 127。
+# 用手动 while 循环而非 `readlink -f`:macOS 自带 readlink 不支持 -f(会返回空),while 版 mac+Linux 通用。
+_crew_self="${BASH_SOURCE[0]:-$0}"
+while [ -L "$_crew_self" ]; do
+  _crew_link="$(readlink "$_crew_self")"
+  case "$_crew_link" in /*) _crew_self="$_crew_link";; *) _crew_self="$(dirname "$_crew_self")/$_crew_link";; esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$_crew_self")" && pwd)"
 CS="$SCRIPT_DIR/crew-session"
 CT="$SCRIPT_DIR/crew-tmux"
 CL="$SCRIPT_DIR/crew-launcher"
@@ -322,7 +330,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.0.0 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.0.1 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 cmd_prune() {
