@@ -6,7 +6,7 @@
 #   crew-tmux      tmux 集成
 #   crew-launcher  claude 启动
 #
-# 21 兼容命令:
+# 命令:
 #   crew <name> [task]       起会话(默认 tmux 模式,已存在则 attach)
 #   crew ls [--json]         列会话
 #   crew attach <name>       attach tmux
@@ -670,7 +670,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.2.0 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.2.1 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 # 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
@@ -1086,6 +1086,6 @@ case "$CMD" in
   switch)       cmd_switch "$@" ;;
   find)         cmd_find "$@" ;;
   prune)        cmd_prune "$@" ;;
-  help|--help|-h) sed -n '3,22p' "$0" ;;
+  help|--help|-h) sed -n '9,33p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)            cmd_spawn "$CMD" "$@" ;;
 esac
