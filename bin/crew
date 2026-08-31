@@ -92,7 +92,20 @@ cmd_ls() {
     local sid backend key tmuxname dir
     sid=$("$CS" get "$name" sid 2>/dev/null || echo "")
     backend=$("$CS" get "$name" backend 2>/dev/null || echo "?")
-    tmuxname=$("$CT" resolve "$name" 2>/dev/null || echo "")
+    # 2026-08-31 perf:内联 resolve(原每会话 fork `crew-tmux resolve`,它又 fork 2×crew-session
+    # + 2×tmux list-sessions ≈250ms/会话 → 14 会话 ~1.7s)。改为直接读 state 文件 + 复用已有的
+    # live_sessions(一次性 tmux 列表),零 per-session fork。逻辑对齐 crew-tmux cmd_resolve:
+    #   adopted(.tmux)> .tmuxname > live_sessions 里查 name / crew-name。
+    tmuxname=""
+    if [ -f "$CREW_STATE/$name.tmux" ]; then
+      tmuxname=$(cat "$CREW_STATE/$name.tmux" 2>/dev/null)
+    elif [ -f "$CREW_STATE/$name.tmuxname" ]; then
+      tmuxname=$(cat "$CREW_STATE/$name.tmuxname" 2>/dev/null)
+    elif echo "$live_sessions" | grep -qFx "$name"; then
+      tmuxname="$name"
+    elif echo "$live_sessions" | grep -qFx "crew-$name"; then
+      tmuxname="crew-$name"
+    fi
     dir=""
     key=""
     # 2026-08-30 修:tmux live 时优先从 /proc/PID/cmdline 反查真 --model + /proc/PID/cwd 反查真 dir。
@@ -336,7 +349,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.0.3 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.0.4 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 cmd_prune() {
