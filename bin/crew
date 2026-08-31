@@ -228,9 +228,19 @@ cmd_stop() {
 }
 
 cmd_kill() {
-  local name="$1"; shift
-  local purge=0
-  [ "${1:-}" = "--purge" ] && purge=1
+  # 2026-08-31 修 flag 顺序 bug:原实现 `local name=$1; shift; [ $1 = --purge ]`
+  # 假定 `kill <name> --purge` 严格顺序。用户跑 `crew kill --purge <name>` 时
+  # name 被赋值成 "--purge",然后拿字符串 "--purge" 当会话名去 tmux/state clean,
+  # 真会话不被杀。改成全程扫描 flag,与主脚本 line 67-73 同哲学(flag 位置无关)。
+  local name="" purge=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --purge) purge=1; shift ;;
+      --) shift; [ -z "$name" ] && name="${1:-}" && shift; break ;;
+      -*) die "unknown flag for kill: $1 (usage: crew kill <name> [--purge])" ;;
+      *) [ -z "$name" ] && name="$1"; shift ;;
+    esac
+  done
   [ -z "$name" ] && die "usage: crew kill <name> [--purge]"
   if [ -z "${CREW_KILL_ALLOW_SELF:-}" ] && "$CT" is-inside "$name" 2>/dev/null; then
     die "B2: refuse to kill '$name' — you are running inside its tmux session. Run 'crew kill $name' from OUTSIDE, or set CREW_KILL_ALLOW_SELF=1 to override."
