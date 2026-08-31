@@ -140,7 +140,7 @@ build_claude_argv() {
 
 # spawn --name X --mode fg|tmux [...]
 cmd_spawn() {
-  local name="" mode="" fresh=0 task="" dir=""
+  local name="" mode="" fresh=0 task="" dir="" model_arg="" key_arg=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --name) name="$2"; shift 2 ;;
@@ -148,11 +148,21 @@ cmd_spawn() {
       --fresh) fresh=1; shift ;;
       --task) task="$2"; shift 2 ;;
       --dir) dir="$2"; shift 2 ;;
+      # 2026-08-31:补 --model/--key 分支。之前只有 crew 主脚本吃这两个 flag 并写 state,
+      # 外部调用方(面板/adopt/直接调 launcher 的脚本)传 --model 会落进 `*) shift ;;` 被
+      # 静默吞掉 → 换模型没反应,只能手动 crew-session set backend 绕过。这里显式吸掉并
+      # 立即写会话 state,让下面 load_backend_conf 读 state.backend 时是新值。
+      --model) model_arg="$2"; shift 2 ;;
+      --key) key_arg="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
   [ -z "$name" ] || [ -z "$mode" ] && usage
   case "$mode" in fg|tmux|use-current-tmux) : ;; *) echo "[crew-launcher] mode 必须 fg / tmux / use-current-tmux" >&2; usage ;; esac
+
+  # --model/--key 先写会话 state(与 crew 主脚本 1037-1038 行同语义),再交给 load_backend_conf
+  [ -n "$model_arg" ] && "$CS" set "$name" backend "$model_arg" >/dev/null
+  [ -n "$key_arg" ]   && "$CS" set "$name" key     "$key_arg"   >/dev/null
 
   # 加载 backend
   load_backend_conf "$name" || return 1
@@ -194,8 +204,25 @@ cmd_spawn() {
   local extra_policy=""
   [ -n "$policy_body_arg" ] && extra_policy=" --append-system-prompt \"\$(cat $(printf %q "$policy_body_arg"))\""
 
+  # 2026-08-31 [onboarding] 通用会话协议注入:/work/.crew-onboarding/CLAUDE.md 存在则
+  # 追加到 --append-system-prompt。位置在 policy 之前(先通用协议再具体域 policy),
+  # claude 按顺序拼多个 --append-system-prompt。用户拍板方案 A(crew-launcher 注入)。
+  # 版本号在同目录 VERSION 文件,launcher 通过 CREW_ONBOARDING_VER env 透传给会话
+  # (便于会话内自查/statusline 显示协议版本)。文件不存在时静默跳过,不影响启动。
+  local extra_onboarding=""
+  local onboarding_file="${CREW_ONBOARDING_DIR:-/work/.crew-onboarding}/CLAUDE.md"
+  local onboarding_ver_file="${CREW_ONBOARDING_DIR:-/work/.crew-onboarding}/VERSION"
+  local onboarding_ver=""
+  if [ -f "$onboarding_file" ]; then
+    extra_onboarding=" --append-system-prompt \"\$(cat $(printf %q "$onboarding_file"))\""
+    if [ -f "$onboarding_ver_file" ]; then
+      onboarding_ver=$(head -1 "$onboarding_ver_file" 2>/dev/null | tr -d '[:space:]')
+    fi
+  fi
+
   # env 前缀
   local envp=""
+  [ -n "$onboarding_ver" ] && envp+=" CREW_ONBOARDING_VER=$(printf %q "$onboarding_ver")"
   [ -n "${BK_BASE_URL:-}" ] && envp+=" ANTHROPIC_BASE_URL=$(printf %q "$BK_BASE_URL")"
   [ -n "${BK_TOKEN:-}" ] && envp+=" ANTHROPIC_AUTH_TOKEN=$(printf %q "$BK_TOKEN")"
   [ -n "${BK_ENV_EXTRA:-}" ] && envp+=" $BK_ENV_EXTRA"
@@ -235,7 +262,7 @@ cmd_spawn() {
     for a in "${argv[@]}"; do
       printf ' %s' "$(printf %q "$a")"
     done
-    printf '%s' "$extra_policy"
+    printf '%s%s' "$extra_onboarding" "$extra_policy"
     echo
   } > "$launcher"
   chmod 600 "$launcher"
