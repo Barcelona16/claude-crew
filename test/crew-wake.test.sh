@@ -156,6 +156,26 @@ rc=$(PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="work" FAKE_TMUX_PANE="$IDLE_PANE
   "$CREW" wake work >/dev/null 2>&1; echo $?)
 [ "$rc" = 0 ] && _ok "crew wake work 入口 exit 0" || _ng "crew wake exit=$rc(期望 0)"
 
+# --- Case 12: tmux 双胞胎(work + crew-work 同存)→ crew-work 优先 ---
+# 2026-09-01 修:之前裸名优先导致空壳劫持真 crew 会话。
+echo "--- Case 12: 双胞胎 tmux → crew-<name> 优先 ---"
+SENT12="$T/sent12.log"; : > "$SENT12"
+# fake list-sessions 同时返 work + crew-work,wake 应命中 crew-work,send-keys -t crew-work
+rc=$(PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="work,crew-work" FAKE_TMUX_PANE="$IDLE_PANE" \
+  FAKE_TMUX_SENT="$SENT12" WAKE_PENDING_FILE="$PEND" node "$WAKE" work >/dev/null 2>&1; echo $?)
+[ "$rc" = 0 ] && _ok "双胞胎 wake exit 0" || _ng "exit=$rc(期望 0)"
+# send-keys 应打到 crew-work,不打到裸名 work
+grep -q -- "-t crew-work" "$SENT12" && ! grep -qE "^-t work[[:space:]]" "$SENT12" \
+  && _ok "send-keys 命中 crew-work(裸名 work 未被劫持)" || _ng "打到错 pane: $(cat $SENT12)"
+
+# --- Case 13: 只有裸名(无 crew- 前缀)→ 兜底到裸名 ---
+echo "--- Case 13: 只有裸名 → 兜底 ---"
+SENT13="$T/sent13.log"; : > "$SENT13"
+rc=$(PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="oldsess" FAKE_TMUX_PANE="$IDLE_PANE" \
+  FAKE_TMUX_SENT="$SENT13" WAKE_PENDING_FILE="$PEND" node "$WAKE" oldsess >/dev/null 2>&1; echo $?)
+[ "$rc" = 0 ] && _ok "adopt 兼容:只有裸名也能命中 exit 0" || _ng "exit=$rc"
+grep -qE "^-t oldsess[[:space:]]" "$SENT13" && _ok "send-keys 打到裸名 oldsess" || _ng "未命中裸名: $(cat $SENT13)"
+
 echo
 echo "=== crew-wake.test.sh: $pass / $total pass, $fail fail ==="
 [ "$fail" -eq 0 ]

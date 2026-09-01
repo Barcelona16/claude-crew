@@ -43,9 +43,13 @@ function tmuxExactName(target) {
     return { tmuxDead: false, name: null };
   }
   const names = String(out.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
-  if (names.indexOf(target) >= 0) return { tmuxDead: false, name: target };
+  // 2026-09-01 修:crew-<target> 优先于裸名 target。之前反着来,work + crew-work 双胞胎时
+  // 裸名劫持真会话的 crew- pane,nudge 全打到空壳,真 work 从没被唤醒。crew 主流程都用
+  // crew-<name> 命名(见 crew-launcher 的 new-session),裸名多来自 adopt 外部工具建的
+  // 老 tmux —— 前者优先,后者兜底,不会误伤 adopt 场景。
   const prefixed = 'crew-' + target;
   if (names.indexOf(prefixed) >= 0) return { tmuxDead: false, name: prefixed };
+  if (names.indexOf(target) >= 0) return { tmuxDead: false, name: target };
   return { tmuxDead: false, name: null };
 }
 

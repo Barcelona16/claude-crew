@@ -69,9 +69,11 @@ function listCrewSessions() {
 
 // tmux name 解析:同 crew-wake 的 tmuxExactName(优先原名,退 crew-<name>)
 function resolveTmux(target, tmuxNames) {
-  if (tmuxNames.indexOf(target) >= 0) return target;
+  // 2026-09-01 修:crew-<target> 优先。双胞胎 tmux(裸名空壳 + crew- 真会话)时,裸名劫持
+  // 真会话的坑。crew 主流程都用 crew- 前缀,前者优先后者兜底,不会误伤 adopt 场景。
   const pref = 'crew-' + target;
   if (tmuxNames.indexOf(pref) >= 0) return pref;
+  if (tmuxNames.indexOf(target) >= 0) return target;
   return null;
 }
 

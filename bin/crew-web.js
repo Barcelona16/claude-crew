@@ -175,8 +175,9 @@ function resolveTmux(name) {
   const r = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}'], { timeout: 2000, encoding: 'utf8' });
   if (r.status !== 0) return null;
   const names = String(r.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean);
-  if (names.indexOf(name) >= 0) return name;
+  // 2026-09-01:crew-<name> 优先(双胞胎劫持修)
   if (names.indexOf('crew-' + name) >= 0) return 'crew-' + name;
+  if (names.indexOf(name) >= 0) return name;
   return null;
 }
 
