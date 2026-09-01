@@ -52,6 +52,7 @@ CS="$SCRIPT_DIR/crew-session"
 CT="$SCRIPT_DIR/crew-tmux"
 CL="$SCRIPT_DIR/crew-launcher"
 CR="$SCRIPT_DIR/crew-register.js"
+CW="$SCRIPT_DIR/crew-wake.js"
 
 log() { echo "[crew] $*" >&2; }
 die() { log "$*"; exit 1; }
@@ -324,6 +325,26 @@ cmd_register() {
   [ -n "$desc" ] && args+=(--description "$desc")
   [ "$remove" = 1 ] && args+=(--remove)
   node "$CR" "${args[@]}"  # exit code 透传(0=成功/幂等/remove, 5=无归属 project)
+}
+
+cmd_wake() {
+  # crew wake <name> [--note "文本"] [--no-queue]
+  # exit 透传 crew-wake.js:0=已唤醒 1=会话不存在 2=非 idle 已入 pending 3=tmux 不可用
+  local name="" note="" noqueue=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --note)     note="$2"; shift 2 ;;
+      --no-queue) noqueue=1; shift ;;
+      -*)         die "crew wake: unknown flag $1" ;;
+      *)          [ -z "$name" ] && name="$1"; shift ;;
+    esac
+  done
+  [ -z "$name" ] && die "usage: crew wake <name> [--note \"文本\"] [--no-queue]"
+  command -v node >/dev/null 2>&1 || die "crew wake 需要 node"
+  local args=("$name")
+  [ -n "$note" ] && args+=(--note "$note")
+  [ "$noqueue" = 1 ] && args+=(--no-queue)
+  node "$CW" "${args[@]}"
 }
 
 cmd_send() {
@@ -1184,6 +1205,7 @@ case "$CMD" in
   unpin)        cmd_unpin "$@" ;;
   adopt)        cmd_adopt "$@" ;;
   register)     cmd_register "$@" ;;
+  wake)         cmd_wake "$@" ;;
   send)         cmd_send "$@" ;;
   inbox)        cmd_inbox "$@" ;;
   log)          cmd_log "$@" ;;
