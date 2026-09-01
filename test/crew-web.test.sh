@@ -27,6 +27,19 @@ export CREW_STATE="$T/state"
 export FEEDBACK_JSONL="$T/feedback.jsonl"
 mkdir -p "$CREW_STATE/heartbeat" "$CREW_STATE/inbox/alice"
 
+# fake tmux(全测试通用):list-sessions 返空,避免真 tmux 里的会话污染 listCrewSessions
+FAKE_BIN="$T/fakebin"; mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/tmux" <<'FAKE'
+#!/usr/bin/env bash
+sub="$1"; shift
+case "$sub" in
+  list-sessions) echo ""; exit 0 ;;
+  *) exit 0 ;;
+esac
+FAKE
+chmod +x "$FAKE_BIN/tmux"
+export PATH="$FAKE_BIN:$PATH"
+
 # 假 CCR config(白名单来源)
 mkdir -p "$T/.claude-code-router"
 cat > "$T/.claude-code-router/config.json" <<'JSON'
@@ -92,14 +105,16 @@ process.exit(0)
 
 # ---- Case 3: handleState ----
 echo "--- Case 3: handleState ---"
-node -e "
+diag=$(node -e "
 const w=require('$CWEB');
 let body='',code=0;
 const res={ writeHead:(c)=>{code=c}, end:(b)=>{body=b} };
 w.handleState({},res,{query:{}});
 const j=JSON.parse(body);
+console.log('code='+code+' sessions='+j.sessions.length+' names='+j.sessions.map(s=>s.name).join(',')+' keys='+j.keys.length);
 process.exit(code===200&&Array.isArray(j.sessions)&&j.sessions.length===2&&Array.isArray(j.keys)&&j.keys.length===2?0:1)
-" && _ok "handleState 200,sessions=2,keys=2" || _ng "handleState 输出不对"
+" 2>&1)
+[ $? = 0 ] && _ok "handleState 200,sessions=2,keys=2" || _ng "handleState 输出不对: $diag"
 
 # ---- Case 4: handleSwitch 白名单 ----
 echo "--- Case 4: switch 白名单 ---"

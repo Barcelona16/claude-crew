@@ -43,6 +43,7 @@
   .msg { font-size: 11px; padding: 3px 5px; margin: 2px 0; border-radius: 2px;
          display: flex; gap: 6px; line-height: 1.4; }
   .msg .dot { flex-shrink: 0; margin-top: 2px; }
+  .msg .ts { color: #5e6472; font-variant-numeric: tabular-nums; flex-shrink: 0; font-size: 10px; }
   .msg .from { color: #7d8394; flex-shrink: 0; }
   .msg .note { color: #c8ccd4; overflow: hidden; text-overflow: ellipsis;
                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
@@ -78,11 +79,12 @@ async function fetchState() {
 }
 
 function stateClass(s) {
-  // 30 分钟无 ack = stale 红
+  // acked → 绿。pending 且 30 分钟未推进 → stale 红(delivered 不判 stale,已到达)。
   if (s.state === 'acked') return 's-acked';
-  if (s.state === 'pending' || s.state === 'delivered') {
+  if (s.state === 'delivered') return 's-delivered';
+  if (s.state === 'pending') {
     if (s.ts && Date.now() - new Date(s.ts).getTime() > 30 * 60 * 1000) return 's-stale';
-    return 's-' + s.state;
+    return 's-pending';
   }
   return 's-pending';
 }
@@ -103,14 +105,28 @@ function fromLabel(f) {
   return kindTag + esc(f.id);
 }
 
+// 时间戳格式化:今天 HH:MM:SS;非今天 MM-DD HH:MM(节省宽度);hover 显示完整 ISO。
+function formatTs(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  const pad = (n) => String(n).padStart(2, '0');
+  if (sameDay) return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  return (d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
 function renderMsg(m, side) {
   // ackOf 是消费后的镜像空 note 记录,不作为独立卡片显示(避免噪音)
   if (m.ackOf) return '';
   const cls = stateClass(m);
   const arrow = side === 'in' ? '←' : '→';
   const peer = side === 'in' ? fromLabel(m.from) : esc(m.to);
+  const ts = formatTs(m.ts);
   return `<div class="msg ${cls}">
     <span class="dot">${dot(cls)}</span>
+    <span class="ts" title="${esc(m.ts || '')}">${ts}</span>
     <span class="from">${arrow}${peer}</span>
     <span class="note">${esc(m.note) || '<i style="color:#4a4f5c">（空）</i>'}</span>
   </div>`;
