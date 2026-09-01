@@ -17,8 +17,9 @@
 #   crew send <name> "msg"   给会话 inbox 灌消息
 #   crew inbox <name> [--peek]  读 inbox
 #   crew log <name>          看 transcript
-#   crew models|backends     列 backends
+#   crew models              按 key 分组列每个 key 支持的真实模型
 #   crew models <key>        列该 key 能路由的模型(从 CCR provider 反查;joycode 系含全部)
+#   crew backends            列内部 backend conf 文件名(实现细节,选模型用 crew models)
 #   crew sync-models [--key A] 从上游发现新模型,多选加进 CCR 并重启(joycode 从 :8765 拉)
 #   crew keys                列 key 别名(值脱敏)
 #   crew addkey <key> [别名] 加一把 key 到 keys.conf(别名不给则自动派生)
@@ -1152,6 +1153,6 @@ case "$CMD" in
   switch)       cmd_switch "$@" ;;
   find)         cmd_find "$@" ;;
   prune)        cmd_prune "$@" ;;
-  help|--help|-h) sed -n '9,34p' "$0" | sed 's/^# \{0,1\}//' ;;
+  help|--help|-h) sed -n '9,35p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)            cmd_spawn "$CMD" "$@" ;;
 esac
