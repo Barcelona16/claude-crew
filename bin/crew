@@ -15,7 +15,13 @@
 #   crew pin/unpin <name>    pin/unpin tmux
 #   crew adopt <name> <tmux> [--sid X] [--dir P] [--model M]
 #   crew send <name> "msg"   给会话 inbox 灌消息
-#   crew inbox <name> [--peek]  读 inbox
+#   crew notify <name> "msg" 发消息并唤醒(send+wake 合一,确保会话看到)
+#   crew wake <name>         唤醒会话(paneIdle 判据 + 双 Enter + pending 队列)
+#   crew inbox <name> [--peek]  读 inbox(带时间戳,消费后归档)
+#   crew status <name>       会话健康摘要(心跳/inbox/pending)
+#   crew register            会话注册(读 cwd 判归属,原子写 project.json sessions[])
+#   crew heartbeat           60s 采样守护(单例,抓 ctxPct 等)
+#   crew web                 独立前端 :18060(会话卡片 + 收发 + 切模型 + attach)
 #   crew log <name>          看 transcript
 #   crew models              按 key 分组列每个 key 支持的真实模型
 #   crew models <key>        列该 key 能路由的模型(从 CCR provider 反查;joycode 系含全部)
@@ -1330,6 +1336,6 @@ case "$CMD" in
   resume-prev)  cmd_resume_prev "$@" ;;
   find)         cmd_find "$@" ;;
   prune)        cmd_prune "$@" ;;
-  help|--help|-h) sed -n '9,36p' "$0" | sed 's/^# \{0,1\}//' ;;
+  help|--help|-h) sed -n '9,42p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)            cmd_spawn "$CMD" "$@" ;;
 esac
