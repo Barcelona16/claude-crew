@@ -90,6 +90,13 @@ STATE_FILE = os.environ.get("CREW_PROXY_STATE") or os.path.expanduser(
 )
 FAIL_CODES = {401, 403, 429}  # plus any 5xx and connection errors (see _is_fail)
 
+# _passthrough 退避重试(2026-09-01):单 key 会话遇 429/5xx/连接错时,proxy 自己退避重发同一
+# 请求(不换模型/不换 key——纯"等几秒重试"),吸收瞬时波动,claude 侧少报 API error。全 env 可调。
+PT_MAX_RETRY   = int(os.environ.get("CREW_PROXY_MAX_RETRY", "2"))       # 额外重试次数(最多打 1+N 次)
+PT_RETRY_BASE  = float(os.environ.get("CREW_PROXY_RETRY_BASE", "1.0"))  # 指数退避基数秒
+PT_RETRY_MAX   = float(os.environ.get("CREW_PROXY_RETRY_MAX", "8.0"))   # 单次退避上限秒
+PT_RETRY_BUDGET= float(os.environ.get("CREW_PROXY_RETRY_BUDGET", "20.0"))  # 总退避预算秒(超了停)
+
 logging.basicConfig(
     stream=sys.stdout, level=logging.INFO,
     format="%(asctime)s [crew-proxy] %(message)s", datefmt="%H:%M:%S",
@@ -2072,33 +2079,62 @@ class Handler(BaseHTTPRequestHandler):
     #    is counted under the synthetic "direct" key so the dashboard shows all traffic. --
     def _passthrough(self, body, model=None, stream=False):
         url = CCR_URL + self.path
-        req = urllib.request.Request(url, data=body or None, headers=self._fwd_headers(),
-                                     method=self.command)
-        _t = time.time()
-        try:
-            resp = urllib.request.urlopen(req, timeout=300 if model else 120)
-        except urllib.error.HTTPError as e:
-            if model:
-                STATS.record("direct", model, e.code, ok=not _is_fail(e.code), forced=False, failover=False)
-            self._relay(e, streaming=False)
-        except Exception as e:
-            if model:
-                STATS.record("direct", model, "ERR", ok=False, forced=False, failover=False)
-            self._send_err(502, f"crew-proxy: CCR unreachable: {e}")
-        else:
-            if model:
-                STATS.record("direct", model, getattr(resp, "status", 200), ok=True,
-                             forced=False, failover=False, latency=time.time() - _t)
-                captured = self._relay(resp, streaming=stream, capture=True)
-                if captured:
-                    try:
-                        it, ot = parse_usage(captured)
-                        STATS.record_usage("direct", model, it, ot)
-                        USAGE.add(self.headers.get("X-Crew-Login") or "direct", it, ot)
-                    except Exception:
-                        pass
+        # 2026-09-01 退避重试:仅对 model 请求(非 None)、429/5xx/连接错重试;退避 base*2^k(cap
+        # PT_RETRY_MAX),429 带 Retry-After 优先且 cap;总退避不超 PT_RETRY_BUDGET。重试全在 _relay
+        # 之前(还没写响应给客户端),流式也安全。400/401/403/2xx 不重试。不换模型/不换 key。
+        can_retry = model is not None and PT_MAX_RETRY > 0
+        spent = 0.0
+        attempt = 0
+        while True:
+            req = urllib.request.Request(url, data=body or None, headers=self._fwd_headers(),
+                                         method=self.command)
+            _t = time.time()
+            try:
+                resp = urllib.request.urlopen(req, timeout=300 if model else 120)
+            except urllib.error.HTTPError as e:
+                # 可重试码(429/5xx)且还有次数+预算 → 退避重试
+                if can_retry and attempt < PT_MAX_RETRY and (e.code == 429 or e.code >= 500):
+                    ra = parse_retry_after(e.headers) if e.code == 429 else None
+                    delay = ra if (ra is not None) else min(PT_RETRY_BASE * (2 ** attempt), PT_RETRY_MAX)
+                    delay = min(delay, PT_RETRY_MAX)
+                    if spent + delay <= PT_RETRY_BUDGET:
+                        log.info("passthrough retry %d/%d after %.1fs (code=%s model=%s)",
+                                 attempt + 1, PT_MAX_RETRY, delay, e.code, model)
+                        time.sleep(delay); spent += delay; attempt += 1
+                        continue
+                # 不重试(不可重试码 / 次数或预算耗尽)→ 透传错误
+                if model:
+                    STATS.record("direct", model, e.code, ok=not _is_fail(e.code), forced=False, failover=False)
+                self._relay(e, streaming=False)
+                return
+            except Exception as e:
+                # 连接错(timeout/reset 等)也可重试
+                if can_retry and attempt < PT_MAX_RETRY:
+                    delay = min(PT_RETRY_BASE * (2 ** attempt), PT_RETRY_MAX)
+                    if spent + delay <= PT_RETRY_BUDGET:
+                        log.info("passthrough retry %d/%d after %.1fs (conn-err model=%s: %s)",
+                                 attempt + 1, PT_MAX_RETRY, delay, model, str(e)[:60])
+                        time.sleep(delay); spent += delay; attempt += 1
+                        continue
+                if model:
+                    STATS.record("direct", model, "ERR", ok=False, forced=False, failover=False)
+                self._send_err(502, f"crew-proxy: CCR unreachable: {e}")
+                return
             else:
-                self._relay(resp, streaming=False)
+                if model:
+                    STATS.record("direct", model, getattr(resp, "status", 200), ok=True,
+                                 forced=False, failover=False, latency=time.time() - _t)
+                    captured = self._relay(resp, streaming=stream, capture=True)
+                    if captured:
+                        try:
+                            it, ot = parse_usage(captured)
+                            STATS.record_usage("direct", model, it, ot)
+                            USAGE.add(self.headers.get("X-Crew-Login") or "direct", it, ot)
+                        except Exception:
+                            pass
+                else:
+                    self._relay(resp, streaming=False)
+                return
 
     # -- key-aware routing with failover --
     def _route(self, body):
