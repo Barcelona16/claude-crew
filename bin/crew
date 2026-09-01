@@ -681,7 +681,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.2.2 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.3.0 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 # 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
@@ -967,17 +967,19 @@ cmd_spawn() {
   local task="$*"
   [ -z "$name" ] && die "no name"
 
-  # 2026-08-31:--pick 强制交互选 model/key(换模型/新起的交互入口)。默认值取会话现有 backend/key
-  # (换模型时预选当前)。放在 attach 判断【之前】跑,这样选完的 BACKEND/KEY 能被下面的 live 换模型
-  # 逻辑识别(触发重启换模型)。仅 --pick 触发,避免误伤纯 `crew <会话>` attach。
-  # 需交互终端(-t 0);非交互(脚本)即使传 --pick 也跳过(无 tty 没法选)。
+  # 2026-09-01:--pick 强制交互选(换模型/新起入口)。顺序先 key 后模型(与 switch/新起一致):
+  # 选 key(默认会话现值)→ 从该 key 支持的模型选(默认现值;拿不到回落全量 backend)。放在 attach
+  # 判断【之前】跑,选完的 BACKEND/KEY 被下面 live 换模型逻辑识别。仅 --pick 触发,不误伤纯 attach。
+  # 需交互终端;非交互即使传 --pick 也跳过。
   if [ "$PICK" = 1 ] && [ -t 0 ]; then
-    local _def_be; _def_be=$("$CS" get "$name" backend 2>/dev/null || echo "")
-    local _picked_be; _picked_be=$(_list_backends | _pick_one "选模型 backend ($name)" "$_def_be")
-    [ -n "$_picked_be" ] && BACKEND="$_picked_be"
     local _def_key; _def_key=$("$CS" get "$name" key 2>/dev/null || echo "")
     local _picked_key; _picked_key=$(_list_keys | _pick_one "选 key ($name)" "$_def_key")
     [ -n "$_picked_key" ] && KEY="$_picked_key"
+    local _def_be; _def_be=$("$CS" get "$name" backend 2>/dev/null || echo "")
+    local _mo; [ -n "$KEY" ] && _mo=$(ccr_models_for_key_full "$KEY")
+    [ -z "$_mo" ] && _mo=$(_list_backends)
+    local _picked_be; _picked_be=$(printf '%s\n' "$_mo" | _pick_one "选模型 ($name${KEY:+, key=$KEY})" "$_def_be")
+    [ -n "$_picked_be" ] && BACKEND="$_picked_be"
   fi
 
   # 2026-08-30 audit-crew A5(P0):registry 写方收口 —— spawn 起会话时把 <cwd,name>
@@ -1030,18 +1032,22 @@ cmd_spawn() {
     fi
   fi
 
-  # 2026-08-31:走到这 = 确定要 spawn(没被 attach exec 掉)。若没传 --model 且会话也没记忆过
-  # backend、又是交互终端 → 弹菜单选(新起会话"没输入就交互")。已有记忆 backend 的(如重起旧会话)
-  # 不打扰,沿用记忆值。非交互(脚本)不弹,让下游按 state/报错处理。
+  # 2026-09-01:走到这 = 确定要 spawn。没传 --model 且会话没记忆过 backend、又是交互终端 →
+  # 交互选(新起会话"没输入就交互")。顺序:先选 key,再从【该 key 支持的模型】选(与 switch 一致,
+  # 列真实模型名如 GLM-5.3/Claude-Opus-4.7,而非 backend 文件名)。拿不到该 key 的模型才回落全量
+  # backend 名。已有记忆 backend 的(重起旧会话)不打扰。非交互(脚本)不弹。
   if [ -z "$BACKEND" ] && [ -t 0 ] && ! "$CS" has "$name" backend 2>/dev/null; then
-    local _def_be2 _picked_be2
-    _def_be2=$(_list_backends | head -1)
-    _picked_be2=$(_list_backends | _pick_one "选模型 backend ($name)" "$_def_be2")
-    [ -n "$_picked_be2" ] && BACKEND="$_picked_be2"
+    # 1) 先选 key
     if [ -z "$KEY" ] && ! "$CS" has "$name" key 2>/dev/null; then
-      local _picked_key2; _picked_key2=$(_list_keys | _pick_one "选 key ($name)" "")
-      [ -n "$_picked_key2" ] && KEY="$_picked_key2"
+      local _pk; _pk=$(_list_keys | _pick_one "选 key ($name)" "")
+      [ -n "$_pk" ] && KEY="$_pk"
     fi
+    # 2) 再选该 key 支持的模型(provider,model 全名,可直接用);拿不到 → 回落全量 backend
+    local _mopts
+    [ -n "$KEY" ] && _mopts=$(ccr_models_for_key_full "$KEY")
+    [ -z "$_mopts" ] && _mopts=$(_list_backends)
+    local _pm; _pm=$(printf '%s\n' "$_mopts" | _pick_one "选模型 ($name${KEY:+, key=$KEY})" "")
+    [ -n "$_pm" ] && BACKEND="$_pm"
   fi
 
   [ -n "$BACKEND" ] && "$CS" set "$name" backend "$BACKEND"
