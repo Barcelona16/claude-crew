@@ -225,6 +225,9 @@ cmd_menu() {
   if [ "$chosen" = "+ 新建会话" ]; then
     local newname=""; printf '新会话名 > ' >&2; read -r newname </dev/tty 2>/dev/null || true
     [ -z "$newname" ] && { log "取消"; return 0; }
+    # 2026-09-02:让用户选启动模式(默认 tmux 后台常驻;no-tmux 前台占当前终端)
+    local _mode; _mode=$(printf 'tmux (后台常驻,推荐)\nno-tmux (前台,占当前终端)\n' | _pick_one "启动模式 ($newname)" "tmux (后台常驻,推荐)")
+    case "$_mode" in no-tmux*) NO_TMUX=1 ;; esac
     cmd_spawn "$newname"   # 新起:cmd_spawn 里没传 --model 会自动弹选模型
   else
     # 取回真实会话名(截 "名   (..." 前段)
@@ -1201,6 +1204,32 @@ _list_keys() {
   ' "$ccr" | sort -u
 }
 
+# _trust_dir <dir>:给该目录在 ~/.claude.json 预写 hasTrustDialogAccepted=true,让 claude 起会话
+# 时不弹"Quick safety check: trust this folder?"确认页(--dangerously-skip-permissions 不跳它,
+# detached tmux 里没人回车会卡住 → 空壳循环。本地新目录起会话必踩)。幂等,原子写,只改该 dir 条目。
+_trust_dir() {
+  local dir="$1"
+  [ -n "$dir" ] || return 0
+  [ "$dir" = "-" ] && return 0
+  command -v node >/dev/null 2>&1 || return 0   # 无 node:降级,用户手动确认一次
+  DIR_TO_TRUST="$dir" node -e '
+    const fs=require("fs"), os=require("os"), path=require("path");
+    const f=path.join(os.homedir(),".claude.json");
+    let c={};
+    try { c=JSON.parse(fs.readFileSync(f,"utf8")); } catch(e) { c={}; }
+    if(typeof c!=="object"||!c) c={};
+    c.projects=c.projects||{};
+    const d=process.env.DIR_TO_TRUST;
+    const p=c.projects[d]||{};
+    if(p.hasTrustDialogAccepted===true) process.exit(0);  // 幂等:已信任不写
+    p.hasTrustDialogAccepted=true;
+    c.projects[d]=p;
+    const tmp=f+".crewtmp";
+    fs.writeFileSync(tmp, JSON.stringify(c));
+    fs.renameSync(tmp, f);
+  ' 2>/dev/null || true
+}
+
 resolve_session_dir() {
   local name="$1" d=""
   if [ -n "$DIR" ]; then echo "$DIR"; return; fi
@@ -1353,6 +1382,9 @@ cmd_spawn() {
   local -a extra_args=()
   [ "$FRESH" = 1 ] && extra_args+=(--fresh)
   [ -n "$task" ] && extra_args+=(--task "$task")
+
+  # 2026-09-02:起会话前预信任 cwd,免 claude 弹 trust dialog 卡住(detached tmux 无人回车→空壳循环)
+  _trust_dir "$session_dir"
 
   "$CL" spawn --name "$name" --mode "$mode" --dir "$session_dir" "${extra_args[@]}"
 }
