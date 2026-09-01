@@ -1124,7 +1124,7 @@ cmd_spawn() {
       [ -n "$_pk" ] && KEY="$_pk"
     fi
     # 2) 再选该 key 支持的模型(provider,model 全名,可直接用);拿不到 → 提示补 key,不暴露文件名
-    local _mopts
+    local _mopts=""
     [ -n "$KEY" ] && _mopts=$(ccr_models_for_key_full "$KEY")
     if [ -z "$_mopts" ]; then
       [ -n "$KEY" ] && log "key '$KEY' 没有可路由模型(crew sync-models --key $KEY 补充);可 --model 直接指定"
