@@ -80,6 +80,54 @@ cmd_set() {
   local name="$1" field="$2" value="$3"
   validate_name "$name" || return 1
   validate_field "$field" || return 1
+  # backend 格式守门(2026-09-01):历史踩坑 work.backend 被写成裸 "GLM-5.3" 让会话起不来。
+  # 中央校验合法值:①含逗号(provider,model 全名)②有 $CREW_HOME/backends/<X>.conf 文件
+  # ③CCR 里某 provider 的 models[] 含该裸模型名(launcher 兜底能救的最后场景)
+  # 任一命中即通过;不合法直接拒写不埋雷。
+  # CREW_SESSION_SKIP_VALIDATE=1 env 可绕(测试/adopt/迁移场景),生产不设。
+  if [ "$field" = backend ] && [ -n "$value" ] && [ "${CREW_SESSION_SKIP_VALIDATE:-0}" != "1" ]; then
+    local _ok=0 _CH="${CREW_HOME:-$HOME/.config/claude-crew}"
+    case "$value" in
+      *,*) _ok=1 ;;   # 含逗号:provider,model 全名
+    esac
+    if [ "$_ok" = 0 ] && [ -f "$_CH/backends/$value.conf" ]; then _ok=1; fi
+    if [ "$_ok" = 0 ] && command -v node >/dev/null 2>&1 && [ -f "$HOME/.claude-code-router/config.json" ]; then
+      # 查 CCR 里有无 provider 的 models[] 含该裸值
+      RM="$value" node -e '
+        try {
+          const c=JSON.parse(require("fs").readFileSync(process.env.HOME+"/.claude-code-router/config.json","utf8"));
+          const ps=c.Providers||c.providers||[];
+          const hit=ps.some(p=>(p.models||[]).indexOf(process.env.RM)>=0);
+          process.exit(hit?0:1);
+        } catch(e) { process.exit(1); }
+      ' && _ok=1
+    fi
+    if [ "$_ok" != 1 ]; then
+      echo "[crew-session] invalid backend '$value' for '$name' — must be:" >&2
+      echo "  ① 'provider,model' 全名(如 joycode-oai,GLM-5.3),或" >&2
+      echo "  ② 存在 \$CREW_HOME/backends/<name>.conf,或" >&2
+      echo "  ③ CCR 里某 provider 的 models[] 含该裸值" >&2
+      echo "  查合法值:crew models" >&2
+      return 1
+    fi
+  fi
+  # 2026-09-01 审计日志:排查"某会话 state.backend/key 被神秘改坏"用。追加到 audit.log 每行 JSON:
+  # ts / field / name / old / new / pid / ppid / cmd(调用者进程命令行,能定位到 crew subcommand)
+  # 只审 backend/key 两个"改坏了就起不来"的关键字段;其它字段(sid/dir/policy 等)不审避免刷屏。
+  # CREW_SESSION_AUDIT=0 可关。
+  if [ "${CREW_SESSION_AUDIT:-1}" = "1" ] && { [ "$field" = backend ] || [ "$field" = key ]; }; then
+    local _old="" _f="$CREW_STATE/$name.$field"
+    [ -f "$_f" ] && _old=$(cat "$_f" 2>/dev/null | tr -d '\n')
+    if [ "$_old" != "$value" ]; then
+      local _log="$CREW_STATE/audit.log"
+      local _ppid _cmd
+      _ppid=$(awk '{print $4}' /proc/$$/stat 2>/dev/null || echo "?")
+      _cmd=$(tr '\0' ' ' < /proc/$_ppid/cmdline 2>/dev/null | head -c 300)
+      printf '{"ts":"%s","field":"%s","name":"%s","old":"%s","new":"%s","pid":%s,"ppid":%s,"cmd":"%s"}\n' \
+        "$(date -Iseconds)" "$field" "$name" "$_old" "$value" "$$" "$_ppid" "$(printf '%s' "$_cmd" | sed 's/"/\\"/g')" \
+        >> "$_log" 2>/dev/null || true
+    fi
+  fi
   # 特殊字段:pintmux 只存在与否,值恒为 "1"
   case "$field" in
     pintmux) printf '1' > "$CREW_STATE/$name.pintmux" ;;

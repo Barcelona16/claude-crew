@@ -131,8 +131,10 @@ echo "--- Case 15: 未知命令 ---"
 # --- Case 16: 13 字段全部可 set/get 往返 ---
 echo "--- Case 16: 13 字段全部往返 ---"
 setup
+# 2026-09-01:backend 加了格式校验,测试写"val-backend"这种垃圾值走 SKIP_VALIDATE 绕过
+# (本测试目的是测存储读写,不是校验)
 for field in sid backend key notmux fgpid tmux tmuxname policy policy_body notify settings nohup; do
-  "$BIN" set full "$field" "val-$field" >/dev/null
+  CREW_SESSION_SKIP_VALIDATE=1 "$BIN" set full "$field" "val-$field" >/dev/null
   v=$("$BIN" get full "$field")
   [ "$v" = "val-$field" ] || { _ng "字段 $field 往返失败: '$v'" ""; continue; }
 done
@@ -160,6 +162,56 @@ out=$("$BIN" list)
 echo "--- Case 20: help ---"
 out=$("$BIN" help 2>&1)
 echo "$out" | grep -q "用法:" && _ok "help 输出用法" || _ng "help 缺用法" ""
+
+# --- Case 21-26: backend 校验 + 审计日志(2026-09-01)---
+echo "--- Case 21: backend provider,model 合法 ---"
+setup
+export CREW_HOME="$CREW_STATE/../crewhome-$$"; mkdir -p "$CREW_HOME/backends"
+HOME_ORIG="$HOME"
+export HOME="$CREW_STATE/../fakehome-$$"; mkdir -p "$HOME/.claude-code-router"
+cat > "$HOME/.claude-code-router/config.json" <<'CCR'
+{"Providers":[{"name":"newkey-4.7","api_key":"53c5","models":["Claude-Opus-4.7-joybuilder"]}]}
+CCR
+"$BIN" set alpha backend "newkey-4.7,Claude-Opus-4.7-joybuilder" >/dev/null
+[ "$?" = 0 ] && [ "$("$BIN" get alpha backend)" = "newkey-4.7,Claude-Opus-4.7-joybuilder" ] \
+  && _ok "provider,model 全名放行" || _ng "合法值被拒" ""
+
+echo "--- Case 22: backend 裸模型名 CCR 含之 ---"
+"$BIN" set alpha backend "Claude-Opus-4.7-joybuilder" >/dev/null
+[ "$?" = 0 ] && _ok "CCR 里存在的裸模型名放行" || _ng "CCR 内裸模型应放行" ""
+
+echo "--- Case 23: backend 非法值拒 ---"
+out=$("$BIN" set alpha backend "totally-fake-model-xyz" 2>&1)
+rc=$?
+[ "$rc" != 0 ] && echo "$out" | grep -q "invalid backend" && _ok "非法裸模型 exit 非 0 + 报错" || _ng "非法值未拒:rc=$rc out=$out" ""
+
+echo "--- Case 24: backend conf 文件存在放行 ---"
+touch "$CREW_HOME/backends/mytest.conf"
+"$BIN" set alpha backend "mytest" >/dev/null
+[ "$?" = 0 ] && _ok "backends/mytest.conf 存在 → 放行" || _ng "conf 存在却被拒" ""
+
+echo "--- Case 25: SKIP_VALIDATE 绕过 ---"
+CREW_SESSION_SKIP_VALIDATE=1 "$BIN" set alpha backend "any-junk-value" >/dev/null
+[ "$?" = 0 ] && [ "$("$BIN" get alpha backend)" = "any-junk-value" ] \
+  && _ok "SKIP_VALIDATE=1 可绕过" || _ng "绕过未生效" ""
+
+echo "--- Case 26: 审计日志 ---"
+setup
+export CREW_HOME="$CREW_STATE/../crewhome-$$"; mkdir -p "$CREW_HOME/backends"
+touch "$CREW_HOME/backends/testb.conf" "$CREW_HOME/backends/testc.conf"
+"$BIN" set beta backend "testb" >/dev/null
+"$BIN" set beta backend "testb" >/dev/null  # 同值不该记
+"$BIN" set beta backend "testc" >/dev/null
+audit="$CREW_STATE/audit.log"
+[ -f "$audit" ] && _ok "audit.log 生成" || _ng "audit.log 未生成" ""
+n=$(wc -l < "$audit" 2>/dev/null || echo 0)
+[ "$n" = "2" ] && _ok "审计写 2 条(empty→testb, testb→testc;同值不记)" || _ng "audit 行数=$n(期望 2)" ""
+grep -q "\"field\":\"backend\"" "$audit" && _ok "审计含 field=backend" || _ng "field 缺" ""
+grep -q "\"name\":\"beta\"" "$audit" && _ok "审计含 name=beta" || _ng "name 缺" ""
+
+# 复原免影响后续
+export HOME="${HOME_ORIG:-/root}"
+unset CREW_HOME HOME_ORIG
 
 echo
 echo "=== crew-session.test.sh: $pass / $total pass, $fail fail ==="
