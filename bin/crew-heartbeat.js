@@ -100,7 +100,30 @@ function extractCtxPct(snapshot) {
   return m ? parseInt(m[1], 10) : null;
 }
 
-// 采样一次全部已知 crew 会话,写入 heartbeat/<name>.json
+// pending nudge flush(阶段 2 §E:收编 agent-bridge/pending-nudge-flusher.js)。
+// crew-wake.js 里非 idle 会话的 nudge 落进 $CREW_STATE/pending-nudges.jsonl,本函数每次
+// 心跳采样后扫队列,给 idle 的会话补发。flushOne 返回:
+//   true    → 补发成功(条目 drop)
+//   false   → 目标还忙(条目留下轮)
+//   'dead'  → tmux 里没这会话了(条目作废 drop,避免死信卡队列)
+function flushPendingNudges() {
+  let wake;
+  try { wake = require('./crew-wake.js'); } catch (_) { return { flushed: 0, remain: 0 }; }
+  const items = wake.takePendingNudges(100);
+  if (!items.length) return { flushed: 0, remain: 0 };
+  const remain = [];
+  let flushed = 0;
+  for (const it of items) {
+    const r = wake.flushOne(it);
+    if (r === true) flushed++;
+    else if (r === 'dead') {/* drop */}
+    else remain.push(it);
+  }
+  try { wake.savePendingNudges(remain); } catch (_) {}
+  return { flushed, remain: remain.length };
+}
+
+// 采样一次全部已知 crew 会话,写入 heartbeat/<name>.json;顺带 flush pending nudge。
 function sampleAll() {
   ensureDir();
   const crewNames = listCrewSessions();
@@ -126,7 +149,9 @@ function sampleAll() {
     try { writeJSON(path.join(HB_DIR, name + '.json'), record); } catch (_) {}
     results.push(record);
   }
-  return { ts, count: results.length, results };
+  // 采样完顺手扫 pending 队列(合流 flusher)
+  const flush = flushPendingNudges();
+  return { ts, count: results.length, results, pendingFlushed: flush.flushed, pendingRemain: flush.remain };
 }
 
 // 单例保护:PID 文件里的进程若还活着 → exit 6。stale 则重写(带自己 PID)。

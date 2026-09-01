@@ -47,6 +47,7 @@ case "$sub" in
     var="FAKE_TMUX_PANE_${target//-/_}"
     file="${!var:-${FAKE_TMUX_PANE:-}}"
     [ -n "$file" ] && [ -f "$file" ] && cat "$file"; exit 0 ;;
+  send-keys) [ -n "${FAKE_TMUX_SENT:-}" ] && echo "$*" >> "$FAKE_TMUX_SENT"; exit 0 ;;
   *) exit 0 ;;
 esac
 FAKE
@@ -151,6 +152,30 @@ rc=$("$CREW" status nobody >/dev/null 2>&1; echo $?)
 echo "--- Case 12: 人类可读 ---"
 out=$("$CREW" status eve 2>/dev/null)
 echo "$out" | grep -q "inbox" && echo "$out" | grep -q "心跳" && _ok "人类可读含 inbox/心跳字段" || _ng "输出缺字段: $out"
+
+# --- Case 13: 心跳采样顺带 flush pending nudge(阶段 2 §E 尾巴)---
+# 场景:pending 队列有一条 nudge 指向 idle 会话 → 心跳采样 → 该条应被 flush 掉(queue 空)
+echo "--- Case 13: 心跳带 pending flush ---"
+IDLE="$T/idle13.pane"; printf '\n\n❯ \n' > "$IDLE"
+# 造一条 pending nudge 指向 alice(alice 心跳有,fake tmux 里也 idle)
+PEND="$CREW_STATE/pending-nudges.jsonl"
+node -e "require('fs').writeFileSync('$PEND',JSON.stringify([{ts:'x',session:'alice',note:'补发我'}]))"
+export WAKE_PENDING_FILE="$PEND"
+SENT13="$T/sent13.log"; touch "$SENT13"
+PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="alice" FAKE_TMUX_PANE="$IDLE" \
+  FAKE_TMUX_SENT="$SENT13" node "$CH" --once
+# 检查队列是否清空
+n=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$PEND')).length)" 2>/dev/null || echo ERR)
+[ "$n" = "0" ] && _ok "心跳采样后 pending 队列被清空(flushed 1 条)" || _ng "pending 队列剩 $n 条(期望 0)"
+grep -q "补发我" "$SENT13" && _ok "flush 触发 send-keys 补发原 note" || _ng "flush 未 send-keys: $(cat $SENT13 2>&1)"
+
+# --- Case 14: pending 里的会话 tmux 已 dead → 条目应作废丢弃 ---
+echo "--- Case 14: pending 死会话作废 ---"
+node -e "require('fs').writeFileSync('$PEND',JSON.stringify([{ts:'x',session:'ghost',note:'ghost'},{ts:'y',session:'alice',note:'留'}]))"
+PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="alice" FAKE_TMUX_PANE="$IDLE" node "$CH" --once
+n=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$PEND')).length)" 2>/dev/null || echo ERR)
+# alice 那条 flush 成功也走(有心跳文件+tmux idle),ghost 那条 tmux dead 作废,队列应为 0
+[ "$n" = "0" ] && _ok "ghost 死会话条目作废 + alice 补发成功,队列清空" || _ng "队列剩 $n 条"
 
 echo
 echo "=== crew-status.test.sh: $pass / $total pass, $fail fail ==="
