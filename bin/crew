@@ -80,6 +80,8 @@ while [ $# -gt 0 ]; do
     --safe) SAFE=1; shift ;;
     --dir) DIR="$2"; shift 2 ;;
     --pick) PICK=1; shift ;;
+    -v|--version) POS=(version); shift; break ;;   # 2026-09-01:--version/-v 等价 version 子命令(之前被当会话名误起)
+    -h|--help) POS=(help); shift; break ;;
     --) shift; while [ $# -gt 0 ]; do POS+=("$1"); shift; done; break ;;
     *) POS+=("$1"); shift ;;
   esac
@@ -681,7 +683,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.3.1 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.3.2 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 # 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
