@@ -51,6 +51,7 @@ SCRIPT_DIR="$(cd "$(dirname "$_crew_self")" && pwd)"
 CS="$SCRIPT_DIR/crew-session"
 CT="$SCRIPT_DIR/crew-tmux"
 CL="$SCRIPT_DIR/crew-launcher"
+CR="$SCRIPT_DIR/crew-register.js"
 
 log() { echo "[crew] $*" >&2; }
 die() { log "$*"; exit 1; }
@@ -296,6 +297,33 @@ cmd_adopt() {
     printf '%s\t%s\n' "$DIR" "$a_name" >> "$reg"
   fi
   log "adopted '$a_name' -> tmux '$a_tmux' (sid ${a_sid:-<none>}); now in crew ls / attach. stop/kill/prune will refuse it. Un-adopt: rm $CREW_STATE/$a_name.tmux"
+}
+
+cmd_register() {
+  # 注:--dir 被 crew 顶层全局 flag 解析吃进 $DIR(见文件头 74-91 while 循环),这里直接读全局。
+  # register 专属 flag(--role/--kind/--bucket/--description/--remove)在本函数解析。
+  local name="" role="" kind="" bucket="" desc="" remove=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --role)        role="$2"; shift 2 ;;
+      --kind)        kind="$2"; shift 2 ;;
+      --bucket)      bucket="$2"; shift 2 ;;
+      --description) desc="$2"; shift 2 ;;
+      --remove)      remove=1; shift ;;
+      -*)            die "crew register: unknown flag $1" ;;
+      *)             [ -z "$name" ] && name="$1"; shift ;;
+    esac
+  done
+  [ -z "$name" ] && die "usage: crew register <name> [--dir P] [--role R] [--kind K] [--bucket B] [--description D] [--remove]"
+  command -v node >/dev/null 2>&1 || die "crew register 需要 node"
+  local args=(--name "$name")
+  [ -n "$DIR" ] && args+=(--dir "$DIR")
+  [ -n "$role" ] && args+=(--role "$role")
+  [ -n "$kind" ] && args+=(--kind "$kind")
+  [ -n "$bucket" ] && args+=(--bucket "$bucket")
+  [ -n "$desc" ] && args+=(--description "$desc")
+  [ "$remove" = 1 ] && args+=(--remove)
+  node "$CR" "${args[@]}"  # exit code 透传(0=成功/幂等/remove, 5=无归属 project)
 }
 
 cmd_send() {
@@ -1155,6 +1183,7 @@ case "$CMD" in
   pin)          cmd_pin "$@" ;;
   unpin)        cmd_unpin "$@" ;;
   adopt)        cmd_adopt "$@" ;;
+  register)     cmd_register "$@" ;;
   send)         cmd_send "$@" ;;
   inbox)        cmd_inbox "$@" ;;
   log)          cmd_log "$@" ;;
