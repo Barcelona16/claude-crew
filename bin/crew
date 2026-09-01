@@ -443,8 +443,21 @@ cmd_inbox() {
       n=$((n+1))
       echo "── #$n  $(basename "$f") ──"
       if [[ "$f" == *.json ]]; then
-        node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1]));console.log("["+e.from.kind+":"+e.from.id+"] "+e.note+"\n(id="+e.id+" state="+e.delivery.state+")")' "$f"
+        node -e '
+          const e=JSON.parse(require("fs").readFileSync(process.argv[1]));
+          const d=new Date(e.ts||0);
+          const pad=n=>String(n).padStart(2,"0");
+          const now=new Date();
+          const sameDay=d.getFullYear()===now.getFullYear()&&d.getMonth()===now.getMonth()&&d.getDate()===now.getDate();
+          const ts=isNaN(d.getTime())?"":(sameDay?pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds()):(d.getMonth()+1)+"-"+pad(d.getDate())+" "+pad(d.getHours())+":"+pad(d.getMinutes()));
+          console.log("["+ts+" "+e.from.kind+":"+e.from.id+"] "+e.note+"\n(id="+e.id+" state="+e.delivery.state+")");
+        ' "$f"
       else
+        # 老 .msg 从文件名解析 ts(命名格式 NNNN-YYYY-MM-DDTHH-MM-SS-...json/msg)
+        local basen ts_display
+        basen=$(basename "$f")
+        ts_display=$(echo "$basen" | sed -nE 's/^[0-9]+-([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}).*/\1/p' | sed 's/T/ /; s/-/:/3; s/-/:/3')
+        [ -n "$ts_display" ] && echo "[$ts_display legacy]"
         cat "$f"
       fi
       echo
@@ -459,7 +472,17 @@ cmd_inbox() {
     [ -z "$line" ] && continue
     n=$((n+1))
     printf -- "── #%d ──\n" "$n"
-    printf '%s\n' "$line" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const e=JSON.parse(d);const src=e.from&&e.from.id?"["+e.from.kind+":"+e.from.id+"] ":"";console.log(src+e.note)})'
+    printf '%s\n' "$line" | node -e '
+      let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{
+        const e=JSON.parse(d);
+        const dt=new Date(e.ts||0);
+        const pad=n=>String(n).padStart(2,"0");
+        const now=new Date();
+        const sameDay=dt.getFullYear()===now.getFullYear()&&dt.getMonth()===now.getMonth()&&dt.getDate()===now.getDate();
+        const ts=isNaN(dt.getTime())?"":(sameDay?pad(dt.getHours())+":"+pad(dt.getMinutes())+":"+pad(dt.getSeconds()):(dt.getMonth()+1)+"-"+pad(dt.getDate())+" "+pad(dt.getHours())+":"+pad(dt.getMinutes()));
+        const src=e.from&&e.from.id?"["+ts+" "+e.from.kind+":"+e.from.id+"] ":(ts?"["+ts+"] ":"");
+        console.log(src+e.note);
+      })'
     echo
   done < <(node "$CN" ack --to "$name")
   if [ "$n" = 0 ]; then echo "(no messages)"; else echo "(consumed $n message(s), archived to inbox/$name/consumed/)"; fi
