@@ -681,7 +681,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.3.0 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.3.1 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 # 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
@@ -1011,7 +1011,20 @@ cmd_spawn() {
     local existing
     existing=$("$CT" resolve "$name" 2>/dev/null || true)
     if [ -n "$existing" ] && "$CT" list 2>/dev/null | grep -qFx "$existing"; then
-      # 2026-08-31:补回 v1 的"live 会话就地换 model/key"语义(v2 重构时丢了)。
+      # 2026-09-01:空壳检查 —— tmux 会话在,但 pane 里没有 claude 进程(claude 崩了/退了,只剩
+      # tmux 壳)= 不算真 live。此时不该 attach 空壳(会 attach 到一个 bash shell,bootstrap 还会
+      # 踩嵌套 attach rc=1),应 kill 空壳后往下 spawn 重起。复用 cmd_ls 的 pane_pid→claude_pid 查法。
+      local _pane_pid _claude_pid=""
+      _pane_pid=$(tmux list-panes -t "$existing" -F '#{pane_pid}' 2>/dev/null | head -1)
+      if [ -n "$_pane_pid" ]; then
+        _claude_pid=$(ps --no-headers -o pid,cmd --ppid "$_pane_pid" 2>/dev/null | awk '/bin\/claude/{print $1; exit}')
+      fi
+      if [ -z "$_claude_pid" ]; then
+        log "'$name' 的 tmux ($existing) 是空壳(无 claude 进程)→ kill 后重起(--resume 保历史)"
+        "$CT" kill "$name" 2>/dev/null || true
+        # 不 exec attach,不进换模型块 —— 直接落下面 spawn 重起
+      else
+      # 真 live:补回 v1 的"live 会话就地换 model/key"语义(v2 重构时丢了)。
       # 显式传了 --model/--key 且与 state 现值不同 → 停旧的、写新值、往下 spawn(sid 在→launcher
       # 自动 --resume,历史保留)。没传(纯 crew <name>)→ 仍 attach,不动。
       local _cur_backend _cur_key _want_restart=0
@@ -1028,6 +1041,7 @@ cmd_spawn() {
       else
         log "'$name' 已 live (tmux=$existing) → attach(换模型/key 加 --model/--key;要新起加 --fresh 或 crew kill 后再来)"
         exec "$CT" attach "$name"
+      fi
       fi
     fi
   fi
