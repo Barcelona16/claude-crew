@@ -84,7 +84,28 @@ load_backend_conf() {
         return 0
         ;;
       *)
-        echo "[crew-launcher] backend '$backend' 无 conf 且不含逗号,拒起。用 --model provider,model(例:joycode-oai,GLM-5.3)或添加 conf 到 $CREW_HOME/backends/" >&2
+        # 2026-09-01 裸模型名兜底:backend 无 conf 且不含逗号(如 "GLM-5.3")—— 以前直接拒起
+        # (work backend 被写成裸 GLM-5.3 就起不来的坑)。改为先查 CCR:哪个 provider 的 models[]
+        # 含这个 realmodel,查到就合成 provider,realmodel 的 ccr backend 起(走 crew-proxy:8788)。
+        local _prov=""
+        if command -v node >/dev/null 2>&1 && [ -f "$HOME/.claude-code-router/config.json" ]; then
+          _prov=$(RM="$backend" node -e '
+            const fs=require("fs");
+            const c=JSON.parse(fs.readFileSync(process.env.HOME+"/.claude-code-router/config.json","utf8"));
+            const ps=c.Providers||c.providers||[];
+            const p=ps.find(p=>(p.models||[]).indexOf(process.env.RM)>=0);
+            if(p) process.stdout.write(p.name);
+          ' 2>/dev/null)
+        fi
+        if [ -n "$_prov" ]; then
+          BK_BASE_URL="http://127.0.0.1:${CREW_PROXY_PORT:-8788}"
+          BK_MODEL="$_prov,$backend"
+          BK_TOKEN="test"; BK_KEY_MODE="ccr"; BK_CLAUDE_FLAGS=""
+          BK_ENV_EXTRA="MAX_THINKING_TOKENS=0 CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1"
+          echo "[crew-launcher] 裸模型名 '$backend' 无 conf,查 CCR 反推 provider='$_prov' → 合成 ccr backend '$_prov,$backend'(via :8788)" >&2
+          return 0
+        fi
+        echo "[crew-launcher] backend '$backend' 无 conf、不含逗号、CCR 里也无 provider 提供它,拒起。用 --model provider,model(例:joycode-oai,GLM-5.3)或 crew addkey/sync-models" >&2
         return 1
         ;;
     esac

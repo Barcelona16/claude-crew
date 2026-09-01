@@ -481,7 +481,25 @@ cmd_models() {
     printf '%s\n' "$ms" | sed 's/^/  /'
     return 0
   fi
-  echo "== backends =="
+  # 2026-09-01:无参 crew models 按 key 分组列【真实模型】(不再列 backend conf 文件名——那套是
+  # 内部实现,用户面只见 key+模型)。想看内部 backend conf 用 `crew backends`。
+  local k any=0
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    local ms; ms=$(ccr_models_for_key "$k")
+    echo "== $k =="
+    if [ -n "$ms" ]; then
+      printf '%s\n' "$ms" | sed 's/^/  /'; any=1
+    else
+      echo "  (无可路由模型;crew addkey / crew sync-models --key $k 补充)"
+    fi
+  done < <(_list_keys)
+  [ "$any" = 0 ] && echo "(keys.conf 里没有 key,或都没对应 CCR provider)"
+}
+
+# crew backends —— 列内部 backend conf 文件名(实现细节;一般用户看 crew models 即可)
+cmd_backends() {
+  echo "== backends (内部实现,选模型请用 crew models) =="
   for f in "$CREW_HOME"/backends/*.conf; do
     [ -f "$f" ] || continue
     basename "$f" .conf | sed 's/^/  /'
@@ -683,7 +701,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.3.2 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.4.0 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 # 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
@@ -794,12 +812,12 @@ cmd_switch() {
   cur_key=$("$CS" get "$name" key 2>/dev/null || echo "")
   cur_be=$("$CS" get "$name" backend 2>/dev/null || echo "")
   picked_key=$(_list_keys | _pick_one "选 key ($name,当前: ${cur_key:-无})" "$cur_key")
-  # model 菜单:优先列【该 key 支持的模型】(ccr_models_for_key,含 provider,model 全名,直接可用作
-  # backend);拿不到(该 key 无 CCR provider)才回落全量 backend 名。默认预选当前 model。
+  # model 菜单:列【该 key 支持的模型】(ccr_models_for_key_full,provider,model 全名,直接可用)。
+  # 拿不到(该 key 无 CCR provider)→ 提示补 key,不再暴露 backend 文件名。
   local model_opts
   model_opts=$(ccr_models_for_key_full "$picked_key")
-  [ -z "$model_opts" ] && model_opts=$(_list_backends)
-  picked_be=$(printf '%s\n' "$model_opts" | _pick_one "选模型 ($name,当前: ${cur_be:-无})" "$cur_be")
+  [ -z "$model_opts" ] && { log "key '$picked_key' 没有可路由模型(crew sync-models --key $picked_key 补充);保持原模型"; picked_be="$cur_be"; }
+  [ -n "$model_opts" ] && picked_be=$(printf '%s\n' "$model_opts" | _pick_one "选模型 ($name,当前: ${cur_be:-无})" "$cur_be")
   # 设全局 BACKEND/KEY,走 cmd_spawn 的 live 换模型逻辑(它会判与现值不同才重启)
   [ -n "$picked_key" ] && KEY="$picked_key"
   [ -n "$picked_be" ] && BACKEND="$picked_be"
@@ -979,9 +997,12 @@ cmd_spawn() {
     [ -n "$_picked_key" ] && KEY="$_picked_key"
     local _def_be; _def_be=$("$CS" get "$name" backend 2>/dev/null || echo "")
     local _mo; [ -n "$KEY" ] && _mo=$(ccr_models_for_key_full "$KEY")
-    [ -z "$_mo" ] && _mo=$(_list_backends)
-    local _picked_be; _picked_be=$(printf '%s\n' "$_mo" | _pick_one "选模型 ($name${KEY:+, key=$KEY})" "$_def_be")
-    [ -n "$_picked_be" ] && BACKEND="$_picked_be"
+    if [ -z "$_mo" ]; then
+      [ -n "$KEY" ] && log "key '$KEY' 没有可路由模型(crew sync-models --key $KEY 补充);可 --model 直接指定"
+    else
+      local _picked_be; _picked_be=$(printf '%s\n' "$_mo" | _pick_one "选模型 ($name${KEY:+, key=$KEY})" "$_def_be")
+      [ -n "$_picked_be" ] && BACKEND="$_picked_be"
+    fi
   fi
 
   # 2026-08-30 audit-crew A5(P0):registry 写方收口 —— spawn 起会话时把 <cwd,name>
@@ -1058,12 +1079,15 @@ cmd_spawn() {
       local _pk; _pk=$(_list_keys | _pick_one "选 key ($name)" "")
       [ -n "$_pk" ] && KEY="$_pk"
     fi
-    # 2) 再选该 key 支持的模型(provider,model 全名,可直接用);拿不到 → 回落全量 backend
+    # 2) 再选该 key 支持的模型(provider,model 全名,可直接用);拿不到 → 提示补 key,不暴露文件名
     local _mopts
     [ -n "$KEY" ] && _mopts=$(ccr_models_for_key_full "$KEY")
-    [ -z "$_mopts" ] && _mopts=$(_list_backends)
-    local _pm; _pm=$(printf '%s\n' "$_mopts" | _pick_one "选模型 ($name${KEY:+, key=$KEY})" "")
-    [ -n "$_pm" ] && BACKEND="$_pm"
+    if [ -z "$_mopts" ]; then
+      [ -n "$KEY" ] && log "key '$KEY' 没有可路由模型(crew sync-models --key $KEY 补充);可 --model 直接指定"
+    else
+      local _pm; _pm=$(printf '%s\n' "$_mopts" | _pick_one "选模型 ($name${KEY:+, key=$KEY})" "")
+      [ -n "$_pm" ] && BACKEND="$_pm"
+    fi
   fi
 
   [ -n "$BACKEND" ] && "$CS" set "$name" backend "$BACKEND"
@@ -1118,7 +1142,8 @@ case "$CMD" in
   send)         cmd_send "$@" ;;
   inbox)        cmd_inbox "$@" ;;
   log)          cmd_log "$@" ;;
-  models|backends) cmd_models "$@" ;;
+  models)       cmd_models "$@" ;;
+  backends)     cmd_backends ;;
   keys)         cmd_keys ;;
   addkey|add-key) cmd_addkey "$@" ;;
   sync-models|syncmodels) cmd_sync_models "$@" ;;
