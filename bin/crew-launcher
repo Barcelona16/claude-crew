@@ -59,6 +59,25 @@ gen_uuid() {
   fi
 }
 
+# sid_alive: 校验 jsonl transcript 是否 claude 认可(而不只是"文件存在")。
+# claude 的 <sid>.jsonl 首行固定形如 {"type":"mode","sessionId":"<sid>"};首行不可 parse
+# 或 sessionId 不匹配 = 文件损坏/被清/换了名字,claude 起来必"No conversation found"秒退。
+# 用 node 一行验(比 grep 稳:jsonl 可能字段顺序/引号变体,但 JSON.parse 一致)。
+sid_alive() {
+  local file="$1" sid="$2"
+  [ -s "$file" ] || return 1                    # 空文件直接死
+  command -v node >/dev/null 2>&1 || return 0   # 无 node:降级只信任文件存在(旧行为)
+  node -e '
+    const fs=require("fs");
+    try {
+      const line=fs.readFileSync(process.argv[1],"utf8").split("\n",1)[0].trim();
+      if(!line) process.exit(1);
+      const j=JSON.parse(line);
+      process.exit(j&&j.sessionId===process.argv[2]?0:1);
+    } catch(e) { process.exit(1); }
+  ' "$file" "$sid" 2>/dev/null
+}
+
 # 读 backend conf(BASE_URL/MODEL/TOKEN/KEY_MODE)—— 老 crew 兼容
 load_backend_conf() {
   local name="$1"
@@ -147,9 +166,25 @@ build_claude_argv() {
     # 存在"但 claude 在当前 cwd 找不到 → 弹会话选择器/空会话)。cwd 目录有 <sid>.jsonl → --resume
     # (claude 一定命中);cwd 目录没有但别处有 → 仍 --resume(claude 按它记录的 cwd 定位);
     # 全都没有 → --session-id 新起(历史文件之后自然生成)。
-    if [ -f "$projdir/$sid.jsonl" ] || ls "$HOME"/.claude/projects/*/"$sid".jsonl >/dev/null 2>&1; then
+    #
+    # 2026-09-01 §F(sid 死指自愈):文件在但不是 claude 认可的 transcript(空/损坏/首行
+    # sessionId 不匹配)时,claude 起来会"No conversation found"秒退。**内容预检**堵这个坑:
+    # 找到候选文件 → 校验首行 JSON 的 sessionId === sid → 匹配才 --resume;不匹配就当死指
+    # 走 fallback:归档 sid 到 prev_sid + 生成新 sid + --session-id(等价 --fresh 但老历史留档)。
+    local _cand=""
+    if [ -f "$projdir/$sid.jsonl" ]; then _cand="$projdir/$sid.jsonl"
+    else _cand=$(ls "$HOME"/.claude/projects/*/"$sid".jsonl 2>/dev/null | head -1); fi
+    if [ -n "$_cand" ] && sid_alive "$_cand" "$sid"; then
       argv+=( --resume "$sid" )
+    elif [ -n "$_cand" ]; then
+      # 文件在但内容不匹配 = 死指。归档 sid + 生成新的。
+      echo "[crew-launcher] sid '$sid' 的 jsonl($_cand)首行 sessionId 不匹配,判定死指 → fallback --session-id 新起(老 sid 已归档 prev_sid)" >&2
+      "$CS" set "$name" prev_sid "$sid" >/dev/null 2>&1 || true
+      sid=$(gen_uuid) || return 1
+      argv+=( --session-id "$sid" )
+      "$CS" set "$name" sid "$sid" >/dev/null
     else
+      # 文件真不在:与旧逻辑一致(--session-id sid,让 claude 自然写出这个 sid 的 transcript)
       argv+=( --session-id "$sid" )
     fi
   else

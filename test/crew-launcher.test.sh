@@ -137,6 +137,63 @@ N="${TEST_PREFIX}-j"
 out=$("$CL" spawn --name "$N" --mode tmux --task "hello world" 2>&1) || true
 echo "$out" | grep -qE "ready" && _ok "tmux mode --task 完成 log 'ready'" || _ng "tmux mode --task 应 ready,实际:$out" ""
 
+# ---- Case 12: sid_alive 4 场景(2026-09-01 §F 死 sid 自愈)---
+echo "--- Case 12: sid_alive 4 场景 ---"
+# source 出 sid_alive(纯 bash 函数,无副作用可直接引入)
+source <(sed -n '/^sid_alive()/,/^}/p' "$CL")
+JT="$(mktemp -d /tmp/sidalive.XXXXXX)"
+ALIVE="$JT/a.jsonl"
+printf '{"type":"mode","mode":"normal","sessionId":"alive-sid-1"}\n' > "$ALIVE"
+sid_alive "$ALIVE" "alive-sid-1" && _ok "真 sid+首行匹配 → alive" || _ng "真 sid 应 alive" ""
+sid_alive "$ALIVE" "wrong-sid" && _ng "首行 sessionId 不匹配应 dead" "" || _ok "sessionId 不匹配 → dead"
+EMPTYF="$JT/empty.jsonl"; : > "$EMPTYF"
+sid_alive "$EMPTYF" "any" && _ng "空文件应 dead" "" || _ok "空文件 → dead"
+BADF="$JT/bad.jsonl"; echo "not-json-line" > "$BADF"
+sid_alive "$BADF" "any" && _ng "坏 JSON 应 dead" "" || _ok "首行坏 JSON → dead"
+rm -rf "$JT"
+
+# ---- Case 13: build_claude_argv 死 sid 自愈(文件在但 sessionId 不对 → 归档+新 sid)---
+echo "--- Case 13: 死 sid + 文件在 → 自愈 归档+新 sid ---"
+N="${TEST_PREFIX}-dead"
+DEAD_SID="deadbeef-0000-1111-2222-333344445555"
+"$CS" set "$N" backend mock >/dev/null
+"$CS" set "$N" sid "$DEAD_SID" >/dev/null
+"$CS" del "$N" prev_sid >/dev/null 2>&1 || true
+# cwd 目录里放一个"文件在但 sessionId 不匹配"的 jsonl
+CWD="$PWD"
+PROJDIR="$HOME/.claude/projects/$(printf '%s' "$CWD" | sed 's/[^A-Za-z0-9]/-/g')"
+mkdir -p "$PROJDIR"
+printf '{"type":"mode","mode":"normal","sessionId":"someone-else-sid"}\n' > "$PROJDIR/$DEAD_SID.jsonl"
+# source build_claude_argv 相关(gen_uuid/sid_alive/load_backend_conf 也带上)
+source <(sed -n '/^gen_uuid()/,/^}/p; /^sid_alive()/,/^}/p; /^load_backend_conf()/,/^}/p; /^build_claude_argv()/,/^}/p' "$CL")
+load_backend_conf "$N" >/dev/null 2>&1
+argv_out=$(build_claude_argv "$N" 0 "$CWD" 2>/dev/null)
+# 断言:1) argv 不含 --resume $DEAD_SID  2) prev_sid=$DEAD_SID  3) 新 sid 已生成 4) --session-id 新 sid
+echo "$argv_out" | grep -qE "^--resume$" && next=$(echo "$argv_out" | grep -A1 "^--resume$" | tail -1) && [ "$next" = "$DEAD_SID" ] \
+  && _ng "自愈失败:argv 仍 --resume $DEAD_SID" "" || _ok "argv 不再 --resume 死 sid"
+prev=$("$CS" get "$N" prev_sid 2>/dev/null || echo "")
+[ "$prev" = "$DEAD_SID" ] && _ok "prev_sid=死 sid 归档成功" || _ng "prev_sid=$prev(期望 $DEAD_SID)" ""
+newsid=$("$CS" get "$N" sid 2>/dev/null || echo "")
+[ -n "$newsid" ] && [ "$newsid" != "$DEAD_SID" ] && _ok "新 sid=$newsid(≠ 死 sid)" || _ng "新 sid 未生成或未换" ""
+echo "$argv_out" | grep -qE "^--session-id$" \
+  && next=$(echo "$argv_out" | grep -A1 "^--session-id$" | tail -1) \
+  && [ "$next" = "$newsid" ] && _ok "argv 含 --session-id 新 sid" || _ng "argv 缺 --session-id 新 sid,实际:$argv_out" ""
+rm -rf "$PROJDIR/$DEAD_SID.jsonl"
+
+# ---- Case 14: 活 sid + 文件在且首行匹配 → --resume(自愈不误伤)---
+echo "--- Case 14: 活 sid → --resume 不误伤 ---"
+N="${TEST_PREFIX}-live"
+LIVE_SID="livesid1-2222-3333-4444-555566667777"
+"$CS" set "$N" backend mock >/dev/null
+"$CS" set "$N" sid "$LIVE_SID" >/dev/null
+printf '{"type":"mode","mode":"normal","sessionId":"%s"}\n' "$LIVE_SID" > "$PROJDIR/$LIVE_SID.jsonl"
+argv_out=$(build_claude_argv "$N" 0 "$CWD" 2>/dev/null)
+echo "$argv_out" | grep -qE "^--resume$" && next=$(echo "$argv_out" | grep -A1 "^--resume$" | tail -1) && [ "$next" = "$LIVE_SID" ] \
+  && _ok "活 sid → --resume $LIVE_SID" || _ng "活 sid 应 --resume,实际:$argv_out" ""
+# prev_sid 不该被改动(没触发自愈)
+prev=$("$CS" get "$N" prev_sid 2>/dev/null || echo "")
+[ -z "$prev" ] && _ok "活 sid 未触发自愈:prev_sid 未写" || _ng "活 sid 误触发自愈:prev_sid=$prev" ""
+
 echo
 echo "=== crew-launcher.test.sh: $pass / $total pass, $fail fail ==="
 [ "$fail" -eq 0 ]
