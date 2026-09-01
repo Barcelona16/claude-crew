@@ -285,8 +285,24 @@ function handleState(req, res, u) {
   const msgLimit = parseInt(u.query.msgLimit || '20', 10);
   const names = listCrewSessions();
   const sessions = names.map((n) => sessionCard(n, msgLimit));
-  // 按最近活跃(lastHeartbeat)排序,无心跳的落后
-  sessions.sort((a, b) => (b.lastHeartbeat || '').localeCompare(a.lastHeartbeat || ''));
+  // 排序:两级——先按"有无消息活动"分组,组内按 ts 倒序。
+  //   ① 有消息:latestMsgTs 越新越靠前(真实活动)
+  //   ② 无消息:退到 lastHeartbeat 排后(心跳时间几乎同批,细分意义有限)
+  // 这样活跃会话永远置顶,无活动的按心跳沉底,避免"一堆同心跳时间"的中间挤成一片。
+  const latestMsg = (s) => {
+    let m = '';
+    for (const arr of [s.inbound, s.outbound]) {
+      for (const x of arr || []) if (x.ts && x.ts > m) m = x.ts;
+    }
+    return m;
+  };
+  sessions.sort((a, b) => {
+    const ma = latestMsg(a), mb = latestMsg(b);
+    if (ma && mb) return mb.localeCompare(ma);
+    if (ma) return -1;
+    if (mb) return 1;
+    return (b.lastHeartbeat || '').localeCompare(a.lastHeartbeat || '');
+  });
   sendJSON(res, 200, {
     ts: new Date().toISOString(),
     port: PORT,
