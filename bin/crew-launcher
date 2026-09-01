@@ -123,9 +123,9 @@ load_backend_conf() {
   done < "$conf"
 }
 
-# 组装 claude 命令行(数组形式,避 quoting)
+# 组装 claude 命令行(数组形式,避 quoting)。cwd = 会话工作目录(算 claude project 目录用)
 build_claude_argv() {
-  local name="$1" fresh="$2"
+  local name="$1" fresh="$2" cwd="${3:-$PWD}"
   local -a argv=()
   # model
   [ -n "${BK_MODEL:-}" ] && argv+=( --model "$BK_MODEL" )
@@ -134,22 +134,29 @@ build_claude_argv() {
     *" --dangerously-skip-permissions "*) : ;;
     *) argv+=( --dangerously-skip-permissions ) ;;
   esac
+  # claude 把 transcript 存在 ~/.claude/projects/<cwd编码>/<sid>.jsonl,cwd编码 = cwd 里非
+  # [A-Za-z0-9] 换成 '-'。--resume <sid> 只在【当前 cwd 对应的 project 目录】找。
+  local projdir; projdir="$HOME/.claude/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
   # sid: --resume 老 sid,或 --session-id 新 uuid
   local sid=""
   if [ "$fresh" != "1" ]; then
     sid=$("$CS" get "$name" sid 2>/dev/null || true)
   fi
   if [ -n "$sid" ]; then
-    # 2026-08-31 修 Bug B:sid 存在不代表历史文件在(换目录/历史被清时,claude 按 cwd 的
-    # project 目录找不到该 sid,会 "No conversation found" 直接退出)。对齐 v1:757——先探
-    # $HOME/.claude/projects/*/<sid>.jsonl 存在才 --resume,否则复用 sid 但当新起
-    # (--session-id),历史文件之后自然生成。避免换模型/换目录重启崩溃。
-    if ls "$HOME"/.claude/projects/*/"$sid".jsonl >/dev/null 2>&1; then
+    # 2026-09-01:resume 存在性按【当前 cwd 的 project 目录】判(不用全局 * 通配——通配会"以为
+    # 存在"但 claude 在当前 cwd 找不到 → 弹会话选择器/空会话)。cwd 目录有 <sid>.jsonl → --resume
+    # (claude 一定命中);cwd 目录没有但别处有 → 仍 --resume(claude 按它记录的 cwd 定位);
+    # 全都没有 → --session-id 新起(历史文件之后自然生成)。
+    if [ -f "$projdir/$sid.jsonl" ] || ls "$HOME"/.claude/projects/*/"$sid".jsonl >/dev/null 2>&1; then
       argv+=( --resume "$sid" )
     else
       argv+=( --session-id "$sid" )
     fi
   else
+    # 2026-09-01 修:fresh 生成新 sid 前,先把老 sid 归档到 prev_sid(否则一次 --fresh 就把老历史
+    # 孤立——文件还在但 state 不再指向,resume 永远回不来。web-kimi 7.2MB 历史就这么"丢"过)。
+    local old_sid; old_sid=$("$CS" get "$name" sid 2>/dev/null || true)
+    [ -n "$old_sid" ] && "$CS" set "$name" prev_sid "$old_sid" >/dev/null 2>&1 || true
     sid=$(gen_uuid) || return 1
     argv+=( --session-id "$sid" )
     "$CS" set "$name" sid "$sid" >/dev/null
@@ -215,7 +222,11 @@ cmd_spawn() {
 
   # 组装 argv(不含 policy)—— 输出数组
   local argv_lines
-  argv_lines=$(build_claude_argv "$name" "$fresh") || return 1
+  # cwd:优先 --dir 传入;空则读 state.dir;再空回落 $PWD(算 claude project 目录用)
+  local _cwd="$dir"
+  [ -z "$_cwd" ] && _cwd=$("$CS" get "$name" dir 2>/dev/null || echo "")
+  [ -z "$_cwd" ] && _cwd="$PWD"
+  argv_lines=$(build_claude_argv "$name" "$fresh" "$_cwd") || return 1
   # 转数组
   local -a argv=()
   while IFS= read -r line; do

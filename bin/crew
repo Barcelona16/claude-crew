@@ -24,6 +24,7 @@
 #   crew keys                列 key 别名(值脱敏)
 #   crew addkey <key> [别名] 加一把 key 到 keys.conf(别名不给则自动派生)
 #   crew switch <会话>       交互切 key→model(都默认当前值,选完重启换)
+#   crew resume-prev <会话>  找回上次被 --fresh 覆盖前的老历史(sid 换回归档的 prev_sid)
 #   crew find <描述...>      搜已有会话历史,返回 Top5(会话名+概要+打开命令)
 #   crew prune [--dry-run] [--days N] [--purge-days M]  清陈旧会话(默认>7d 删状态、>30d 连历史删;
 #                            live/pinned 不删,平时自动跑;每会话打空闲天数+结果)
@@ -702,7 +703,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v2.4.0 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
+  echo "crew v2.5.0 (refactor: 3 独立工具 + 顶层 CLI 兼容层;commit $commit)"
 }
 
 # 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
@@ -805,6 +806,20 @@ crew_autoprune() {
 # crew switch <会话> —— 交互切 key→model(都默认当前值),选完走 live 换模型路径重启。
 # 顺序:先选 key(默认会话现 key),再选 model(默认会话现 model)。等价 `crew <会话> --key K --model M`,
 # 但交互、免背参数。非交互(无 tty)报错提示用带参形式。
+# crew resume-prev <会话> —— 把 sid 换回上次被 --fresh 覆盖前归档的 prev_sid,找回老历史。
+# 场景:误 --fresh 后想恢复之前的对话(老历史 jsonl 还在,只是 state.sid 指向了新空会话)。
+cmd_resume_prev() {
+  local name="$1"
+  [ -z "$name" ] && die "usage: crew resume-prev <会话>"
+  local prev; prev=$("$CS" get "$name" prev_sid 2>/dev/null || echo "")
+  [ -z "$prev" ] && die "'$name' 没有 prev_sid(没被 --fresh 覆盖过,或已找回)"
+  local cur; cur=$("$CS" get "$name" sid 2>/dev/null || echo "")
+  # 交换:当前 sid 存回 prev_sid(可再换回),prev 设为当前 sid
+  "$CS" set "$name" sid "$prev" >/dev/null
+  [ -n "$cur" ] && "$CS" set "$name" prev_sid "$cur" >/dev/null
+  log "'$name' sid 换回 prev_sid=$prev(原 sid $cur 存进 prev_sid,可再 resume-prev 换回)。crew $name 重起即 resume 老历史"
+}
+
 cmd_switch() {
   local name="$1"
   [ -z "$name" ] && die "usage: crew switch <会话>"
@@ -1151,8 +1166,9 @@ case "$CMD" in
   doctor)       cmd_doctor "$@" ;;
   version)      cmd_version "$@" ;;
   switch)       cmd_switch "$@" ;;
+  resume-prev)  cmd_resume_prev "$@" ;;
   find)         cmd_find "$@" ;;
   prune)        cmd_prune "$@" ;;
-  help|--help|-h) sed -n '9,35p' "$0" | sed 's/^# \{0,1\}//' ;;
+  help|--help|-h) sed -n '9,36p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)            cmd_spawn "$CMD" "$@" ;;
 esac

@@ -37,7 +37,7 @@ CREW_STATE="${CREW_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/claude-crew}"
 mkdir -p "$CREW_STATE" 2>/dev/null || true
 
 # 所有支持的字段(按类型分:普通 vs 大文件 body)
-readonly VALID_FIELDS="sid backend key dir notmux pintmux fgpid tmux tmuxname policy policy_body notify settings nohup"
+readonly VALID_FIELDS="sid prev_sid backend key dir notmux pintmux fgpid tmux tmuxname policy policy_body notify settings nohup"
 
 # name 合法性:字母数字下划线短横,不含 . / \0
 validate_name() {
