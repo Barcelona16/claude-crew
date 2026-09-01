@@ -54,6 +54,8 @@ CL="$SCRIPT_DIR/crew-launcher"
 CR="$SCRIPT_DIR/crew-register.js"
 CW="$SCRIPT_DIR/crew-wake.js"
 CN="$SCRIPT_DIR/crew-notify.js"
+CH="$SCRIPT_DIR/crew-heartbeat.js"
+CST="$SCRIPT_DIR/crew-status.js"
 
 log() { echo "[crew] $*" >&2; }
 die() { log "$*"; exit 1; }
@@ -359,6 +361,28 @@ cmd_send() {
   local fpath
   fpath=$(node "$CN" write --to "$name" --from "session:$sender" --note "$msg") || die "crew send: envelope 写失败"
   log "queued -> inbox of '$name' (from $sender): $fpath"
+}
+
+cmd_status() {
+  # crew status <name> [--json]  → 单会话健康摘要(心跳/inbox/pending)
+  # exit 契约:0=返健康态 / 4=未注册
+  local name="" args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) args+=(--json); shift ;;
+      *) [ -z "$name" ] && name="$1"; shift ;;
+    esac
+  done
+  [ -z "$name" ] && die "usage: crew status <name> [--json]"
+  command -v node >/dev/null 2>&1 || die "crew status 需要 node"
+  node "$CST" "$name" "${args[@]}"
+}
+
+cmd_heartbeat() {
+  # crew heartbeat [--once] [--interval N] [--status]
+  # 起心跳采样守护(单例,PID 文件反查);--once 采一次退,--status 查看当前进程
+  command -v node >/dev/null 2>&1 || die "crew heartbeat 需要 node"
+  node "$CH" "$@"
 }
 
 cmd_notify() {
@@ -1259,6 +1283,8 @@ case "$CMD" in
   wake)         cmd_wake "$@" ;;
   send)         cmd_send "$@" ;;
   notify)       cmd_notify "$@" ;;
+  status)       cmd_status "$@" ;;
+  heartbeat)    cmd_heartbeat "$@" ;;
   inbox)        cmd_inbox "$@" ;;
   log)          cmd_log "$@" ;;
   models)       cmd_models "$@" ;;
