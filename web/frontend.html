@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>crew 面板</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: ui-sans-serif, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; padding: 12px; background: #0e1013; color: #d9dbe0; }
+  h1 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 12px; }
+  h1 .meta { font-size: 11px; color: #7d8394; font-weight: normal; }
+  h1 .refresh { font-size: 11px; color: #7d8394; margin-left: auto; }
+  h1 button { background: #232833; color: #d9dbe0; border: 1px solid #363c4a;
+              padding: 3px 8px; border-radius: 3px; font-size: 11px; cursor: pointer; }
+  h1 button:hover { background: #2c3240; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(520px, 1fr)); gap: 10px; }
+  .card { background: #161a20; border: 1px solid #232833; border-radius: 4px; padding: 10px;
+          display: flex; flex-direction: column; gap: 8px; }
+  .card.dead { opacity: 0.55; }
+  .card.stale { border-color: #644; }
+  .head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .head .name { font-weight: bold; color: #eaecf1; }
+  .head .status { padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+  .s-live { background: #1a3b1f; color: #7ecc86; }
+  .s-dead { background: #3b1a1a; color: #cc7e7e; }
+  .s-unknown { background: #2d2a1a; color: #ccbe7e; }
+  .head .ctx { margin-left: auto; font-size: 11px; color: #7d8394; }
+  .head .ctx.warn { color: #cc9e7e; }
+  .head .ctx.danger { color: #cc5555; }
+  .meta-row { font-size: 11px; color: #888c98; display: flex; gap: 10px; flex-wrap: wrap; }
+  .meta-row span { white-space: nowrap; }
+  .actions { display: flex; gap: 6px; align-items: center; font-size: 11px; }
+  .actions select, .actions button {
+    background: #1c2028; color: #d9dbe0; border: 1px solid #2c3240;
+    padding: 2px 6px; border-radius: 3px; font-size: 11px; cursor: pointer;
+  }
+  .actions button:hover { background: #262c37; }
+  .queues { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+  .q { background: #12151a; border: 1px solid #1e2229; border-radius: 3px; padding: 6px; min-height: 60px; }
+  .q h4 { margin: 0 0 4px; font-size: 11px; color: #7d8394; font-weight: normal;
+          display: flex; justify-content: space-between; }
+  .q h4 .cnt { color: #a8adb8; }
+  .msg { font-size: 11px; padding: 3px 5px; margin: 2px 0; border-radius: 2px;
+         display: flex; gap: 6px; line-height: 1.4; }
+  .msg .dot { flex-shrink: 0; margin-top: 2px; }
+  .msg .from { color: #7d8394; flex-shrink: 0; }
+  .msg .note { color: #c8ccd4; overflow: hidden; text-overflow: ellipsis;
+               display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .s-pending .dot { color: #d4b054; }         /* 🟡 */
+  .s-delivered .dot { color: #d4b054; }       /* 🟡 已唤醒未消费仍算未处理 */
+  .s-acked .dot { color: #6ecc78; }           /* 🟢 */
+  .s-stale .dot { color: #cc5555; }           /* 🔴 */
+  .badges { display: flex; gap: 8px; font-size: 11px; color: #7d8394; }
+  .badges b { color: #d4b054; }
+  .empty { color: #4a4f5c; font-style: italic; font-size: 11px; padding: 3px 5px; }
+  .err { background: #3b1a1a; color: #cc7e7e; padding: 6px 10px; border-radius: 3px;
+         margin-bottom: 10px; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>
+  crew 面板
+  <span class="meta">:{{PORT}} · state={{CREW_STATE}}</span>
+  <span class="refresh" id="refresh">加载中…</span>
+  <button onclick="refresh()">🔄 手动刷新</button>
+</h1>
+<div id="err"></div>
+<div class="grid" id="grid"></div>
+
+<script>
+const REFRESH_MS = 3000;
+let lastLoad = 0, timer = null, KEYS = [], MODELS = [];
+
+async function fetchState() {
+  const r = await fetch('/api/state?msgLimit=15');
+  if (!r.ok) throw new Error('state ' + r.status);
+  return r.json();
+}
+
+function stateClass(s) {
+  // 30 分钟无 ack = stale 红
+  if (s.state === 'acked') return 's-acked';
+  if (s.state === 'pending' || s.state === 'delivered') {
+    if (s.ts && Date.now() - new Date(s.ts).getTime() > 30 * 60 * 1000) return 's-stale';
+    return 's-' + s.state;
+  }
+  return 's-pending';
+}
+
+function dot(cls) {
+  if (cls === 's-acked') return '🟢';
+  if (cls === 's-stale') return '🔴';
+  return '🟡';
+}
+
+function esc(s) {
+  return (s == null ? '' : String(s)).replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function fromLabel(f) {
+  if (!f || !f.id) return '';
+  const kindTag = f.kind === 'session' ? '' : (f.kind === 'group' ? '[群]' : '[erp]');
+  return kindTag + esc(f.id);
+}
+
+function renderMsg(m, side) {
+  // ackOf 是消费后的镜像空 note 记录,不作为独立卡片显示(避免噪音)
+  if (m.ackOf) return '';
+  const cls = stateClass(m);
+  const arrow = side === 'in' ? '←' : '→';
+  const peer = side === 'in' ? fromLabel(m.from) : esc(m.to);
+  return `<div class="msg ${cls}">
+    <span class="dot">${dot(cls)}</span>
+    <span class="from">${arrow}${peer}</span>
+    <span class="note">${esc(m.note) || '<i style="color:#4a4f5c">（空）</i>'}</span>
+  </div>`;
+}
+
+function renderCard(s) {
+  const statusCls = s.status === 'live' ? 's-live' : (s.status === 'dead' ? 's-dead' : 's-unknown');
+  const cardCls = 'card' + (s.status === 'dead' ? ' dead' : '') +
+                  ((s.lastHeartbeat && Date.now() - new Date(s.lastHeartbeat).getTime() > 180 * 1000) ? ' stale' : '');
+  const ctxCls = s.ctxPct == null ? '' : (s.ctxPct >= 90 ? 'danger' : (s.ctxPct >= 75 ? 'warn' : ''));
+  const ctxTxt = s.ctxPct == null ? '' : s.ctxPct + '% ctx';
+  const inMsgs = (s.inbound || []).map((m) => renderMsg(m, 'in')).filter(Boolean).reverse().join('') || '<div class="empty">(空)</div>';
+  const outMsgs = (s.outbound || []).map((m) => renderMsg(m, 'out')).filter(Boolean).reverse().join('') || '<div class="empty">(空)</div>';
+
+  // 切模型下拉:先列 keys → 选后再切模型(先做单一 select 合并版:model 全集,后端接受任意 model)
+  const modelOpts = MODELS.map((m) => `<option value="${esc(m)}"${m === s.model ? ' selected' : ''}>${esc(m)}</option>`).join('');
+  const keyOpts = KEYS.map((k) => `<option value="${esc(k)}"${k === s.key ? ' selected' : ''}>${esc(k).slice(0, 10)}${k.length > 10 ? '…' : ''}</option>`).join('');
+
+  const inbox = s.inbox || { pending: 0, delivered: 0, legacy: 0 };
+  const badges = `
+    <span>inbox: <b>${s.inboxCount || 0}</b></span>
+    <span>· 未唤醒 <b>${inbox.pending}</b></span>
+    <span>· 未消费 <b>${inbox.delivered}</b></span>
+    ${inbox.legacy ? `<span>· .msg <b>${inbox.legacy}</b></span>` : ''}
+    <span>· pending nudge <b>${s.pendingNudges || 0}</b></span>`;
+
+  return `<div class="${cardCls}" data-name="${esc(s.name)}">
+    <div class="head">
+      <span class="name">${esc(s.name)}</span>
+      <span class="status ${statusCls}">${esc(s.status || '?')}</span>
+      ${s.paneIdle === false ? '<span class="status s-unknown">busy</span>' : ''}
+      <span class="ctx ${ctxCls}">${ctxTxt}</span>
+    </div>
+    <div class="meta-row">
+      <span>model: ${esc(s.model || '?')}</span>
+      <span>key: ${esc((s.key || '').slice(0, 12))}${s.key && s.key.length > 12 ? '…' : ''}</span>
+      <span>dir: ${esc(s.dir || '?')}</span>
+      ${s.tmux ? `<span>tmux: ${esc(s.tmux)}</span>` : ''}
+    </div>
+    <div class="actions">
+      切 key <select data-role="key">${keyOpts}</select>
+      切模型 <select data-role="model">${modelOpts}</select>
+      <button onclick="doSwitch(this)">应用</button>
+      <button onclick="doAttach(this)">复制 attach 命令</button>
+    </div>
+    <div class="badges">${badges}</div>
+    <div class="queues">
+      <div class="q"><h4>接收 <span class="cnt">${(s.inbound || []).filter((m)=>!m.ackOf).length}</span></h4>${inMsgs}</div>
+      <div class="q"><h4>发送 <span class="cnt">${(s.outbound || []).filter((m)=>!m.ackOf).length}</span></h4>${outMsgs}</div>
+    </div>
+  </div>`;
+}
+
+async function doSwitch(btn) {
+  const card = btn.closest('.card');
+  const name = card.dataset.name;
+  const key = card.querySelector('[data-role=key]').value;
+  const model = card.querySelector('[data-role=model]').value;
+  if (!confirm(`切换 '${name}' 到 key=${key.slice(0,10)}… model=${model}?会重启该会话(--resume 保历史)。`)) return;
+  const r = await fetch('/api/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, key, model }) });
+  const j = await r.json();
+  if (j.ok) alert('✓ 已切换,会话正在重启');
+  else alert('✗ 失败: ' + (j.err || j.stderr || 'unknown'));
+  refresh();
+}
+
+async function doAttach(btn) {
+  const card = btn.closest('.card');
+  const name = card.dataset.name;
+  const r = await fetch('/api/attach', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }) });
+  const j = await r.json();
+  if (!j.ok) { alert('✗ ' + j.err); return; }
+  navigator.clipboard.writeText(j.command).then(
+    () => alert('已复制到剪贴板:\n' + j.command),
+    () => prompt('请手动复制:', j.command)
+  );
+}
+
+async function refresh() {
+  document.getElementById('err').innerHTML = '';
+  try {
+    const d = await fetchState();
+    KEYS = d.keys || []; MODELS = d.models || [];
+    document.getElementById('grid').innerHTML = (d.sessions || []).map(renderCard).join('');
+    document.getElementById('refresh').textContent = '刷新: ' + new Date().toLocaleTimeString() + ` · ${d.sessions.length} 会话`;
+    lastLoad = Date.now();
+  } catch (e) {
+    document.getElementById('err').innerHTML = '<div class="err">加载失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+refresh();
+timer = setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

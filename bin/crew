@@ -56,6 +56,7 @@ CW="$SCRIPT_DIR/crew-wake.js"
 CN="$SCRIPT_DIR/crew-notify.js"
 CH="$SCRIPT_DIR/crew-heartbeat.js"
 CST="$SCRIPT_DIR/crew-status.js"
+CWEB="$SCRIPT_DIR/crew-web.js"
 
 log() { echo "[crew] $*" >&2; }
 die() { log "$*"; exit 1; }
@@ -383,6 +384,13 @@ cmd_heartbeat() {
   # 起心跳采样守护(单例,PID 文件反查);--once 采一次退,--status 查看当前进程
   command -v node >/dev/null 2>&1 || die "crew heartbeat 需要 node"
   node "$CH" "$@"
+}
+
+cmd_web() {
+  # crew web [--port 18060]  → 起独立前端(单文件 node http,零依赖)
+  # 需要心跳:未跑 crew heartbeat 时 ctxPct/tmux 状态是 null(前端仍能显示,只是空)
+  command -v node >/dev/null 2>&1 || die "crew web 需要 node"
+  node "$CWEB" "$@"
 }
 
 cmd_notify() {
@@ -1285,6 +1293,7 @@ case "$CMD" in
   notify)       cmd_notify "$@" ;;
   status)       cmd_status "$@" ;;
   heartbeat)    cmd_heartbeat "$@" ;;
+  web)          cmd_web "$@" ;;
   inbox)        cmd_inbox "$@" ;;
   log)          cmd_log "$@" ;;
   models)       cmd_models "$@" ;;
