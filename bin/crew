@@ -53,6 +53,7 @@ CT="$SCRIPT_DIR/crew-tmux"
 CL="$SCRIPT_DIR/crew-launcher"
 CR="$SCRIPT_DIR/crew-register.js"
 CW="$SCRIPT_DIR/crew-wake.js"
+CN="$SCRIPT_DIR/crew-notify.js"
 
 log() { echo "[crew] $*" >&2; }
 die() { log "$*"; exit 1; }
@@ -348,38 +349,88 @@ cmd_wake() {
 }
 
 cmd_send() {
+  # crew send <name> "msg" —— 落 JSON 信封到 inbox + 镜像追加 feedback.jsonl(可视化)。
+  # 不 wake(交给 crew notify 或调用方)。信封结构见 crew-notify.js 头。
   local name="$1"; shift
   local msg="$*"
   [ -z "$name" ] && die "usage: crew send <name> \"msg\""
-  mkdir -p "$CREW_STATE/inbox/$name"
-  local idx
-  idx=$(ls "$CREW_STATE/inbox/$name/" 2>/dev/null | wc -l)
-  idx=$((idx+1))
-  local ts
-  ts=$(date -Iseconds)
-  printf '%s\n' "$msg" > "$CREW_STATE/inbox/$name/$(printf '%04d' $idx)-$ts.msg"
-  log "queued -> inbox of '$name' (from ${CREW_SESSION_NAME:-crew send})"
+  local sender="${CREW_SESSION_NAME:-crew-send}"
+  command -v node >/dev/null 2>&1 || die "crew send 需要 node"
+  local fpath
+  fpath=$(node "$CN" write --to "$name" --from "session:$sender" --note "$msg") || die "crew send: envelope 写失败"
+  log "queued -> inbox of '$name' (from $sender): $fpath"
+}
+
+cmd_notify() {
+  # crew notify <name> "msg" [--no-wake]  = send + wake 复合。
+  # send 成功后自动 wake,wake 成功回写 delivery.wokeAt(mark-woke)。
+  # exit 契约:0=send+wake 都成 / 2=send 成但目标非 idle(nudge 已入 pending) / 1=目标不存在 / 3=tmux 挂
+  local no_wake=0 name="" msg_parts=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-wake) no_wake=1; shift ;;
+      *) if [ -z "$name" ]; then name="$1"; else msg_parts+=("$1"); fi; shift ;;
+    esac
+  done
+  [ -z "$name" ] && die "usage: crew notify <name> \"msg\" [--no-wake]"
+  [ "${#msg_parts[@]}" -eq 0 ] && die "crew notify: 消息不能为空"
+  local msg="${msg_parts[*]}"
+  local sender="${CREW_SESSION_NAME:-crew-notify}"
+  command -v node >/dev/null 2>&1 || die "crew notify 需要 node"
+  # 1) 写信封(拿到路径 → id 反查)
+  local fpath env_id
+  fpath=$(node "$CN" write --to "$name" --from "session:$sender" --note "$msg") || die "crew notify: envelope 写失败"
+  env_id=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1])).id)" "$fpath" 2>/dev/null)
+  log "queued -> $name (id=$env_id): $fpath"
+  # 2) wake(除非 --no-wake)
+  [ "$no_wake" = 1 ] && return 0
+  node "$CW" "$name"
+  local rc=$?
+  # 3) wake 成功回写 delivery.wokeAt=now
+  if [ "$rc" = 0 ] && [ -n "$env_id" ]; then
+    node "$CN" mark-woke --to "$name" --id "$env_id" >/dev/null 2>&1 || true
+  fi
+  return $rc
 }
 
 cmd_inbox() {
+  # crew inbox <name> [--peek]
+  # 默认消费:走 crew-notify.js ack —— 回写 delivery.state=acked + 移到 consumed/ + 镜像 ack 到 feedback.jsonl。
+  # --peek 只看不消费(直接 dump JSON/msg 文件,不改状态,不归档)。
+  # 兼容:目录里既可能是新 .json 信封,也可能是老 .msg 纯文本(逐步淘汰,消费 rm 无 ack)。
   local name="$1"; shift
   local peek=0
   [ "${1:-}" = "--peek" ] && peek=1
   [ -z "$name" ] && die "usage: crew inbox <name> [--peek]"
   local dir="$CREW_STATE/inbox/$name"
   [ -d "$dir" ] || { echo "(no messages)"; return 0; }
-  local n=0
-  for f in "$dir"/*.msg; do
-    [ -f "$f" ] || continue
-    n=$((n+1))
-    echo "── #$n  $(basename "$f") ──"
-    cat "$f"
-    echo
-  done
-  if [ "$peek" = 0 ] && [ $n -gt 0 ]; then
-    rm -f "$dir"/*.msg
-    echo "(consumed $n message(s))"
+  if [ "$peek" = 1 ]; then
+    local n=0
+    for f in "$dir"/*.json "$dir"/*.msg; do
+      [ -f "$f" ] || continue
+      n=$((n+1))
+      echo "── #$n  $(basename "$f") ──"
+      if [[ "$f" == *.json ]]; then
+        node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1]));console.log("["+e.from.kind+":"+e.from.id+"] "+e.note+"\n(id="+e.id+" state="+e.delivery.state+")")' "$f"
+      else
+        cat "$f"
+      fi
+      echo
+    done
+    [ "$n" = 0 ] && echo "(no messages)"
+    return 0
   fi
+  # 消费:走 crew-notify.js ack,拿到一行一 JSON 信封的输出,打印可读格式。
+  command -v node >/dev/null 2>&1 || die "crew inbox 需要 node"
+  local n=0
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    n=$((n+1))
+    printf -- "── #%d ──\n" "$n"
+    printf '%s\n' "$line" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const e=JSON.parse(d);const src=e.from&&e.from.id?"["+e.from.kind+":"+e.from.id+"] ":"";console.log(src+e.note)})'
+    echo
+  done < <(node "$CN" ack --to "$name")
+  if [ "$n" = 0 ]; then echo "(no messages)"; else echo "(consumed $n message(s), archived to inbox/$name/consumed/)"; fi
 }
 
 cmd_log() {
@@ -1207,6 +1258,7 @@ case "$CMD" in
   register)     cmd_register "$@" ;;
   wake)         cmd_wake "$@" ;;
   send)         cmd_send "$@" ;;
+  notify)       cmd_notify "$@" ;;
   inbox)        cmd_inbox "$@" ;;
   log)          cmd_log "$@" ;;
   models)       cmd_models "$@" ;;
