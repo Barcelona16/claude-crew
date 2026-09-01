@@ -521,19 +521,12 @@ ccr_models_for_key() {
     kv=$(awk -F= -v a="$alias" '/^[[:space:]]*#/{next} {k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k); if(k==a){v=substr($0,index($0,"=")+1); gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); print v; exit}}' "$CREW_HOME/keys.conf")
   fi
   [ -z "$kv" ] && kv="$alias"
-  # 2026-09-01 修:双重匹配——alias 命中 provider.name 或 provider.api_key 都算(box 无 keys.conf
-  # 时 _list_keys fallback 到 provider.name,不再是真 token)。
-  KEY="$kv" ALIAS="$alias" node -e '
+  KEY="$kv" node -e '
     const fs=require("fs");
     const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
     const ps=c.Providers||c.providers||[];
     const out=[];
-    for(const p of ps){
-      const k=(p.api_key||p.apiKey||"")+"";
-      if(k===process.env.KEY || p.name===process.env.ALIAS){
-        for(const m of (p.models||[])) if(out.indexOf(m)<0) out.push(m);
-      }
-    }
+    for(const p of ps){ if((p.api_key||p.apiKey)===process.env.KEY) for(const m of (p.models||[])) if(out.indexOf(m)<0) out.push(m); }
     process.stdout.write(out.join("\n"));
   ' "$cfg" 2>/dev/null
 }
@@ -548,17 +541,12 @@ ccr_models_for_key_full() {
     kv=$(awk -F= -v a="$alias" '/^[[:space:]]*#/{next} {k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k); if(k==a){v=substr($0,index($0,"=")+1); gsub(/^[[:space:]]+|[[:space:]]+$/,"",v); print v; exit}}' "$CREW_HOME/keys.conf")
   fi
   [ -z "$kv" ] && kv="$alias"
-  KEY="$kv" ALIAS="$alias" node -e '
+  KEY="$kv" node -e '
     const fs=require("fs");
     const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
     const ps=c.Providers||c.providers||[];
     const out=[];
-    for(const p of ps){
-      const k=(p.api_key||p.apiKey||"")+"";
-      if(k===process.env.KEY || p.name===process.env.ALIAS){
-        for(const m of (p.models||[])){ var full=p.name+","+m; if(out.indexOf(full)<0) out.push(full); }
-      }
-    }
+    for(const p of ps){ if((p.api_key||p.apiKey)===process.env.KEY) for(const m of (p.models||[])){ var full=p.name+","+m; if(out.indexOf(full)<0) out.push(full); } }
     process.stdout.write(out.join("\n"));
   ' "$cfg" 2>/dev/null
 }
@@ -784,38 +772,14 @@ EOF
 cmd_keys() {
   local kf="$CREW_HOME/keys.conf"
   echo "== keys =="
-  if [ -f "$kf" ]; then
-    awk -F= '
-      /^[[:space:]]*#/ {next} /=/ {
-        a=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",a); if(a=="") next;
-        v=substr($0, index($0,"=")+1); gsub(/^[[:space:]]+|[[:space:]]+$/,"",v);
-        m = (length(v)>10) ? substr(v,1,4) "…" substr(v,length(v)-2) : "****";
-        printf "  %-14s %s\n", a, m;
-      }' "$kf"
-    return 0
-  fi
-  # 2026-09-01 CCR fallback:无 keys.conf 时列 CCR Providers 名字 + 真 api_key 脱敏。
-  # 这样新装 box(没 keys.conf 但 CCR 直接配了 providers)也能看到"能用的 key"。
-  local ccr="$HOME/.claude-code-router/config.json"
-  if [ ! -f "$ccr" ] || ! command -v node >/dev/null 2>&1; then
-    echo "  (无 keys.conf,也无 CCR config)"
-    return 0
-  fi
-  echo "  (从 CCR Providers 派生,未建 keys.conf)"
-  node -e '
-    try {
-      const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
-      const ps=j.Providers||j.providers||[];
-      const seen=new Set();
-      for(const p of ps){
-        if(!p||!p.name||seen.has(p.name))continue;
-        seen.add(p.name);
-        const k=(p.api_key||p.apiKey||"")+"";
-        const m=k.length>10?(k.slice(0,4)+"…"+k.slice(-3)):"****";
-        console.log("  "+p.name.padEnd(30)+" "+m);
-      }
-    } catch(e){}
-  ' "$ccr"
+  [ -f "$kf" ] || { echo "  (无 keys.conf)"; return 0; }
+  awk -F= '
+    /^[[:space:]]*#/ {next} /=/ {
+      a=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",a); if(a=="") next;
+      v=substr($0, index($0,"=")+1); gsub(/^[[:space:]]+|[[:space:]]+$/,"",v);
+      m = (length(v)>10) ? substr(v,1,4) "…" substr(v,length(v)-2) : "****";
+      printf "  %-14s %s\n", a, m;
+    }' "$kf"
 }
 
 # crew addkey <key> [别名] —— 简化加 key:写进 keys.conf。别名不给则从 key 派生。
@@ -1181,27 +1145,9 @@ _list_backends() {
   done | sort -u
 }
 # key 别名列表(keys.conf 的 alias=... 左侧),每行一个
-# 2026-09-01 修:box 没 keys.conf 时(新装/云端容器)本函数返空 → crew keys/models/switch 全空 →
-# 交互选卡死("no backend for X")。加 CCR fallback:keys.conf 无 → 从 ~/.claude-code-router/config.json
-# 的 Providers[].name 反推可用 provider 名当"别名"。它们本就是 crew ls MODEL 列的"provider,model"
-# 前缀,与 crew --key <alias> 参数语义一致(crew-launcher/keyresolve 都按 provider name 找 api_key)。
 _list_keys() {
-  if [ -f "$CREW_HOME/keys.conf" ]; then
-    awk -F= '/^[[:space:]]*#/{next} /=/{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$1); if($1)print $1}' "$CREW_HOME/keys.conf" | sort -u
-    return 0
-  fi
-  # CCR fallback:列 provider 名
-  local ccr="$HOME/.claude-code-router/config.json"
-  [ -f "$ccr" ] || return 0
-  command -v node >/dev/null 2>&1 || return 0
-  node -e '
-    try {
-      const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
-      const ps=j.Providers||j.providers||[];
-      const seen=new Set();
-      for(const p of ps){if(p&&p.name&&!seen.has(p.name)){seen.add(p.name);console.log(p.name)}}
-    } catch(e){}
-  ' "$ccr" | sort -u
+  [ -f "$CREW_HOME/keys.conf" ] || return 0
+  awk -F= '/^[[:space:]]*#/{next} /=/{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$1); if($1)print $1}' "$CREW_HOME/keys.conf" | sort -u
 }
 
 # _trust_dir <dir>:给该目录在 ~/.claude.json 预写 hasTrustDialogAccepted=true,让 claude 起会话
