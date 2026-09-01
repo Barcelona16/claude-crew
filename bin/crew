@@ -661,6 +661,7 @@ cmd_models() {
     fi
   done < <(_list_keys)
   [ "$any" = 0 ] && echo "(keys.conf 里没有 key,或都没对应 CCR provider)"
+  return 0
 }
 
 # crew backends —— 列内部 backend conf 文件名(实现细节;一般用户看 crew models 即可)
