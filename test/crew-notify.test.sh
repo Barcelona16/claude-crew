@@ -93,12 +93,35 @@ node "$CN" mark-woke --to carol --id "$env_id"
 node -e "const e=JSON.parse(require('fs').readFileSync('$fpath'));process.exit(e.delivery.state==='delivered'&&e.delivery.wokeAt?0:1)" \
   && _ok "mark-woke 后 state=delivered+wokeAt" || _ng "mark-woke 未生效"
 
-# ---- Case 6: crew send 命令入口 ----
-echo "--- Case 6: crew send ---"
-CREW_SESSION_NAME=eve "$CREW" send frank "hello from eve" >/dev/null
+# ---- Case 6: crew send 命令入口 —— 2026-09-02 根治:默认 send+wake(与 notify 一致)---
+echo "--- Case 6: crew send 默认 send+wake ---"
+sent6="$T/sent6.log"; : > "$sent6"
+CREW_SESSION_NAME=eve PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="frank" \
+  FAKE_TMUX_PANE="$IDLE_PANE" FAKE_TMUX_SENT="$sent6" \
+  "$CREW" send frank "hello from eve" >/dev/null 2>&1
 latest=$(ls -t "$CREW_STATE/inbox/frank"/*.json | head -1)
 node -e "const e=JSON.parse(require('fs').readFileSync('$latest'));process.exit(e.from.id==='eve'&&e.note==='hello from eve'?0:1)" \
   && _ok "crew send 写信封 from=eve" || _ng "crew send 信封不对"
+# 关键:默认应该也 wake(fake tmux 里 frank 存在 + idle → 应发 Enter)
+grep -q "Enter" "$sent6" && _ok "crew send 默认 wake(发 Enter)—— 根治漏 wake 坑" || _ng "crew send 未默认 wake"
+# state 应升为 delivered(与 notify 一致)
+node -e "const e=JSON.parse(require('fs').readFileSync('$latest'));process.exit(e.delivery.state==='delivered'?0:1)" \
+  && _ok "crew send 后 state=delivered" || _ng "state 未升 delivered"
+
+# ---- Case 6b: crew send --no-wake 保留旧行为(批量广播场景)----
+echo "--- Case 6b: crew send --no-wake 兼容 ---"
+sent6b="$T/sent6b.log"; : > "$sent6b"
+before=$(ls "$CREW_STATE/inbox/gio"/*.json 2>/dev/null | wc -l)
+CREW_SESSION_NAME=eve PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="gio" \
+  FAKE_TMUX_PANE="$IDLE_PANE" FAKE_TMUX_SENT="$sent6b" \
+  "$CREW" send gio "silent broadcast" --no-wake >/dev/null 2>&1
+after=$(ls "$CREW_STATE/inbox/gio"/*.json 2>/dev/null | wc -l)
+[ "$after" = "1" ] && _ok "--no-wake 仍写信封" || _ng "信封未写"
+[ ! -s "$sent6b" ] && _ok "--no-wake 未 send-keys(旧行为兼容)" || _ng "--no-wake 却 wake 了"
+# state 应保持 pending(未 wake)
+latest=$(ls -t "$CREW_STATE/inbox/gio"/*.json | head -1)
+node -e "const e=JSON.parse(require('fs').readFileSync('$latest'));process.exit(e.delivery.state==='pending'?0:1)" \
+  && _ok "--no-wake state=pending(未升 delivered)" || _ng "state 不对"
 
 # ---- Case 7: crew notify 全链路(idle → send+wake+mark-woke) ----
 echo "--- Case 7: crew notify 全链路 idle ---"

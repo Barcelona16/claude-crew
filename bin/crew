@@ -14,7 +14,7 @@
 #   crew kill <name> [--purge]  删会话
 #   crew pin/unpin <name>    pin/unpin tmux
 #   crew adopt <name> <tmux> [--sid X] [--dir P] [--model M]
-#   crew send <name> "msg"   给会话 inbox 灌消息
+#   crew send <name> "msg" [--no-wake]  发消息到会话 inbox + 默认唤醒(--no-wake 只落信封)
 #   crew notify <name> "msg" 发消息并唤醒(send+wake 合一,确保会话看到)
 #   crew wake <name>         唤醒会话(paneIdle 判据 + 双 Enter + pending 队列)
 #   crew inbox <name> [--peek]  读 inbox(带时间戳,消费后归档)
@@ -361,16 +361,36 @@ cmd_wake() {
 }
 
 cmd_send() {
-  # crew send <name> "msg" —— 落 JSON 信封到 inbox + 镜像追加 feedback.jsonl(可视化)。
-  # 不 wake(交给 crew notify 或调用方)。信封结构见 crew-notify.js 头。
-  local name="$1"; shift
-  local msg="$*"
-  [ -z "$name" ] && die "usage: crew send <name> \"msg\""
+  # crew send <name> "msg" [--no-wake] —— 落 JSON 信封到 inbox + 唤醒会话(默认)。
+  # 2026-09-02 根治老协议漏 wake 坑(proj-sfw1k 事故):crew send 内部行为改为 send+wake,
+  # 与 crew notify 语义合流。原"只落信封不 wake"行为通过 --no-wake 保留(供批量广播用)。
+  # 派单代码调 crew send 也自动 wake,不用再单独跟 wake 步骤。
+  local no_wake=0 name="" msg_parts=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-wake) no_wake=1; shift ;;
+      *) if [ -z "$name" ]; then name="$1"; else msg_parts+=("$1"); fi; shift ;;
+    esac
+  done
+  [ -z "$name" ] && die "usage: crew send <name> \"msg\" [--no-wake]"
+  [ "${#msg_parts[@]}" -eq 0 ] && die "crew send: 消息不能为空"
+  local msg="${msg_parts[*]}"
   local sender="${CREW_SESSION_NAME:-crew-send}"
   command -v node >/dev/null 2>&1 || die "crew send 需要 node"
-  local fpath
+  # 1) 写信封(拿到路径 → id 反查)
+  local fpath env_id
   fpath=$(node "$CN" write --to "$name" --from "session:$sender" --note "$msg") || die "crew send: envelope 写失败"
-  log "queued -> inbox of '$name' (from $sender): $fpath"
+  env_id=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1])).id)" "$fpath" 2>/dev/null)
+  log "queued -> inbox of '$name' (from $sender, id=$env_id)"
+  # 2) 默认 wake(--no-wake 保留旧行为供批量广播)
+  [ "$no_wake" = 1 ] && return 0
+  node "$CW" "$name"
+  local rc=$?
+  # 3) wake 成功回写 delivery.wokeAt=now(与 crew notify 语义一致)
+  if [ "$rc" = 0 ] && [ -n "$env_id" ]; then
+    node "$CN" mark-woke --to "$name" --id "$env_id" >/dev/null 2>&1 || true
+  fi
+  return $rc
 }
 
 cmd_status() {
