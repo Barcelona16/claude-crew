@@ -1393,6 +1393,15 @@ cmd_spawn() {
   _trust_dir "$session_dir"
 
   "$CL" spawn --name "$name" --mode "$mode" --dir "$session_dir" "${extra_args[@]}"
+  local _spawn_rc=$?
+
+  # 2026-09-03:tmux 模式首次新起后自动 attach 进会话(与"已 live 时 crew <name> attach"一致的
+  # UX)。之前 spawn 完只打印 ready 停在 shell,用户还得手动 crew attach。仅在:spawn 成功 +
+  # tmux 模式(fg/use-current-tmux 已 exec 进 claude,不到这)+ 交互终端(非脚本)时 attach。
+  if [ "$_spawn_rc" = 0 ] && [ "$mode" = "tmux" ] && [ -t 0 ] && [ -t 1 ]; then
+    exec "$CT" attach "$name"
+  fi
+  return "$_spawn_rc"
 }
 
 # 2026-09-01:机会式自动清理陈旧会话(节流每天一次,后台跑)。排除 prune 自身避免递归;

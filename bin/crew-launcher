@@ -47,15 +47,19 @@ EOF
   exit 2
 }
 
-# 生成随机 uuid(用 /proc/sys/kernel/random/uuid,依赖 kernel)
+# 生成随机 uuid(优先 /proc/sys/kernel/random/uuid;mac 等无 /proc 时回落 uuidgen / openssl)。
+# 2026-09-03 修:原 fallback 用 `A && uuidgen || B && openssl` 链——bash 左结合下 uuidgen 成功后
+# `&& openssl` 仍会执行,导致输出两个 uuid 拼一起(mac 上 --session-id 传俩值 → claude
+# "Session ID already in use"/起不来)。改 if/elif 分支消除链式陷阱;uuidgen 大写转小写规范化。
 gen_uuid() {
   if [ -r /proc/sys/kernel/random/uuid ]; then
     cat /proc/sys/kernel/random/uuid
+  elif command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr 'A-Z' 'a-z'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 16 | sed 's/\(........\)\(....\)\(....\)\(....\)\(............\)/\1-\2-\3-\4-\5/'
   else
-    # fallback:用 openssl 或 uuidgen
-    command -v uuidgen >/dev/null 2>&1 && uuidgen || \
-      command -v openssl >/dev/null 2>&1 && openssl rand -hex 16 | sed 's/\(........\)\(....\)\(....\)\(....\)\(............\)/\1-\2-\3-\4-\5/' || \
-      { echo "no uuid source" >&2; return 1; }
+    echo "no uuid source" >&2; return 1
   fi
 }
 
@@ -339,6 +343,36 @@ cmd_spawn() {
     fi
   fi
 
+  # 2026-09-03 通信约定注入:同机会话间通信改用官方 SendMessage/ListAgents(取代 tmux 注入)。
+  # comm-protocol.md 随仓分发(templates/),launcher 无条件追加到 --append-system-prompt。
+  # 顺序:onboarding(通用协议)→ comm(通信约定,横切能力)→ policy(域 policy,最具体、最后拼)。
+  local extra_comm=""
+  local comm_file="$SCRIPT_DIR/../templates/comm-protocol.md"
+  [ -f "$comm_file" ] && extra_comm=" --append-system-prompt \"\$(cat $(printf %q "$comm_file"))\""
+
+  # 2026-09-03 PostToolUse hook:会话调 SendMessage 时,crew 侧记一条日志(crew-sendmsg-hook.sh
+  # → crew-notify.js write)。生成 per-session settings.json 落 $CREW_STATE/<name>.settings
+  # (不落 /tmp,遵 audit-crew C4 安全风格;内容仅 hook command 无 token),原子写 tmp+mv。
+  # matcher 默认 SendMessage(已实测确认的官方工具名);CREW_SENDMSG_TOOL 覆盖为将来改名逃生阀。
+  # 无 node 降级:不生成 settings、不加 --settings,会话正常起(只是没日志),对齐 sid_alive 降级。
+  local extra_settings=""
+  local settings_file="$CREW_STATE/$name.settings"
+  local hook_cmd="$SCRIPT_DIR/crew-sendmsg-hook.sh"
+  local sendmsg_tool="${CREW_SENDMSG_TOOL:-SendMessage}"
+  if command -v node >/dev/null 2>&1 && [ -x "$hook_cmd" ]; then
+    local _stmp="$settings_file.tmp.$$"
+    if HOOK_CMD="$hook_cmd" MATCHER="$sendmsg_tool" node -e '
+        const fs=require("fs");
+        const s={hooks:{PostToolUse:[{matcher:process.env.MATCHER,
+          hooks:[{type:"command",command:process.env.HOOK_CMD}]}]}};
+        process.stdout.write(JSON.stringify(s,null,2)+"\n");
+      ' > "$_stmp" 2>/dev/null; then
+      mv -f "$_stmp" "$settings_file" && extra_settings=" --settings $(printf %q "$settings_file")"
+    else
+      rm -f "$_stmp" 2>/dev/null
+    fi
+  fi
+
   # env 前缀
   local envp=""
   [ -n "$onboarding_ver" ] && envp+=" CREW_ONBOARDING_VER=$(printf %q "$onboarding_ver")"
@@ -381,7 +415,7 @@ cmd_spawn() {
     for a in "${argv[@]}"; do
       printf ' %s' "$(printf %q "$a")"
     done
-    printf '%s%s' "$extra_onboarding" "$extra_policy"
+    printf '%s%s%s%s' "$extra_settings" "$extra_onboarding" "$extra_comm" "$extra_policy"
     echo
   } > "$launcher"
   chmod 600 "$launcher"

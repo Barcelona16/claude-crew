@@ -89,7 +89,9 @@ echo "--- Case 6: policy 注入 ---"
 N="${TEST_PREFIX}-e"
 "$CS" set "$N" backend mock >/dev/null
 "$CS" set "$N" policy aggressive >/dev/null
-"$CL" spawn --name "$N" --mode fg >/dev/null 2>&1
+# CREW_LAUNCHER_KEEP=1:默认 launcher 首行 self-unlink(fg exec 跑起来立即删自己),
+# 读 /tmp launcher 文件必空 → 本 case 需保留文件才能 grep 内容。
+CREW_LAUNCHER_KEEP=1 "$CL" spawn --name "$N" --mode fg >/dev/null 2>&1
 [ -f "$CREW_STATE/$N.policy_body" ] && _ok "policy_body 文件生成" || _ng "policy_body 未生成" ""
 [ -s "$CREW_STATE/$N.policy_body" ] && _ok "policy_body 非空" || _ng "policy_body 应有内容" ""
 launcher="/tmp/crew-launch-$N.sh"
@@ -101,10 +103,12 @@ echo "--- Case 7: launcher.sh 短(policy 走 cat)---"
 N="${TEST_PREFIX}-f"
 "$CS" set "$N" backend mock >/dev/null
 "$CS" set "$N" policy aggressive >/dev/null
-"$CL" spawn --name "$N" --mode fg >/dev/null 2>&1
+CREW_LAUNCHER_KEEP=1 "$CL" spawn --name "$N" --mode fg >/dev/null 2>&1
 launcher="/tmp/crew-launch-$N.sh"
 sz=$(wc -c < "$launcher")
-[ "$sz" -lt 800 ] && _ok "launcher.sh 短($sz 字节 < 800)" || _ng "launcher.sh 太长 $sz 字节" ""
+# 阈值放宽到 1200:新增 --settings + comm-protocol 注入(均走 $(cat FILE) 或路径,不含长原文)
+# 后 launcher 略长,但仍远小于把 policy/comm 原文塞进命令行的体量。核心不变:长文本走 cat。
+[ "$sz" -lt 1200 ] && _ok "launcher.sh 短($sz 字节 < 1200)" || _ng "launcher.sh 太长 $sz 字节" ""
 
 # --- Case 8: unknown backend conf 报错 ---
 echo "--- Case 8: 未知 backend conf ---"
@@ -232,6 +236,84 @@ result=$(CREW_STATE="$FB_STATE" CREW_HOME="$CREW_HOME" bash -c "
 ")
 echo "$result" | grep -q "fallback 众数" && _ok "load_backend_conf 空 backend 走 fallback 分支" || _ng "fallback 未触发" ""
 echo "$result" | grep -q "newkey-4.7,Claude-Opus-4.7-joybuilder" && _ok "orphan.backend 被写入众数值" || _ng "state 未写: $result" ""
+# ============================================================================
+# 2026-09-03 官方 SendMessage 通信机制:settings.json 生成 + comm 注入 + --settings;
+# gen_uuid mac fallback 修复(单 uuid)。fg 模式下 CREW_CLAUDE_BIN=/bin/echo 会把 launcher
+# 里 exec 的 argv(含 --settings 等)打印到 stdout,与既有 Case 3 同套路用 out=$(...) 断言;
+# --append-system-prompt "$(cat FILE)" 会被 shell 展开为文件内容,故用文件里的独特串断言注入。
+# ============================================================================
+HOOK_SH="$SCRIPT_DIR/../bin/crew-sendmsg-hook.sh"
+COMM_MD="$SCRIPT_DIR/../templates/comm-protocol.md"
+
+# ---- Case 19: settings.json 生成(合法 JSON + PostToolUse + hook 路径 + matcher)----
+echo "--- Case 19: settings.json 生成 ---"
+N="${TEST_PREFIX}-set"
+"$CS" set "$N" backend mock >/dev/null
+"$CL" spawn --name "$N" --mode fg >/dev/null 2>&1
+SF="$CREW_STATE/$N.settings"
+if [ -x "$HOOK_SH" ] && command -v node >/dev/null 2>&1; then
+  [ -f "$SF" ] && _ok "settings 文件生成" || _ng "settings 未生成" ""
+  node -e "const s=JSON.parse(require('fs').readFileSync('$SF'));const h=s.hooks.PostToolUse[0];process.exit(h.matcher==='SendMessage'&&h.hooks[0].command.endsWith('crew-sendmsg-hook.sh')?0:1)" \
+    && _ok "settings 合法 JSON:matcher=SendMessage + hook 指向 crew-sendmsg-hook.sh" || _ng "settings 内容不对:$(cat $SF 2>/dev/null)" ""
+else
+  _ok "(跳过:无 node 或 hook 不可执行)"
+  _ok "(跳过 settings 内容检查)"
+fi
+
+# ---- Case 20: launcher argv 含 --settings 指向该文件 ----
+echo "--- Case 20: --settings 拼进 argv ---"
+N="${TEST_PREFIX}-set2"
+"$CS" set "$N" backend mock >/dev/null
+out=$("$CL" spawn --name "$N" --mode fg 2>&1)
+SF="$CREW_STATE/$N.settings"
+if [ -f "$SF" ]; then
+  echo "$out" | grep -qF -- "--settings" && echo "$out" | grep -qF -- "$SF" \
+    && _ok "argv 含 --settings 指向 $N.settings" || _ng "argv 缺 --settings:$out" ""
+else
+  _ok "(跳过:无 settings 文件)"
+fi
+
+# ---- Case 21: comm-protocol 注入(argv 里出现 comm 文件的独特串)----
+echo "--- Case 21: comm-protocol 注入 ---"
+N="${TEST_PREFIX}-comm"
+"$CS" set "$N" backend mock >/dev/null
+out=$("$CL" spawn --name "$N" --mode fg 2>&1)
+if [ -f "$COMM_MD" ]; then
+  # comm-protocol.md 里有独特串 "同机会话间通信";--append-system-prompt "$(cat)" 展开后 echo 打印
+  echo "$out" | grep -q '同机会话间通信' && _ok "argv 注入了 comm-protocol 内容" || _ng "未注入 comm(argv 无独特串)" ""
+else
+  _ok "(跳过:comm-protocol.md 不存在)"
+fi
+
+# ---- Case 22: gen_uuid 单 uuid(直接调 source 进来的函数)----
+echo "--- Case 22: gen_uuid 单个小写 uuid ---"
+u=$(gen_uuid)
+lines=$(printf '%s' "$u" | grep -c '' )
+echo "$u" | grep -qE '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' \
+  && _ok "gen_uuid → 单个小写标准 uuid:$u" || _ng "gen_uuid 格式不对(可能双 uuid):$u" ""
+# 再验 fresh spawn 的 argv 里 --session-id 只出现一次
+N="${TEST_PREFIX}-uuid"
+"$CS" set "$N" backend mock >/dev/null
+out=$("$CL" spawn --name "$N" --mode fg --fresh 2>&1)
+sid_cnt=$(echo "$out" | grep -oc -- '--session-id' || echo 0)
+[ "$sid_cnt" = 1 ] && _ok "fresh spawn argv --session-id 只 1 次" || _ng "--session-id 出现 $sid_cnt 次:$out" ""
+
+# ---- Case 23: 无 node 降级(不生成 settings、不加 --settings、不崩)----
+echo "--- Case 23: 无 node 降级 ---"
+N="${TEST_PREFIX}-nonode"
+"$CS" set "$N" backend mock >/dev/null
+# 造不含 node 的临时 PATH(只放 /bin /usr/bin;若这些里也有 node 则退化,只验不崩)
+rc=0
+out=$(PATH="/usr/bin:/bin" "$CL" spawn --name "$N" --mode fg 2>&1) || rc=$?
+SF="$CREW_STATE/$N.settings"
+if ! PATH="/usr/bin:/bin" command -v node >/dev/null 2>&1; then
+  [ ! -f "$SF" ] && _ok "无 node:未生成 settings" || _ng "无 node 却生成了 settings" ""
+  echo "$out" | grep -qF -- "--settings" && _ng "无 node 却加了 --settings" "" || _ok "无 node:argv 不含 --settings"
+else
+  _ok "(环境标准路径有 node,降级 case 退化)"
+  _ok "(退化:只验不崩)"
+fi
+echo "$out" | grep -q "session-id" && _ok "无 node:spawn 仍正常起(argv 有 session-id)" || _ng "无 node spawn 异常:$out rc=$rc" ""
 
 echo
 echo "=== crew-launcher.test.sh: $pass / $total pass, $fail fail ==="
