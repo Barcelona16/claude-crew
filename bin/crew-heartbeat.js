@@ -153,7 +153,12 @@ function sampleAll() {
   }
   // 采样完顺手扫 pending 队列(合流 flusher)
   const flush = flushPendingNudges();
-  return { ts, count: results.length, results, pendingFlushed: flush.flushed, pendingRemain: flush.remain };
+  // 采样完顺手 crew-watcher 巡检告警(2026-09-02 · 通用观察者)
+  let watch = { staleFired: 0, staleSkipped: 0 };
+  try { watch = require('./crew-watcher.js').sweepOnce(); } catch (_) {}
+  return { ts, count: results.length, results,
+           pendingFlushed: flush.flushed, pendingRemain: flush.remain,
+           watcher: watch };
 }
 
 // 单例保护:PID 文件里的进程若还活着 → exit 6。stale 则重写(带自己 PID)。
