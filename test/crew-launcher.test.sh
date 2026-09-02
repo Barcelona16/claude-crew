@@ -194,6 +194,45 @@ echo "$argv_out" | grep -qE "^--resume$" && next=$(echo "$argv_out" | grep -A1 "
 prev=$("$CS" get "$N" prev_sid 2>/dev/null || echo "")
 [ -z "$prev" ] && _ok "活 sid 未触发自愈:prev_sid 未写" || _ng "活 sid 误触发自愈:prev_sid=$prev" ""
 
+# ---- Case 15-18: _fallback_backend_key 众数 fallback(2026-09-02 P1)---
+echo "--- Case 15: _fallback_backend_key 空 state → 空返回 ---"
+FB_STATE="$CREW_STATE/fbstate15"; mkdir -p "$FB_STATE"
+result=$(CREW_STATE="$FB_STATE" bash -c "source <(sed -n '/^_fallback_backend_key()/,/^}/p' '$CL'); _fallback_backend_key")
+[ -z "$result" ] && _ok "空 state 返空(无候选)" || _ng "空 state 应返空,实际='$result'" ""
+
+echo "--- Case 16: 众数统计 ---"
+FB_STATE="$CREW_STATE/fbstate16"; mkdir -p "$FB_STATE"
+# 3 个 newkey + 1 个 joycode
+for n in a b c; do echo -n "newkey-4.7,Claude-Opus-4.7-joybuilder" > "$FB_STATE/$n.backend"; echo -n "newkey" > "$FB_STATE/$n.key"; done
+echo -n "joycode-oai,GLM-5.3" > "$FB_STATE/d.backend"; echo -n "joycode" > "$FB_STATE/d.key"
+result=$(CREW_STATE="$FB_STATE" bash -c "source <(sed -n '/^_fallback_backend_key()/,/^}/p' '$CL'); _fallback_backend_key")
+[[ "$result" == *"newkey-4.7,Claude-Opus-4.7-joybuilder"* ]] && _ok "众数返 newkey 系(3:1)" || _ng "众数错: '$result'" ""
+[[ "$result" == *newkey* ]] && _ok "key 众数返 newkey" || _ng "key 众数错" ""
+
+echo "--- Case 17: env override 优先于众数 ---"
+result=$(CREW_STATE="$FB_STATE" CREW_FALLBACK_MODEL="joycode-oai,GLM-5.3" CREW_FALLBACK_KEY="joycode" \
+  bash -c "source <(sed -n '/^_fallback_backend_key()/,/^}/p' '$CL'); _fallback_backend_key")
+[[ "$result" == "joycode-oai,GLM-5.3"$'\t'"joycode" ]] && _ok "env override 生效" || _ng "override 失败: '$result'" ""
+
+echo "--- Case 18: load_backend_conf 空 backend 走 fallback + 写 state ---"
+FB_STATE="$CREW_STATE/fbstate18"; mkdir -p "$FB_STATE"
+# 造点众数数据
+echo -n "newkey-4.7,Claude-Opus-4.7-joybuilder" > "$FB_STATE/existing.backend"
+echo -n "newkey" > "$FB_STATE/existing.key"
+# 目标 orphan 无 backend/key state
+# source 出所有必要函数
+result=$(CREW_STATE="$FB_STATE" CREW_HOME="$CREW_HOME" bash -c "
+  source <(sed -n '/^_fallback_backend_key()/,/^}/p; /^load_backend_conf()/,/^}/p' '$CL')
+  CS='$CS'
+  load_backend_conf orphan 2>&1
+  echo '---STATE---'
+  cat '$FB_STATE/orphan.backend' 2>/dev/null
+  echo ''
+  cat '$FB_STATE/orphan.key' 2>/dev/null
+")
+echo "$result" | grep -q "fallback 众数" && _ok "load_backend_conf 空 backend 走 fallback 分支" || _ng "fallback 未触发" ""
+echo "$result" | grep -q "newkey-4.7,Claude-Opus-4.7-joybuilder" && _ok "orphan.backend 被写入众数值" || _ng "state 未写: $result" ""
+
 echo
 echo "=== crew-launcher.test.sh: $pass / $total pass, $fail fail ==="
 [ "$fail" -eq 0 ]

@@ -78,12 +78,64 @@ sid_alive() {
   ' "$file" "$sid" 2>/dev/null
 }
 
+# _fallback_backend_key: 扫存活会话 state 文件,按 backend/key 出现频次找众数,输出到 stdout
+# 格式:BACKEND\tKEY(TAB 分隔)。无有效数据返空。
+# 优先级:env CREW_FALLBACK_MODEL/CREW_FALLBACK_KEY > 众数统计。
+# 2026-09-02 · P1 修:crew v2 crew-launcher 硬要 .backend 导致老 adopt 会话 resume 死循环
+# (work 会话事故手动救活 18 个后用户拍板加此 fallback)。
+_fallback_backend_key() {
+  local fb_model="${CREW_FALLBACK_MODEL:-}"
+  local fb_key="${CREW_FALLBACK_KEY:-}"
+  # env override 全给了就直接用
+  if [ -n "$fb_model" ] && [ -n "$fb_key" ]; then
+    printf '%s\t%s' "$fb_model" "$fb_key"
+    return 0
+  fi
+  # 用 node 扫 CREW_STATE/*.backend + *.key,统计众数;bash 无 hash 表 grep+uniq 也可但慢
+  command -v node >/dev/null 2>&1 || return 1
+  node -e '
+    const fs=require("fs"), path=require("path");
+    const dir=process.env.CREW_STATE;
+    if(!dir) process.exit(1);
+    let files=[];
+    try{files=fs.readdirSync(dir);}catch(_){process.exit(1);}
+    const bk={}, kk={};
+    for(const f of files){
+      if(f.endsWith(".backend")){
+        const v=fs.readFileSync(path.join(dir,f),"utf8").trim();
+        if(v) bk[v]=(bk[v]||0)+1;
+      } else if(f.endsWith(".key")){
+        const v=fs.readFileSync(path.join(dir,f),"utf8").trim();
+        if(v) kk[v]=(kk[v]||0)+1;
+      }
+    }
+    const top=(m)=>{const e=Object.entries(m);if(!e.length)return "";return e.sort((a,b)=>b[1]-a[1])[0][0];};
+    const b=process.env.FB_MODEL||top(bk);
+    const k=process.env.FB_KEY||top(kk);
+    if(b||k) process.stdout.write((b||"")+"\t"+(k||""));
+  ' 2>/dev/null <<< ""  # env override 已在 shell 侧处理,这里不再传
+}
+
 # 读 backend conf(BASE_URL/MODEL/TOKEN/KEY_MODE)—— 老 crew 兼容
 load_backend_conf() {
   local name="$1"
   local backend
   backend=$("$CS" get "$name" backend 2>/dev/null || echo "")
-  [ -z "$backend" ] && { echo "[crew-launcher] no backend for '$name'(先 crew-session set <n> backend X)" >&2; return 1; }
+  # 2026-09-02 P1:backend 空时不 die,fallback 到众数(env 或存活会话统计)
+  if [ -z "$backend" ]; then
+    local fb; fb=$(_fallback_backend_key)
+    local fb_model="${fb%$'\t'*}"
+    local fb_key="${fb##*$'\t'}"
+    if [ -n "$fb_model" ]; then
+      echo "[crew-launcher] warn: '$name' 无 backend state,fallback 众数:backend='$fb_model' key='$fb_key'(写入 state 记忆本次)" >&2
+      "$CS" set "$name" backend "$fb_model" >/dev/null 2>&1 || true
+      [ -n "$fb_key" ] && "$CS" set "$name" key "$fb_key" >/dev/null 2>&1 || true
+      backend="$fb_model"
+    else
+      echo "[crew-launcher] no backend for '$name' 且 fallback 无候选(无 env override 且 CREW_STATE 里无存活会话 state)" >&2
+      return 1
+    fi
+  fi
   local conf="$CREW_HOME/backends/$backend.conf"
   # v1 兼容(2026-08-30 切换 work 时踩):conf 缺失时按 v1 双路径判:
   # 1) backend 名带逗号(如 "joycode-oai,GLM-5.3") → 合成 ccr backend(BASE_URL=crew-proxy:8788,
