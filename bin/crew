@@ -383,8 +383,12 @@ cmd_send() {
   env_id=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1])).id)" "$fpath" 2>/dev/null)
   log "queued -> inbox of '$name' (from $sender, id=$env_id)"
   # 2) 默认 wake(--no-wake 保留旧行为供批量广播)
+  # 2026-09-02 修 A:wake nudge 里嵌信封原文头 120 字,让会话消费瞬间就看到任务内容,
+  # 不会因 crew inbox 忙别的忘读原文(backend proj-sfw1k 事故根因层)。
   [ "$no_wake" = 1 ] && return 0
-  node "$CW" "$name"
+  local _preview="$(printf '%s' "$msg" | head -c 120 | tr '\n' ' ')"
+  local _nudge="收到 @$name 反馈 from $sender(id=$env_id):$_preview … 【必读】跑 crew inbox $name 拿全文;完事按信封"完事汇报 X"要求做汇报"
+  node "$CW" "$name" --note "$_nudge"
   local rc=$?
   # 3) wake 成功回写 delivery.wokeAt=now(与 crew notify 语义一致)
   if [ "$rc" = 0 ] && [ -n "$env_id" ]; then
@@ -444,8 +448,11 @@ cmd_notify() {
   env_id=$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1])).id)" "$fpath" 2>/dev/null)
   log "queued -> $name (id=$env_id): $fpath"
   # 2) wake(除非 --no-wake)
+  # 修 A:wake nudge 里嵌信封原文头 120 字(见 cmd_send 同款注释)
   [ "$no_wake" = 1 ] && return 0
-  node "$CW" "$name"
+  local _preview="$(printf '%s' "$msg" | head -c 120 | tr '\n' ' ')"
+  local _nudge="收到 @$name 反馈 from $sender(id=$env_id):$_preview … 【必读】跑 crew inbox $name 拿全文;完事按信封"完事汇报 X"要求做汇报"
+  node "$CW" "$name" --note "$_nudge"
   local rc=$?
   # 3) wake 成功回写 delivery.wokeAt=now
   if [ "$rc" = 0 ] && [ -n "$env_id" ]; then

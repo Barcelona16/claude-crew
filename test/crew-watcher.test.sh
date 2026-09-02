@@ -154,6 +154,34 @@ grep -q "still-valid-id" "$CREW_STATE/watcher-state.json" && _ok "有效 ISO ts 
 # 坏 ts 的应被清
 grep -q "malformed-baseline:xxx" "$CREW_STATE/watcher-state.json" && _ng "坏 ts 未清理" || _ok "坏 ts 已清"
 
+# --- Case 9: watcher 扫 delivered 状态(2026-09-02 修:crew send 默认 wake 后 state 一秒 pending→delivered,不扫 delivered 就永远告警不到"送到没读") ---
+echo "--- Case 9: watcher 扫 delivered 状态 ---"
+rm -f "$CREW_STATE/watcher-state.json"
+DELIV_TS=$(date -u -d "-15 minutes" '+%Y-%m-%dT%H:%M:%S.000Z')
+mkdir -p "$CREW_STATE/inbox/jasmin"
+cat > "$CREW_STATE/inbox/jasmin/0001.json" <<EOF
+{ "id": "delivered-15min", "ts": "$DELIV_TS",
+  "from": { "kind": "session", "id": "alice" },
+  "note": "hey jasmin task X please read",
+  "delivery": { "state": "delivered", "wokeAt": "$DELIV_TS", "consumedAt": null } }
+EOF
+items=$(node -e "console.log(JSON.stringify(require('$WATCHER').scanStalePending(10)))")
+echo "$items" | grep -q "delivered-15min" && _ok "scanStalePending 现在扫 delivered 状态(不再漏)" || _ng "delivered 仍被漏: $items"
+echo "$items" | grep -q "\"state\":\"delivered\"" && _ok "结果带 state 字段(便于告警文案区分)" || _ng "state 字段缺"
+
+# --- Case 10: 告警文案区分 pending vs delivered ---
+echo "--- Case 10: 告警文案区分 pending vs delivered ---"
+r=$(node "$WATCHER" sweep 2>&1)
+# alice 应收到告警(jasmin 的信封 from=alice)
+latest=$(ls -t "$CREW_STATE/inbox/alice"/*.json 2>/dev/null | head -1)
+if [ -n "$latest" ]; then
+  grep -q "已送到但对方没消费\|REPL 没跑 crew inbox" "$latest" \
+    && _ok "delivered 告警文案说'已送到但对方没消费'" \
+    || _ng "告警文案未区分 delivered 语义: $(cat $latest)"
+else
+  _ng "alice 未收到 delivered 告警"
+fi
+
 echo
 echo "=== crew-watcher.test.sh: $pass / $total pass, $fail fail ==="
 [ "$fail" -eq 0 ]

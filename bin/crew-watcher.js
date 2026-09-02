@@ -56,7 +56,11 @@ function saveState(s) {
   } catch (_) {}
 }
 
-// 扫 inbox 找 stale pending 信封:{ sess, id, ts, from, note, ageMin }
+// 扫 inbox 找"未消费"信封(pending 或 delivered 都算 stale;acked 已消费不管)。
+// 2026-09-02 修:之前只扫 pending,漏了 delivered —— 但自从 crew send 默认 wake(6433b07)后,
+// 信封一秒就 pending→delivered,watcher 从来看不见"送达但没读"最该催的态,导致 backend 派单
+// 44 分钟没读也没触发告警。语义上 delivered 才是"应告警"的关键态(pending 说明连 wake 都没做,
+// 那是发送端问题;delivered 说明消息已 wake 送到但对方 REPL 没跑 crew inbox 消费,是接收端问题)。
 function scanStalePending(staleMinThreshold) {
   const out = [];
   const inboxRoot = path.join(CREW_STATE, 'inbox');
@@ -69,11 +73,14 @@ function scanStalePending(staleMinThreshold) {
     try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')); } catch (_) { continue; }
     for (const f of files) {
       const e = readJSON(path.join(dir, f));
-      if (!e || !e.delivery || e.delivery.state !== 'pending') continue;
+      if (!e || !e.delivery) continue;
+      const st = e.delivery.state;
+      if (st !== 'pending' && st !== 'delivered') continue;   // acked 已消费 / 未知态 跳
       const ageMin = Math.floor((now - new Date(e.ts).getTime()) / 60000);
       if (ageMin < staleMinThreshold) continue;
       out.push({
         toSession: sess, id: e.id, ts: e.ts, ageMin,
+        state: st,   // 传下去让告警文本区分"没唤醒"vs"送到但没读"
         from: e.from || { kind: 'unknown', id: '' },
         note: (e.note || '').slice(0, 120),
       });
@@ -161,12 +168,20 @@ function alertStale(items, state) {
       const it = gitems[0];
       const hb = heartbeatOf(it.toSession);
       const ctxHint = hb ? `ctxPct=${hb.ctxPct == null ? '?' : hb.ctxPct + '%'} paneIdle=${hb.paneIdle === null ? '?' : hb.paneIdle}` : '(无心跳)';
-      note = `[watcher · stale-inbox] 你 ${it.ageMin} 分钟前发给 ${it.toSession} 的消息(id=${it.id})还没被消费。` +
+      // state=pending → "还没唤醒"(发送端问题);state=delivered → "已送到但对方没读"(接收端问题)
+      const stateHint = it.state === 'delivered' ? '已送到但对方没消费(REPL 没跑 crew inbox)' : '还没被唤醒(发送端可能漏 wake)';
+      note = `[watcher · stale-inbox] 你 ${it.ageMin} 分钟前发给 ${it.toSession} 的消息(id=${it.id})${stateHint}。` +
              `对方当前状态:${ctxHint}。信封内容片段:"${it.note}${it.note.length >= 120 ? '…' : ''}"`;
     } else {
       const oldest = Math.max(...gitems.map((x) => x.ageMin));
       const targets = [...new Set(gitems.map((x) => x.toSession))];
-      note = `[watcher · stale-inbox 汇总] 你 ${gitems.length} 条消息 stale(最老 ${oldest} 分钟未消费)。` +
+      // 汇总里也带 state 分布,让接收方一眼看出多少是"没唤醒(pending)"多少是"送到没读(delivered)"
+      const nDelivered = gitems.filter((x) => x.state === 'delivered').length;
+      const nPending = gitems.filter((x) => x.state === 'pending').length;
+      const stateHint = nDelivered ? `${nDelivered} 已送到但对方没消费(REPL 没跑 crew inbox)` : '';
+      const stateHint2 = nPending ? `${nPending} 未唤醒(发送端可能漏 wake)` : '';
+      const combined = [stateHint, stateHint2].filter(Boolean).join(',');
+      note = `[watcher · stale-inbox 汇总] 你 ${gitems.length} 条消息 stale(最老 ${oldest} 分钟未消费;${combined})。` +
              `涉及会话:${targets.join(', ')}。逐条查:crew status <name> 或 crew inbox <name> --peek`;
     }
 

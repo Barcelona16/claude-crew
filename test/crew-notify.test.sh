@@ -104,6 +104,9 @@ node -e "const e=JSON.parse(require('fs').readFileSync('$latest'));process.exit(
   && _ok "crew send 写信封 from=eve" || _ng "crew send 信封不对"
 # 关键:默认应该也 wake(fake tmux 里 frank 存在 + idle → 应发 Enter)
 grep -q "Enter" "$sent6" && _ok "crew send 默认 wake(发 Enter)—— 根治漏 wake 坑" || _ng "crew send 未默认 wake"
+# 修 A:wake nudge 应该嵌信封 note 的 preview(不只是"跑 crew inbox")
+grep -q "hello from eve" "$sent6" && _ok "wake nudge 嵌信封 preview('hello from eve')—— 消费瞬间见任务" || _ng "wake nudge 未嵌 preview"
+grep -q "必读\|完事汇报" "$sent6" && _ok "wake nudge 含必读/汇报义务提示" || _ng "wake nudge 缺义务提示"
 # state 应升为 delivered(与 notify 一致)
 node -e "const e=JSON.parse(require('fs').readFileSync('$latest'));process.exit(e.delivery.state==='delivered'?0:1)" \
   && _ok "crew send 后 state=delivered" || _ng "state 未升 delivered"
