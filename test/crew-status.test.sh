@@ -30,6 +30,9 @@ T="$(mktemp -d /tmp/crew-status-test.XXXXXX)"
 trap 'rm -rf "$T"' EXIT
 
 export CREW_STATE="$T/state"
+# 2026-09-02:heartbeat 加了 claude_pid 判据,fake tmux 环境无真 claude 进程会全判 dead-repl,
+# 老 Case 期望 tmuxStatus=live。用 SKIP_CLAUDE_CHECK 绕过(生产不设,只测试用)
+export CREW_HEARTBEAT_SKIP_CLAUDE_CHECK=1
 mkdir -p "$CREW_STATE"
 
 # ---- fake tmux ----
@@ -176,6 +179,19 @@ PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="alice" FAKE_TMUX_PANE="$IDLE" node "$
 n=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$PEND')).length)" 2>/dev/null || echo ERR)
 # alice 那条 flush 成功也走(有心跳文件+tmux idle),ghost 那条 tmux dead 作废,队列应为 0
 [ "$n" = "0" ] && _ok "ghost 死会话条目作废 + alice 补发成功,队列清空" || _ng "队列剩 $n 条"
+
+# --- Case 15: dead-repl 判据(2026-09-02 P1 修)---
+# 场景:tmux session 活但 pane 里没 claude 子进程 → tmuxStatus=dead-repl
+echo "--- Case 15: dead-repl 判据 ---"
+touch "$CREW_STATE/deadrepl.tmux"
+# 不设 SKIP,让新逻辑生效(fake tmux + 无 ps 有 claude → 判 dead-repl)
+unset CREW_HEARTBEAT_SKIP_CLAUDE_CHECK
+PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="deadrepl" FAKE_TMUX_PANE="$IDLE_PANE" \
+  node "$CH" --once
+node -e "const j=JSON.parse(require('fs').readFileSync('$CREW_STATE/heartbeat/deadrepl.json'));process.exit(j.tmuxStatus==='dead-repl'&&j.claudePid===null?0:1)" \
+  && _ok "tmux 活但无 claude → tmuxStatus=dead-repl claudePid=null" || _ng "dead-repl 判据失效"
+# 复原 env
+export CREW_HEARTBEAT_SKIP_CLAUDE_CHECK=1
 
 echo
 echo "=== crew-status.test.sh: $pass / $total pass, $fail fail ==="

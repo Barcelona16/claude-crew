@@ -40,6 +40,14 @@ const ALERT_CTX = process.env.CREW_WATCHER_ALERT_CTX === '1';
 const ALERT_SILENT = process.env.CREW_WATCHER_ALERT_SILENT === '1';
 const ALERT_HB = process.env.CREW_WATCHER_ALERT_HB === '1';
 
+// C 方案:dead-repl 自动重建(2026-09-02 用户拍板)——检测心跳 tmuxStatus=dead-repl
+// 时,自动尝试 crew <name> 拉回(walk launcher fallback,保 --resume 历史)。
+const AUTOHEAL_DEAD_REPL = process.env.CREW_WATCHER_AUTOHEAL !== '0';
+// 冷却:同一会话 N 分钟只重建一次(默认 10min,防死循环)
+const AUTOHEAL_COOLDOWN_MIN = parseInt(process.env.CREW_WATCHER_AUTOHEAL_COOLDOWN_MIN || '10', 10);
+// 不自动重建的会话(元协调层 + crew-dev 自己 + 人类工作会话需人工确认)
+const AUTOHEAL_BLACKLIST = (process.env.CREW_WATCHER_AUTOHEAL_BLACKLIST || 'crew-dev,work').split(',').map(s => s.trim()).filter(Boolean);
+
 function readJSON(f) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (_) { return null; } }
 function nowMs() { return Date.now(); }
 
@@ -218,8 +226,61 @@ function sweepOnce() {
 
   // TODO(v2): ALERT_CTX / ALERT_SILENT / ALERT_HB —— 首版只上 stale,其它逐个填。
 
+  // C 方案:dead-repl 自动重建(2026-09-02 用户拍板)
+  if (AUTOHEAL_DEAD_REPL) {
+    const heal = autohealDeadRepl(state);
+    results.healed = heal.healed;
+    results.healSkipped = heal.skipped;
+    results.healFailed = heal.failed;
+  }
+
   saveState(state);
   return results;
+}
+
+// autohealDeadRepl:扫心跳文件找 tmuxStatus=dead-repl,过滤黑名单+冷却期,
+// 尝试 crew <name> 拉回(launcher 会走 fallback 众数 backend/key + --resume 保历史)。
+// 每次重建咚咚告警,可控可审计。
+function autohealDeadRepl(state) {
+  const out = { healed: 0, skipped: 0, failed: 0 };
+  const hbDir = path.join(CREW_STATE, 'heartbeat');
+  let files = [];
+  try { files = fs.readdirSync(hbDir).filter((f) => f.endsWith('.json') && !f.startsWith('heartbeat.')); } catch (_) { return out; }
+  state.healed = state.healed || {};  // { name: alerteredAt ISO } —— 冷却记忆
+  const nowMsVal = nowMs();
+  const cooldownMs = AUTOHEAL_COOLDOWN_MIN * 60 * 1000;
+  for (const f of files) {
+    const name = f.replace(/\.json$/, '');
+    if (AUTOHEAL_BLACKLIST.indexOf(name) >= 0) continue;
+    const hb = readJSON(path.join(hbDir, f));
+    if (!hb || hb.tmuxStatus !== 'dead-repl') continue;
+    // 冷却检查
+    const lastHeal = state.healed[name];
+    if (lastHeal && (nowMsVal - new Date(lastHeal).getTime()) < cooldownMs) {
+      out.skipped++;
+      continue;
+    }
+    // 尝试重建:crew <name>(launcher 会 --resume;若 state 丢会 fallback 众数)
+    // env CREW_BIN 可覆写(测试用 fake crew 记录调用);默认走 sibling bin/crew
+    const CREW = process.env.CREW_BIN || path.join(__dirname, '..', 'bin', 'crew');
+    let ok = false, stderr = '';
+    try {
+      const r = spawnSync(CREW, [name, '--no-tmux'], {
+        timeout: 15000, encoding: 'utf8',
+        env: { ...process.env, CREW_SESSION_NAME: 'crew-watcher' },
+        detached: true,   // 不等它跑,起了就走(claude REPL 起来是分钟级)
+      });
+      ok = r.status === 0 || r.status === null;  // detached 常 null
+      stderr = String(r.stderr || '').slice(0, 200);
+    } catch (e) { stderr = String(e.message || e); }
+    // 记冷却
+    state.healed[name] = new Date().toISOString();
+    // 咚咚告警
+    const note = `[watcher · autoheal] ${name} 检测到 dead-repl(REPL 挂了但 tmux 活),已尝试 crew ${name} 自动拉回。stderr 摘: ${stderr || '(空)'}`;
+    sendAlert({ kind: 'erp', id: 'wangqiwang1' }, note);
+    if (ok) out.healed++; else out.failed++;
+  }
+  return out;
 }
 
 function main() {

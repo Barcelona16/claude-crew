@@ -139,13 +139,40 @@ function sampleAll() {
     } else {
       const real = resolveTmux(name, tmuxNames);
       if (!real) {
-        record = { name, ts, tmux: null, tmuxStatus: 'dead', paneIdle: null, ctxPct: null };
+        record = { name, ts, tmux: null, tmuxStatus: 'dead', paneIdle: null, ctxPct: null, claudePid: null };
       } else {
-        const { idle, snapshot } = paneIdle(real);
-        record = {
-          name, ts, tmux: real, tmuxStatus: 'live',
-          paneIdle: idle, ctxPct: extractCtxPct(snapshot),
-        };
+        // 2026-09-02 P1 修:tmux session 活 ≠ claude REPL 活。20 会话 REPL 优雅退出
+        // (pane 底部残留 "Resume this session with: claude --resume ..." 就是证据),
+        // 但 tmux session/paneIdle 判据继续报 live/idle,前端/watcher 完全失灵。
+        // 权威判据:pane_pid → ps --ppid 找 bin/claude 子进程。无 → tmuxStatus=dead-repl
+        // (tmux 活但 REPL 死)+ paneIdle=null 不误导;ctx 也抓不到就 null。
+        // env CREW_HEARTBEAT_SKIP_CLAUDE_CHECK=1 绕过(测试用,fake tmux 里没真 claude 进程)
+        let claudePid = null;
+        if (process.env.CREW_HEARTBEAT_SKIP_CLAUDE_CHECK === '1') {
+          claudePid = -1;  // 假 pid 让下面 !claudePid 判 false 走 live 路径
+        } else {
+          const paneInfo = spawnSync('tmux', ['list-panes', '-t', real, '-F', '#{pane_pid}'], { timeout: 2000, encoding: 'utf8' });
+          if (paneInfo.status === 0) {
+            const panePid = String(paneInfo.stdout || '').trim().split('\n')[0];
+            if (panePid) {
+              const ps = spawnSync('ps', ['--no-headers', '-o', 'pid,cmd', '--ppid', panePid], { timeout: 2000, encoding: 'utf8' });
+              if (ps.status === 0) {
+                const m = String(ps.stdout || '').split('\n').find((l) => /bin\/claude/.test(l));
+                if (m) claudePid = parseInt(m.trim().split(/\s+/)[0], 10);
+              }
+            }
+          }
+        }
+        if (!claudePid) {
+          // tmux 活但 REPL 死 —— 会话僵尸态
+          record = { name, ts, tmux: real, tmuxStatus: 'dead-repl', paneIdle: null, ctxPct: null, claudePid: null };
+        } else {
+          const { idle, snapshot } = paneIdle(real);
+          record = {
+            name, ts, tmux: real, tmuxStatus: 'live',
+            paneIdle: idle, ctxPct: extractCtxPct(snapshot), claudePid,
+          };
+        }
       }
     }
     try { writeJSON(path.join(HB_DIR, name + '.json'), record); } catch (_) {}

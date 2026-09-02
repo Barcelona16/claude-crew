@@ -182,6 +182,50 @@ else
   _ng "alice 未收到 delivered 告警"
 fi
 
+# --- Case 11: autoheal dead-repl(方案 C · 2026-09-02 用户拍板)---
+echo "--- Case 11: autoheal dead-repl ---"
+# 造心跳文件模拟 dead-repl
+cat > "$CREW_STATE/heartbeat/heal-target.json" <<EOF
+{"name":"heal-target","ts":"$(date -Iseconds)","tmux":"crew-heal-target","tmuxStatus":"dead-repl","paneIdle":null,"ctxPct":null,"claudePid":null}
+EOF
+# 造黑名单目标(不该被 heal)
+cat > "$CREW_STATE/heartbeat/crew-dev.json" <<EOF
+{"name":"crew-dev","ts":"$(date -Iseconds)","tmux":"crew-crew-dev","tmuxStatus":"dead-repl","paneIdle":null,"ctxPct":null,"claudePid":null}
+EOF
+# fake crew 命令(简单 exit 0,记录被调)
+cat > "$FAKE_BIN/crew" <<'X'
+#!/usr/bin/env bash
+echo "[fake crew] called with: $*" >> "$FAKE_CREW_CALLS"
+exit 0
+X
+chmod +x "$FAKE_BIN/crew"
+FAKE_CALLS="$T/crew-calls.log"; : > "$FAKE_CALLS"
+CREW_WATCHER_ALERT_STALE=0 FAKE_CREW_CALLS="$FAKE_CALLS" \
+  CREW_WATCHER_AUTOHEAL_BLACKLIST=crew-dev,work \
+  CREW_BIN="$FAKE_BIN/crew" \
+  node "$WATCHER" sweep >/dev/null 2>&1
+grep -q "heal-target" "$FAKE_CALLS" && _ok "heal-target 被自动重建(crew heal-target 已调)" || _ng "autoheal 未触发:$(cat $FAKE_CALLS)"
+grep -q "crew-dev" "$FAKE_CALLS" && _ng "crew-dev 不该被 heal(黑名单)" || _ok "crew-dev 黑名单生效不 heal"
+
+# --- Case 12: autoheal 冷却期 ---
+echo "--- Case 12: autoheal 冷却期 ---"
+: > "$FAKE_CALLS"
+# 再跑一次,应该在冷却期内跳过
+CREW_WATCHER_ALERT_STALE=0 FAKE_CREW_CALLS="$FAKE_CALLS" \
+  CREW_WATCHER_AUTOHEAL_BLACKLIST=crew-dev,work \
+  CREW_BIN="$FAKE_BIN/crew" \
+  node "$WATCHER" sweep >/dev/null 2>&1
+[ ! -s "$FAKE_CALLS" ] && _ok "冷却期内不重复 heal(空调用)" || _ng "冷却未生效:$(cat $FAKE_CALLS)"
+
+# --- Case 13: autoheal 全关 ---
+echo "--- Case 13: autoheal 全关 ---"
+: > "$FAKE_CALLS"
+rm -f "$CREW_STATE/watcher-state.json"  # 清冷却状态
+CREW_WATCHER_ALERT_STALE=0 CREW_WATCHER_AUTOHEAL=0 FAKE_CREW_CALLS="$FAKE_CALLS" \
+  CREW_BIN="$FAKE_BIN/crew" \
+  node "$WATCHER" sweep >/dev/null 2>&1
+[ ! -s "$FAKE_CALLS" ] && _ok "AUTOHEAL=0 时不重建" || _ng "开关关不生效"
+
 echo
 echo "=== crew-watcher.test.sh: $pass / $total pass, $fail fail ==="
 [ "$fail" -eq 0 ]
