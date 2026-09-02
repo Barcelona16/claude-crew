@@ -57,6 +57,9 @@ node -e "const e=JSON.parse(require('fs').readFileSync('$fpath'));process.exit(e
 [ -f "$FEEDBACK_JSONL" ] && rec=$(tail -1 "$FEEDBACK_JSONL") && \
   echo "$rec" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const r=JSON.parse(d);process.exit(r.session==='alice'&&r.source==='session'&&r.sender==='bob'&&r.replyOut===false?0:1)})" \
   && _ok "feedback.jsonl 镜像 session=alice source=session sender=bob" || _ng "镜像不对: $rec"
+# 2026-09-02 [coding PR · comm-redesign]:镜像加 channel='crew-native' 标签
+echo "$rec" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const r=JSON.parse(d);process.exit(r.channel==='crew-native'?0:1)})" \
+  && _ok "镜像含 channel='crew-native'(drain 侧据此去重)" || _ng "channel 字段缺: $rec"
 
 # ---- Case 2: ack 消费 → acked + 归档 + ack 镜像 ----
 echo "--- Case 2: ack 消费 ---"

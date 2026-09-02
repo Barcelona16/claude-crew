@@ -96,6 +96,10 @@ function mirrorToFeedback(envelope, to, project) {
       // 扩展字段:面板老版忽略,新前端读它渲染黄绿。
       delivery: envelope.delivery,
       envelopeId: envelope.id,
+      // 2026-09-02 [coding PR 建议 · comm-redesign spec]:标 channel='crew-native',
+      // agent-bridge/feedback-drain.js 据此过滤(SendMessage 已直进 context,drain 再灌是重复消费)。
+      // 老 drain/前端不认此字段,当无标签处理,零破坏。
+      channel: 'crew-native',
     };
     fs.appendFileSync(FEEDBACK_JSONL, JSON.stringify(rec) + '\n');
     return true;
