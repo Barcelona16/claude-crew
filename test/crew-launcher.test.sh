@@ -315,6 +315,13 @@ else
 fi
 echo "$out" | grep -q "session-id" && _ok "无 node:spawn 仍正常起(argv 有 session-id)" || _ng "无 node spawn 异常:$out rc=$rc" ""
 
+# ---- Case 24: --name <会话名>(让 claude agentName = crew 会话名,SendMessage 寻址对齐)----
+echo "--- Case 24: --name 注入 ---"
+N="${TEST_PREFIX}-named"
+"$CS" set "$N" backend mock >/dev/null
+out=$("$CL" spawn --name "$N" --mode fg 2>&1)
+echo "$out" | grep -qF -- "--name $N" && _ok "argv 含 --name $N(agentName=会话名)" || _ng "argv 缺 --name $N:$out" ""
+
 echo
 echo "=== crew-launcher.test.sh: $pass / $total pass, $fail fail ==="
 [ "$fail" -eq 0 ]

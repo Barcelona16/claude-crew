@@ -204,6 +204,12 @@ build_claude_argv() {
   local -a argv=()
   # model
   [ -n "${BK_MODEL:-}" ] && argv+=( --model "$BK_MODEL" )
+  # 2026-09-03 --name <crew会话名>:让 claude 的 agentName = crew 会话名,而不是 harness 按 cwd
+  # 自动生成的 work-8d 之类。根治官方 SendMessage/ListAgents 寻址用的名字与 crew 会话名脱节:
+  # 之前 cwd=/work 的会话 agentName 全是 work-XX,发消息 to=work-8d,hook 按 to 记 inbox 就散落
+  # 到 inbox/work-8d 而非 inbox/<会话名>。加 --name 后 ListAgents 列出即会话名、to=会话名、
+  # hook 记 inbox/<会话名> 全对齐,收发方寻址一致。
+  argv+=( --name "$name" )
   # dangerously-skip-permissions(默认加,除非 conf 说别)
   case " ${BK_CLAUDE_FLAGS:-} " in
     *" --dangerously-skip-permissions "*) : ;;
