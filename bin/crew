@@ -814,6 +814,38 @@ cmd_addkey() {
   echo "现有 key 别名:"; cmd_keys | grep -v '== keys =='
 }
 
+cmd_install_hooks() {
+  # crew install-hooks [--force]  把仓 hooks/ 装到当前 git 仓的 .git/hooks/
+  # 已存在同名 hook 不覆盖(除非 --force)。装完后每次 commit 自动跑 post-commit hook
+  # 读 commit message 的 Notify-Session trailer / [TO:xxx] 头,自动 crew notify 相关会话。
+  local force=0
+  [ "${1:-}" = "--force" ] && force=1
+  local src_dir="$SCRIPT_DIR/../hooks"
+  [ -d "$src_dir" ] || die "hooks 目录不存在: $src_dir"
+  # 当前 git 仓位置(cwd 或 crew 仓)
+  local repo_root
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || die "当前不在 git 仓里,请 cd 到仓根后跑"
+  local dst_dir="$repo_root/.git/hooks"
+  mkdir -p "$dst_dir"
+  local installed=0 skipped=0
+  for src in "$src_dir"/*; do
+    [ -f "$src" ] || continue
+    local name; name=$(basename "$src")
+    local dst="$dst_dir/$name"
+    if [ -f "$dst" ] && [ "$force" != 1 ]; then
+      # 已存在:比较内容是否一致
+      if cmp -s "$src" "$dst"; then
+        log "$name 已装(内容一致)"; skipped=$((skipped+1))
+      else
+        log "$name 已存在但内容不同(未覆盖;要覆盖加 --force)"; skipped=$((skipped+1))
+      fi
+      continue
+    fi
+    cp "$src" "$dst" && chmod +x "$dst" && { log "装 $name → $dst"; installed=$((installed+1)); }
+  done
+  log "install-hooks: 装了 $installed 个,跳过 $skipped 个(仓根: $repo_root)"
+}
+
 cmd_doctor() {
   local fix=0
   [ "${1:-}" = "--fix" ] && fix=1
@@ -1364,6 +1396,7 @@ case "$CMD" in
   addkey|add-key) cmd_addkey "$@" ;;
   sync-models|syncmodels) cmd_sync_models "$@" ;;
   doctor)       cmd_doctor "$@" ;;
+  install-hooks) cmd_install_hooks "$@" ;;
   version)      cmd_version "$@" ;;
   switch)       cmd_switch "$@" ;;
   resume-prev)  cmd_resume_prev "$@" ;;

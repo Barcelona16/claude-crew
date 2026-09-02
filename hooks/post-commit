@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# post-commit hook — 从 commit message 里读 Notify-Session trailer 或 [TO:xxx] 头行,
+# 自动 crew notify 相关会话。commit 不受影响(hook 任何失败都不 block)。
+# 关闭:CREW_POST_COMMIT_NOTIFY=0
+# 依赖:$PATH 有 crew(可选,缺则静默 skip)
+set -u
+[ "${CREW_POST_COMMIT_NOTIFY:-1}" = "0" ] && exit 0
+command -v crew >/dev/null 2>&1 || exit 0
+
+# 拿 HEAD commit 完整 message + 短 hash + subject
+_hash=$(git rev-parse --short HEAD 2>/dev/null) || exit 0
+_msg=$(git log -1 --format='%B' HEAD 2>/dev/null) || exit 0
+_subject=$(git log -1 --format='%s' HEAD 2>/dev/null)
+
+# 收集要通知的会话名(去重):
+#   ① Notify-Session: <name>(git trailer,标准形式,多行支持)
+#   ② [TO:<name>] 出现在 subject 或 body 里(兼容现有习惯)
+declare -A _sessions=()
+while IFS= read -r line; do
+  if [[ "$line" =~ ^Notify-Session:\ *([A-Za-z][A-Za-z0-9_.-]*) ]]; then
+    _sessions["${BASH_REMATCH[1]}"]=1
+  fi
+done <<< "$_msg"
+# [TO:xxx] 头/中扫描
+while IFS= read -r m; do
+  n="${m#\[TO:}"; n="${n%%\]*}"
+  [[ "$n" =~ ^[A-Za-z][A-Za-z0-9_.-]*$ ]] && _sessions["$n"]=1
+done < <(printf '%s\n' "$_msg" | grep -oE '\[TO:[A-Za-z][A-Za-z0-9_.-]*\]')
+
+[ "${#_sessions[@]}" -eq 0 ] && exit 0
+
+_repo=$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "?")
+_note="[commit ${_hash} @ ${_repo}] ${_subject}"
+
+for sess in "${!_sessions[@]}"; do
+  # crew notify 失败不影响 commit,静默(stderr 存日志方便查)
+  crew notify "$sess" "$_note" >>"/tmp/post-commit-hook.log" 2>&1 || true
+done
+exit 0
