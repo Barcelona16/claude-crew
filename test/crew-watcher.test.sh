@@ -23,6 +23,9 @@ T="$(mktemp -d /tmp/crew-watcher.XXX)"
 trap 'rm -rf "$T"' EXIT
 export CREW_STATE="$T/state"
 mkdir -p "$CREW_STATE/inbox" "$CREW_STATE/heartbeat"
+# 2026-09-02 修 · 防测试污染生产咚咚:sendAlert 走 DRY 模式,只 log 不真发
+export CREW_WATCHER_DRY_ALERT=1
+export CREW_WATCHER_ALERT_LOG="$T/alerts.log"
 
 # fake tmux(watcher 走 crew notify → 需要 fake 免 spawn 真 tmux)
 FAKE_BIN="$T/fb"; mkdir -p "$FAKE_BIN"

@@ -104,25 +104,42 @@ function heartbeatOf(name) {
 
 // 送告警。发送方是 crew 会话 → crew notify;否则(erp 咚咚)→ send.js。
 // 静默失败(告警系统本身不能拖累主循环)。
+// 2026-09-02 修:env CREW_WATCHER_DRY_ALERT=1 时只 log 不真发(测试环境用,防污染生产咚咚)。
+// env CREW_WATCHER_SEND_JS 可覆写 send.js 路径(测试用 mock)。
 function sendAlert(target, note) {
+  // 2026-09-02:DRY 模式只影响 erp 咚咚(防测试污染 wangqiwang1 咚咚);
+  // session inbox 分支保留(测试还能断言信封落 alice inbox),同时也写 log 供测试审计。
+  const dry = process.env.CREW_WATCHER_DRY_ALERT === '1';
+  if (dry) {
+    try {
+      const logf = process.env.CREW_WATCHER_ALERT_LOG;
+      if (logf) fs.appendFileSync(logf, JSON.stringify({ ts: nowISO(), target, note: note.slice(0, 200) }) + '\n');
+    } catch (_) {}
+  }
   try {
     if (target.kind === 'session' && target.id) {
       // 复用 crew-notify.js:直接 spawn crew notify(不用 wake,避免告警轰炸;信封落 inbox,对方
       // 下次 idle 自然消费)
-      const CREW = path.join(__dirname, '..', 'bin', 'crew');
+      const CREW = process.env.CREW_BIN || path.join(__dirname, '..', 'bin', 'crew');
       spawnSync(CREW, ['notify', target.id, note, '--no-wake'], {
         timeout: 5000, env: { ...process.env, CREW_SESSION_NAME: 'crew-watcher' },
       });
       return true;
     }
     if (target.kind === 'erp' && target.id) {
-      // send.js 走咚咚私聊
-      const r = spawnSync('node', ['/work/agent-bridge/send.js', '--erp', target.id, note], { timeout: 5000 });
+      // DRY 时不真调 send.js,避免污染 wangqiwang1 咚咚(测试跑完的告警也不该外发)
+      if (dry) return true;
+      // send.js 走咚咚私聊(env override 测试用)
+      const SEND_JS = process.env.CREW_WATCHER_SEND_JS || '/work/agent-bridge/send.js';
+      const r = spawnSync('node', [SEND_JS, '--erp', target.id, note], { timeout: 5000 });
       return r.status === 0;
     }
   } catch (_) {}
   return false;
 }
+
+// nowISO 供 dry-alert 使用
+function nowISO() { return new Date().toISOString(); }
 
 // 告警 1:Stale Inbox
 // 通知发送者(from.id):你 X 分钟前发给 Y 的消息还没被消费;Y 现在 ctxPct=Z paneIdle=W。
