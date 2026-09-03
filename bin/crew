@@ -462,14 +462,31 @@ cmd_notify() {
 }
 
 cmd_inbox() {
-  # crew inbox <name> [--peek]
+  # crew inbox <name> [--peek] [--as <caller>]
   # 默认消费:走 crew-notify.js ack —— 回写 delivery.state=acked + 移到 consumed/ + 镜像 ack 到 feedback.jsonl。
   # --peek 只看不消费(直接 dump JSON/msg 文件,不改状态,不归档)。
+  # --as <caller> 显式指定调用者身份 · 默认取 $CREW_SESSION · 若 $CREW_SESSION 非空且 ≠ name 且未加 --as 越权
+  #   → 拒绝(P0 v8 修 · self-review 报'test-b 竟能 drain test-a inbox')。
+  #   兼容:无 CREW_SESSION 场景(本地手跑/CI)不校验通过。
   # 兼容:目录里既可能是新 .json 信封,也可能是老 .msg 纯文本(逐步淘汰,消费 rm 无 ack)。
   local name="$1"; shift
   local peek=0
-  [ "${1:-}" = "--peek" ] && peek=1
-  [ -z "$name" ] && die "usage: crew inbox <name> [--peek]"
+  local as=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --peek) peek=1; shift ;;
+      --as) as="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -z "$name" ] && die "usage: crew inbox <name> [--peek] [--as <caller>]"
+  # v8 身份校验:CREW_SESSION 非空 · caller = --as || CREW_SESSION · caller ≠ name → 拒绝
+  local caller="${as:-${CREW_SESSION:-}}"
+  if [ -n "$caller" ] && [ "$caller" != "$name" ]; then
+    echo "[crew inbox] denied: caller='$caller' cannot drain inbox of '$name' (identity mismatch)" >&2
+    echo "  hint: pass --as $name only when the caller legitimately owns that inbox (rare · 兜底场景)" >&2
+    return 1
+  fi
   local dir="$CREW_STATE/inbox/$name"
   [ -d "$dir" ] || { echo "(no messages)"; return 0; }
   if [ "$peek" = 1 ]; then
