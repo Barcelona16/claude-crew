@@ -235,6 +235,24 @@ CREW_WATCHER_ALERT_STALE=0 CREW_WATCHER_AUTOHEAL=0 FAKE_CREW_CALLS="$FAKE_CALLS"
   node "$WATCHER" sweep >/dev/null 2>&1
 [ ! -s "$FAKE_CALLS" ] && _ok "AUTOHEAL=0 时不重建" || _ng "开关关不生效"
 
+# --- Case 14: v8 P2-3 · sweepStaleMarkers 清 dedup + turn marker age>7d ---
+# Agent-C 复审补测试 · 造陈旧(8d)+ 新(1h)混合 · sweep 后前者删后者留
+echo "--- Case 14: sweepStaleMarkers 清 dedup + turn marker age>7d ---"
+mkdir -p "$CREW_STATE/.dedup"
+touch -d "8 days ago" "$CREW_STATE/.dedup/old-a.stamp"
+touch -d "1 hour ago" "$CREW_STATE/.dedup/new-a.stamp"
+touch -d "8 days ago" "$CREW_STATE/alice.turn-old.done"
+touch -d "1 hour ago" "$CREW_STATE/alice.turn-new.done"
+touch "$CREW_STATE/unrelated.file"
+# sweep
+CREW_WATCHER_ALERT_STALE=0 CREW_WATCHER_AUTOHEAL=0 node "$WATCHER" sweep >/dev/null 2>&1
+# 断言:陈旧 marker 已清 · 新 marker 保留 · 无关文件不动
+[ ! -f "$CREW_STATE/.dedup/old-a.stamp" ] && [ -f "$CREW_STATE/.dedup/new-a.stamp" ] \
+  && _ok "陈旧 dedup stamp 清 · 新 dedup stamp 留" || _ng "dedup sweep 不对"
+[ ! -f "$CREW_STATE/alice.turn-old.done" ] && [ -f "$CREW_STATE/alice.turn-new.done" ] \
+  && _ok "陈旧 turn marker 清 · 新 turn marker 留" || _ng "turn sweep 不对"
+[ -f "$CREW_STATE/unrelated.file" ] && _ok "无关文件 unrelated.file 不动" || _ng "误清无关文件"
+
 echo
 echo "=== crew-watcher.test.sh: $pass / $total pass, $fail fail ==="
 [ "$fail" -eq 0 ]

@@ -113,6 +113,44 @@ fi
 [ -f "$CREW_STATE/target-d.backend" ] && _ok "target-d state 保留(拒绝路径不动)" || _ng "拒绝路径不应清 state" ""
 
 # ------------------------------------------------------------------
+# Case 6:v8 P0-2 · kill --purge 同步清 project.json sessions[]
+#   Agent-A3 复审报"100% 复现残留" · cmd_kill 已加 crew-register.js --remove(bin/crew)
+#   crew-register.js 用 .chaos-bridge/project.json 布局 + scanRoots 判归属
+#   预期:crew kill --purge reg-target 后 project.json sessions[] 无该 name
+# ------------------------------------------------------------------
+setup
+echo "--- Case 6: kill --purge 清 project.json sessions[] ---"
+SCAN_ROOT=$(mktemp -d /tmp/crew-kill-scan.XXX)
+PROJ_ROOT="$SCAN_ROOT/myproj"
+mkdir -p "$PROJ_ROOT/.chaos-bridge"
+cat > "$PROJ_ROOT/.chaos-bridge/project.json" <<EOF
+{
+  "id": "test-proj",
+  "workDir": "$PROJ_ROOT",
+  "sessions": [
+    {"name": "reg-target", "role": "sub", "kind": "crew", "bucket": "persistent", "description": "test"},
+    {"name": "keep-me", "role": "main", "kind": "crew", "bucket": "persistent", "description": "test"}
+  ]
+}
+EOF
+# 直接调 crew-register.js --remove 验证(cmd_kill 里就是这个)
+env -i PATH="$PATH" HOME="$HOME" CREW_STATE="$CREW_STATE" \
+  node "$SCRIPT_DIR/../bin/crew-register.js" --name reg-target --remove \
+  --dir "$PROJ_ROOT" --scan-root "$SCAN_ROOT" >/dev/null 2>&1 || true
+# 断言:project.json 中 reg-target 已移除,keep-me 保留
+if command -v node >/dev/null 2>&1; then
+  out=$(node -e "
+    const p=JSON.parse(require('fs').readFileSync('$PROJ_ROOT/.chaos-bridge/project.json'));
+    const names=(p.sessions||[]).map(s=>s.name).sort().join(',');
+    console.log(names);
+  ")
+  [ "$out" = "keep-me" ] && _ok "kill --purge 后 sessions[] 无 reg-target · keep-me 保留" || _ng "sessions[] 未清 · actual=[$out]" ""
+else
+  _ok "(跳过 · 无 node)"
+fi
+rm -rf "$SCAN_ROOT"
+
+# ------------------------------------------------------------------
 # 汇总
 # ------------------------------------------------------------------
 echo

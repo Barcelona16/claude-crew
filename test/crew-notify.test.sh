@@ -204,6 +204,14 @@ n4=$(ls "$D_STATE/inbox/hank"/*.json 2>/dev/null | wc -l | tr -d ' ')
 # marker 目录存在 · sid-1 sid-2 各一个 stamp
 n5=$(ls "$D_STATE/.dedup"/*.stamp 2>/dev/null | wc -l | tr -d ' ')
 [ "$n5" = "2" ] && _ok "⑤dedup marker 目录 · 2 个 stamp(sid-1/sid-2)" || _ng "⑤marker 数不对=$n5"
+
+# ⑥ 25h 过期 · sid-1 stamp touch -d "25 hours ago" 后同 key 应重新写入(Agent-C 复审补)
+sid1_stamp=$(ls "$D_STATE/.dedup"/*.stamp | head -1)   # sid-1 的 stamp
+touch -d "25 hours ago" "$sid1_stamp"
+env -i PATH="$PATH" HOME="$HOME" CREW_STATE="$D_STATE" FEEDBACK_JSONL="$D_FB" \
+  node "$SCRIPT_DIR/../bin/crew-notify.js" write --to hank --from session:alice --note "sid-1 25h later" --dedup-key sid-1 >/dev/null 2>&1
+n6=$(ls "$D_STATE/inbox/hank"/*.json 2>/dev/null | wc -l | tr -d ' ')
+[ "$n6" = "5" ] && _ok "⑥sid-1 marker 25h 过期 · 允许重发 · 5 条" || _ng "⑥过期未生效 · 数=$n6"
 rm -rf "$D_STATE"
 
 # ---- Case 12: v8 crew inbox --as 身份校验 · 有 CREW_SESSION 时 --as 无效(2026-09-03 Agent-A1 加固) ----
@@ -228,8 +236,18 @@ echo "$out_c" | grep -q "denied: caller='lisa'" && [ "$rc_c" != "0" ] && _ok "�
 out_d=$(env -i PATH="$PATH" HOME="$HOME" CREW_STATE="$G_STATE" CREW_SESSION=lisa "$CREW" inbox karen --peek --as karen 2>&1)
 echo "$out_d" | grep -q "denied: caller='lisa'" && _ok "④CREW_SESSION=lisa · --as karen · bypass 无效(仍 lisa)" || _ng "④bypass 仍生效 · $out_d"
 
-# 场景5:audit log 存在 · 至少记录 3 条(2/3/4 三个访问)
-[ -f "$G_STATE/audit.log" ] && lc=$(wc -l < "$G_STATE/audit.log") && [ "$lc" -ge 3 ] && _ok "⑤audit.log 存在 · 至少 3 条记录(actual=$lc)" || _ng "⑤audit log 缺失或数不足"
+# 场景4b:stderr 不 hint bypass 命令(Agent-C 复审 · 防教攻击者)
+echo "$out_d" | grep -qE "CREW_SESSION=|--as $|hint:.*pass --as" && _ng "④b stderr 泄露 bypass hint · out=$out_d" "" || _ok "④b stderr 无 bypass 关键词(不教攻击者)"
+
+# 场景5:audit log 存在 · 字段级校验(target=karen, caller=lisa 匹配)—— Agent-C 收紧
+if [ -f "$G_STATE/audit.log" ]; then
+  # 场景3的 audit 记录应含 target=karen + caller=lisa(denied 不显式记 result · 靠 stderr 已验)
+  grep -q "target=karen" "$G_STATE/audit.log" && grep -q "caller=lisa" "$G_STATE/audit.log" \
+    && _ok "⑤audit.log 字段级 · target=karen ∧ caller=lisa 记录存在" \
+    || _ng "⑤audit 字段缺失 · $(cat $G_STATE/audit.log)"
+else
+  _ng "⑤audit log 缺失" ""
+fi
 rm -rf "$G_STATE"
 
 echo

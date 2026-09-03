@@ -322,6 +322,20 @@ N="${TEST_PREFIX}-named"
 out=$("$CL" spawn --name "$N" --mode fg 2>&1)
 echo "$out" | grep -qF -- "--name $N" && _ok "argv 含 --name $N(agentName=会话名)" || _ng "argv 缺 --name $N:$out" ""
 
+# ---- Case 25: v8 P4 · launcher-argv.log dump 备排查身份错位坑(Agent-C 复审补) ----
+echo "--- Case 25: launcher-argv.log 生成 ---"
+N="${TEST_PREFIX}-arglog"
+"$CS" set "$N" backend mock >/dev/null
+rm -f "$CREW_STATE/launcher-argv.log"
+"$CL" spawn --name "$N" --mode fg >/dev/null 2>&1 || true
+if [ -f "$CREW_STATE/launcher-argv.log" ]; then
+  # 断言含关键 argv:name= 匹配 + --session-id 关键字
+  grep -q "name=$N " "$CREW_STATE/launcher-argv.log" && _ok "launcher-argv.log 存在 · 含 name=$N" || _ng "argv-log 缺 name=$N" ""
+  grep -q -- "--session-id" "$CREW_STATE/launcher-argv.log" && _ok "argv-log 含 --session-id 关键 argv" || _ng "argv-log 缺 --session-id" ""
+else
+  _ng "launcher-argv.log 未生成" ""
+fi
+
 echo
 echo "=== crew-launcher.test.sh: $pass / $total pass, $fail fail ==="
 [ "$fail" -eq 0 ]

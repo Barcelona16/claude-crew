@@ -54,10 +54,26 @@
 |---|---|
 | `templates/comm-protocol.md` | v7 → v8 · 三通道决策树 · 加 SendMessage 主路径 |
 | `docs/specs/2026-09-02-comm-stable-final.md` | 加 §10 v8 note · 归档 v6/v7 判决错的根因(老 launcher 无 --name + claude 版本 <2.1.224)|
-| `/work/.crew-onboarding/CLAUDE.md` §2.0 + VERSION | 归 coding 域派单(我不擅改 agent-bridge 侧文档,crew send work 请派) |
+| `/work/.crew-onboarding/CLAUDE.md` §2.0 + VERSION | 直接改本机(direct 部署 · 不在 git 仓)· 下轮 crew stop+resume 生效 |
 | `CLAUDE.md`(域宪法) | §2a 阶段 2 交付更新为"v8 上线" |
 
-### 4.3 修坑清单
+**注**:`agent-bridge/CLAUDE.md` **不存在 §2.0** — 该仓库根 CLAUDE.md 是通用会话协议指向,通信协议权威在:
+1. `/work/.crew-onboarding/CLAUDE.md §2.0`(launcher 注入所有新会话)
+2. `/work/claude-crew/templates/comm-protocol.md`(launcher --append-system-prompt 每次注入)
+3. `agent-bridge/docs/specs/2026-09-02-comm-stable-final.md §10`(v8 归档)
+
+三处内容对齐,`agent-bridge/CLAUDE.md` 本身不重复通信协议段以避免多源分裂。
+
+### 4.3 dedup 语义(Agent-B 复审 · Round 3 补)
+
+Dedup 是 **hook 内部机制** · 不涉及跨通道自动合并:
+
+1. **只拦 hook 内部重触发** — Stop hook 传 `--dedup-key <self>.<sid>` 防同 turn 二次触发写重复 turn-done
+2. **cmd_send / cmd_notify 不自动注入 dedup-key** — 手动 crew send 的调用方按语义(比如"完事汇报")决定是否想合并,不代码强制
+3. **跨通道靠语义** — 手动 crew send X "完事汇报" + 同 turn Stop hook crew send X "[auto-done] ..." 会各落一条 · dedup 不合并
+4. **面板消费面** — messagesOf 遇 crew-native + crew-auto-done 同 turn 双展 · 不合并 · 用户凭 channel 徽章(💬 vs 🤖)识别
+
+### 4.4 修坑清单
 
 | 坑 | 修法 |
 |---|---|

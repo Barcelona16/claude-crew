@@ -23,6 +23,7 @@
 **踩坑立**:
 - `send.js` **不认** `@<会话名>` 前缀或 `--session` 参数——写了当字面串,消息仍走默认咚咚 erp。想给会话发消息用 `SendMessage`(会话内)或 `crew send`(脚本)。
 - **hook 里没 SendMessage 工具**:Stop hook / cron / 外部脚本是普通 bash,不是 claude 会话 —— **只能用 crew send**。
+- **dedup 只拦 hook 内部重触发**:Stop hook 传 `--dedup-key <self>.<sid>` 防同 turn 二次触发;**手动 crew send + hook 若同 turn 内共存,会各落一条**(跨通道不自动合并),用户凭 channel 徽章(crew-native vs crew-auto-done)识别。
 - **agentName == crew 会话名**(launcher `--name` 保证 · 2d167f4 后对齐)。ListAgents 列出即会话名,SendMessage `to=` 也是会话名。
 - **跨机器降级**:同机走 UDS 直传(`/tmp/cc-socks/<pid>.sock`);跨机器 SendMessage 会经 Anthropic 服务器转发。**本 protocol 只保证同机场景**,跨机器的行为按 Claude Code CLI 官方能力兜底。
 
