@@ -5,20 +5,29 @@
 
 ## 1. 我是谁
 
-**crew v2 重构主战场会话**,专职阶段 1:把"会话运行时"能力从 agent-bridge 迁进 crew 本体。
+**crew v2 重构主战场会话**,专职把"会话运行时"能力从 agent-bridge 迁进 crew 本体。
 - **model**:claude-opus-4-8(newkey)
 - **授权**:wangqiwang1 2026-09-01 拍板
 - **方案负责人**:wangqiwang1 · **协调层**:work 会话
-- **分支**:`feature/crew-v2`(测试与实现都在此)
+- **当前阶段**:阶段 1 **已完工**(2026-09-01 落地 in main),进阶段 2(v3.1 升级 2 SessionEnd/Stop hook 完成回执)
+- **分支**:阶段 2 开工时新起 `feature/stage2-hooks`(阶段 1 遗留分支归档 tag `stage1-history`)
 
-## 2. 阶段 1 交付物(3 天)
+## 2. 阶段 1 交付物(已完成 · 2026-09-01 落地 · 24/24 集成测试全过)
 
-1. `crew wake <name>` — 内建 drainNudge 完整 prompt + paneIdle 校验 + pending 队列(迁 `/work/agent-bridge/wake.js` 整套逻辑)
-2. `crew notify <name> "msg"` — send + wake 复合(`--no-wake` 关)
-3. `crew status <name>` — 心跳/ctxPct/tmux 状态/delivery ack
-4. `crew register <name> [--dir P]` — 拉起时自动跑,读 cwd 判归属,直接读写 project.json 的 sessions[]
-5. 心跳线程(node)— 每 60s tmux capture-pane 采样 → POST `http://127.0.0.1:18070/api/heartbeat`
-6. crew launcher `--resume` 失败自动清死 sid → fallback `--new`(F 缺口)
+| # | 交付物 | main 上 commit |
+|---|---|---|
+| 1 | `crew wake <name>` 内建 drainNudge + paneIdle + pending 队列 | `20c9ebe` feat(crew): crew wake 内建 — 迁 wake.js 整套 |
+| 2 | `crew notify <name> "msg"` + JSON 信封 + delivery ack | `8e8d8c9` feat(crew): crew notify + JSON 信封 + delivery ack |
+| 3 | `crew status <name>` 心跳/ctxPct/tmux 状态 | `4ce4c8c` feat(crew): 心跳线程 + crew status |
+| 4 | `crew register <name>` 读 cwd 原子写 project.json sessions[] | `033bdce` feat(crew v2): crew register |
+| 5 | 心跳线程 60s 采样 + **v3.1 升级 3 idle 自动 flush pending** | `4ce4c8c` + `4216596` feat(crew-heartbeat): 采样后顺手 flush pending |
+| 6 | crew launcher `--resume` 死 sid 自愈 fallback `--session-id` 新起 | `176bc4a` feat(crew-launcher): --resume 死 sid 内容自愈 |
+
+**验收证据**:`bash test/crew-integration.test.sh` 在 main 上 **24/24 pass**(集成 6 + 混沌 4 + 迁移 2)。work + wangqiwang1 2026-09-03 关档批准。
+
+## 2a. 阶段 2 交付物(v3.1 升级 2:SessionEnd/Stop hook 完成回执)
+
+进行中。spec 待写:hook 触发时机 / 回执 JSON 格式 / channel 选型 / 面板徽章 / 幂等去重(hook + prompt 完事汇报双写规避)。spec 定稿 crew send work 拍板后开工。域宪法 §3 硬约束沿用。
 
 ## 3. 硬约束(违反=拒合)
 
