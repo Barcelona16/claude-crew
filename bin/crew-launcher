@@ -260,6 +260,15 @@ build_claude_argv() {
   fi
   # policy(--append-system-prompt "$(cat FILE)")—— 通过 shell 展开,launcher 里用数组不能展开,写 wrapper 处理
   # 输出 argv 到 stdout(空格分隔,shell-quote 化,调用方 eval 或 array)
+  # 2026-09-03 v8 P2(Agent-A3 复审):dump argv 快照到 $CREW_STATE/launcher-argv.log
+  #   备排查 sendmsg-test-a/b argv 都成 test-b 之类的身份错位坑 · 只 append 不清 · 尽力不阻塞
+  if [ -d "${CREW_STATE:-}" ]; then
+    {
+      printf '%s spawn name=%s argv=[' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$name"
+      printf '%q ' "${argv[@]}"
+      printf ']\n'
+    } >> "$CREW_STATE/launcher-argv.log" 2>/dev/null || true
+  fi
   printf '%s\n' "${argv[@]}"
 }
 

@@ -70,7 +70,10 @@ function saveState(s) {
 // 44 分钟没读也没触发告警。语义上 delivered 才是"应告警"的关键态(pending 说明连 wake 都没做,
 // 那是发送端问题;delivered 说明消息已 wake 送到但对方 REPL 没跑 crew inbox 消费,是接收端问题)。
 // 2026-09-03 v8:拿 tmux live 会话列表,让 stale 扫过滤已 kill 的 toSession(避免骚扰咚咚)
-// 复用 crew-heartbeat.js 相同的 list-sessions 语义:crew-<name> 或 裸名都算 live。
+// 相比 crew-heartbeat.js:resolveTmux 里的 crew-<name> 优先精确匹配,
+// 这里**故意**用宽松:把 crew-<name> 前缀剥掉后 + 裸名都塞进 Set —— stale 过滤只需
+// "这个 toSession 是不是还有对应的 tmux(不管前缀)",找到就通过,找不到就跳过告警。
+// 双前缀 Set 语义更宽松是刻意选择(避免漏放行 adopt 场景)· 不抽 helper 避免破坏内聚。
 function listLiveSessions() {
   try {
     const r = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}'], { timeout: 3000, encoding: 'utf8' });
@@ -274,8 +277,41 @@ function sweepOnce() {
     results.healFailed = heal.failed;
   }
 
+  // 2026-09-03 v8 P2(Agent-A1 复审):清扫 dedup + turn marker · age > 7d unlink
+  // 长跑累积 · 无清扫会撑爆 state dir。用相同 cutoff(7d)与 alerted 记录同陈旧标准。
+  results.markerSwept = sweepStaleMarkers(7 * 24 * 60 * 60 * 1000);
+
   saveState(state);
   return results;
+}
+
+// 清 $CREW_STATE/.dedup/*.stamp + $CREW_STATE/*.turn-*.done · age > ageMs 的 unlink
+// 尽力清 · 单文件失败不阻塞下一个 · 返回 {dedup, turn} 计数供 status 显示
+function sweepStaleMarkers(ageMs) {
+  const cutoff = Date.now() - ageMs;
+  const out = { dedup: 0, turn: 0 };
+  // .dedup/*.stamp
+  const dedupDirPath = path.join(CREW_STATE, '.dedup');
+  try {
+    for (const f of fs.readdirSync(dedupDirPath)) {
+      if (!f.endsWith('.stamp')) continue;
+      const fp = path.join(dedupDirPath, f);
+      try {
+        if (fs.statSync(fp).mtimeMs < cutoff) { fs.unlinkSync(fp); out.dedup++; }
+      } catch (_) {}
+    }
+  } catch (_) { /* dir 不存在 · 首次跑 */ }
+  // <self>.turn-<sid>.done marker(Stop hook 幂等)
+  try {
+    for (const f of fs.readdirSync(CREW_STATE)) {
+      if (!/\.turn-.+\.done$/.test(f)) continue;
+      const fp = path.join(CREW_STATE, f);
+      try {
+        if (fs.statSync(fp).mtimeMs < cutoff) { fs.unlinkSync(fp); out.turn++; }
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return out;
 }
 
 // autohealDeadRepl:扫心跳文件找 tmuxStatus=dead-repl,过滤黑名单+冷却期,
