@@ -60,6 +60,7 @@
   .summary .sum-live b { color: #6ecc78; }
   .summary .sum-deadrepl b { color: #d4b054; }
   .summary .sum-dead b { color: #cc5555; }
+  .summary .sum-private b { color: #f0a04b; }
   .summary .sum-ctx b { color: #cc5555; }
   .empty { color: #4a4f5c; font-style: italic; font-size: 11px; padding: 3px 5px; }
   .err { background: #3b1a1a; color: #cc7e7e; padding: 6px 10px; border-radius: 3px;
@@ -188,10 +189,13 @@ function renderCard(s) {
   const statusWithAge = (s.status === 'dead-repl' || s.status === 'dead') && hbAge
     ? statusLabel + ' ' + hbAge : statusLabel;
 
-  const inbox = s.inbox || { pending: 0, delivered: 0, legacy: 0 };
-  // inbox 增强:最老 pending age + consumed 数
+  const inbox = s.inbox || { pending: 0, delivered: 0, legacy: 0, privatePending: 0, privateDelivered: 0 };
+  // inbox 增强:最老 pending age + consumed 数 + 咚咚私聊(v1.2 §5.2)
+  const privateTotal = (inbox.privatePending || 0) + (inbox.privateDelivered || 0);
+  const privateBadge = privateTotal
+    ? `<span title="source=private 咚咚私聊未消费 · pending=${inbox.privatePending} delivered=${inbox.privateDelivered}">· 📨 私聊 <b style="color:#f0a04b">${privateTotal}</b></span>` : '';
   const oldestBadge = inbox.oldestPendingAgeMin != null
-    ? `<span title="inbox 里最老未消费信封的等待时长">· 最老 <b>${inbox.oldestPendingAgeMin}min</b></span>` : '';
+    ? `<span title="inbox 里最老未消费信封的等待时长(使用 ageLabel 分段)">· 最老 <b>${ageLabel(new Date(Date.now() - inbox.oldestPendingAgeMin * 60000).toISOString()) || inbox.oldestPendingAgeMin + 'min'}</b></span>` : '';
   const consumedBadge = `<span title="历史 crew inbox 消费过的信封总数;0 = 该会话从没主动消费过(可能不用 crew v2 协议)">· 消费过 <b style="color:${inbox.consumed > 0 ? '#6ecc78' : '#cc5555'}">${inbox.consumed || 0}</b></span>`;
   const lastConsumeAge = inbox.lastConsumedTs ? ageLabel(inbox.lastConsumedTs) : null;
   const lastConsumeBadge = lastConsumeAge
@@ -201,6 +205,7 @@ function renderCard(s) {
     <span>· 未唤醒 <b>${inbox.pending}</b></span>
     <span>· 未消费 <b>${inbox.delivered}</b></span>
     ${inbox.legacy ? `<span>· .msg <b>${inbox.legacy}</b></span>` : ''}
+    ${privateBadge}
     ${oldestBadge}
     ${consumedBadge}
     ${lastConsumeBadge}
@@ -270,6 +275,7 @@ function renderSummary(sum) {
     sum.dead ? `<span class="sum-dead">🔴 dead <b>${sum.dead}</b></span>` : '',
     sum.totalPending ? `<span class="sum-pending">📮 未唤醒 <b>${sum.totalPending}</b></span>` : '',
     sum.totalDelivered ? `<span class="sum-delivered">📬 未消费 <b>${sum.totalDelivered}</b></span>` : '',
+    (sum.totalPrivatePending + sum.totalPrivateDelivered) ? `<span class="sum-private" title="全舰队 source=private 未消费私聊聚合">📨 私聊 <b>${(sum.totalPrivatePending || 0) + (sum.totalPrivateDelivered || 0)}</b></span>` : '',
     sum.ctxWarn ? `<span class="sum-ctx">🔥 ctx≥75% <b>${sum.ctxWarn}</b></span>` : '',
     `<span class="sum-autoheal">autoheal ${sum.autohealEnabled ? '<b style="color:#6ecc78">on</b>' : '<b style="color:#888">off</b>'}</span>`,
   ];

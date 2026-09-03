@@ -94,17 +94,21 @@ function readState(name, key) {
 // inbox 计数(与 crew-status 一致的分类)
 function readInboxCounts(name) {
   const dir = path.join(CREW_STATE, 'inbox', name);
+  const empty = { total: 0, pending: 0, delivered: 0, legacy: 0, oldestPendingAgeMin: null, consumed: 0, lastConsumedTs: null, privatePending: 0, privateDelivered: 0 };
   let entries = [];
-  try { entries = fs.readdirSync(dir); } catch (_) { return { total: 0, pending: 0, delivered: 0, legacy: 0, oldestPendingAgeMin: null, consumed: 0, lastConsumedTs: null }; }
+  try { entries = fs.readdirSync(dir); } catch (_) { return empty; }
   let pending = 0, delivered = 0, legacy = 0, oldestTs = null;
+  // 2026-09-03 U2 · v1.2 §5.2:私聊 pending/delivered 分类计数
+  let privatePending = 0, privateDelivered = 0;
   const now = Date.now();
   for (const f of entries) {
     if (f === 'consumed') continue;
     if (f.endsWith('.json')) {
       const env = readJSON(path.join(dir, f));
       if (env && env.delivery) {
-        if (env.delivery.state === 'pending') pending++;
-        else if (env.delivery.state === 'delivered') delivered++;
+        const isPrivate = env.source === 'private' || (env.from && env.from.kind === 'private');
+        if (env.delivery.state === 'pending') { pending++; if (isPrivate) privatePending++; }
+        else if (env.delivery.state === 'delivered') { delivered++; if (isPrivate) privateDelivered++; }
         if (env.ts && ['pending', 'delivered'].includes(env.delivery.state) && (!oldestTs || env.ts < oldestTs)) oldestTs = env.ts;
       }
     } else if (f.endsWith('.msg')) legacy++;
@@ -126,7 +130,7 @@ function readInboxCounts(name) {
     }
   } catch (_) {}
   const oldestPendingAgeMin = oldestTs ? Math.floor((now - new Date(oldestTs).getTime()) / 60000) : null;
-  return { total: pending + delivered + legacy, pending, delivered, legacy, oldestPendingAgeMin, consumed, lastConsumedTs };
+  return { total: pending + delivered + legacy, pending, delivered, legacy, oldestPendingAgeMin, consumed, lastConsumedTs, privatePending, privateDelivered };
 }
 
 function readPendingNudges(name) {
@@ -338,6 +342,9 @@ function handleState(req, res, u) {
     dead: sessions.filter((s) => s.status === 'dead').length,
     totalPending: sessions.reduce((a, s) => a + (s.inbox && s.inbox.pending || 0), 0),
     totalDelivered: sessions.reduce((a, s) => a + (s.inbox && s.inbox.delivered || 0), 0),
+    // 2026-09-03 U2 · v1.2 §5.2:全舰队私聊未消费聚合
+    totalPrivatePending: sessions.reduce((a, s) => a + (s.inbox && s.inbox.privatePending || 0), 0),
+    totalPrivateDelivered: sessions.reduce((a, s) => a + (s.inbox && s.inbox.privateDelivered || 0), 0),
     ctxWarn: sessions.filter((s) => s.ctxPct >= 85).length,  // ctx 快满预警
     autohealEnabled: process.env.CREW_WATCHER_AUTOHEAL === '1',
   };

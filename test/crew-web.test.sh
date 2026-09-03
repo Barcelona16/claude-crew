@@ -228,6 +228,37 @@ echo "$data" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{
   && _ok "/api/state 结构正常 sessions=2" || _ng "/api/state 输出异常: $(echo $data | head -c 200)"
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
 
+# ---- Case 10: v1.2 U2 · source=private 分类计数 ----
+echo "--- Case 10: privatePending / privateDelivered 字段 ---"
+# 加 1 条 private pending + 1 条 private delivered
+cat > "$CREW_STATE/inbox/alice/0004-priv-p.json" <<'JSON'
+{ "id": "p1", "ts": "2026-09-03T14:00:00.000Z",
+  "from": {"kind":"private","id":"wangqiwang1"},
+  "note": "hey", "source": "private",
+  "delivery": {"state":"pending","wokeAt":null,"consumedAt":null} }
+JSON
+cat > "$CREW_STATE/inbox/alice/0005-priv-d.json" <<'JSON'
+{ "id": "p2", "ts": "2026-09-03T14:01:00.000Z",
+  "from": {"kind":"private","id":"wangqiwang1"},
+  "note": "yo", "source": "private",
+  "delivery": {"state":"delivered","wokeAt":"x","consumedAt":null} }
+JSON
+node -e "
+const w=require('$CWEB');
+const c=w.readInboxCounts('alice');
+process.exit(c.privatePending===1 && c.privateDelivered===1 ? 0 : 1)
+" && _ok "readInboxCounts privatePending=1 privateDelivered=1" || _ng "私聊分类不对"
+
+# summary 聚合覆盖
+PORT2=$((30000 + RANDOM % 5000))
+CREW_WEB_PORT=$PORT2 node "$CWEB" >"$T/web2.log" 2>&1 &
+PID2=$!
+sleep 0.8
+data=$(node -e "let d='';require('http').get('http://127.0.0.1:$PORT2/api/state',r=>{r.on('data',c=>d+=c);r.on('end',()=>console.log(d))}).on('error',()=>{})")
+echo "$data" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);const s=j.summary||{};process.exit((s.totalPrivatePending>=1 && s.totalPrivateDelivered>=1)?0:1)}catch(e){process.exit(1)}})" \
+  && _ok "summary.totalPrivatePending/Delivered 聚合" || _ng "summary 私聊字段缺"
+kill $PID2 2>/dev/null; wait $PID2 2>/dev/null
+
 echo
 echo "=== crew-web.test.sh: $pass / $total pass, $fail fail ==="
 [ "$fail" -eq 0 ]

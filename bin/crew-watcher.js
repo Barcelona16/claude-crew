@@ -33,6 +33,20 @@ const CREW_STATE = process.env.CREW_STATE ||
   path.join(process.env.HOME || '/tmp', '.local', 'share', 'claude-crew');
 const WATCHER_STATE_FILE = path.join(CREW_STATE, 'watcher-state.json');
 const STALE_MIN = parseInt(process.env.CREW_WATCHER_STALE_MIN || '10', 10);
+// 2026-09-03 U2 · v1.2 §5.1.1:会话级阈值 override 读 session-config/<name>.json
+// watcher.staleMinPrivate / watcher.staleMinSession · fallback 全局 STALE_MIN
+function loadSessionThreshold(name, kind) {
+  try {
+    const cfg = readJSON(path.join(CREW_STATE, 'session-config', name + '.json'));
+    if (cfg && cfg.watcher) {
+      if (kind === 'private' && Number.isFinite(cfg.watcher.staleMinPrivate)) return cfg.watcher.staleMinPrivate;
+      if (kind === 'session' && Number.isFinite(cfg.watcher.staleMinSession)) return cfg.watcher.staleMinSession;
+    }
+  } catch (_) {}
+  return null;
+}
+// 2026-09-03 U2 · v1.2 §5.1 A5:private 告警只写 log 不发告警 · 死循环兜底
+const PRIVATE_ALERT_LOG = path.join(CREW_STATE, 'watcher-alerts.log');
 
 // 开关:告警 1 默认开(首版核心),其它默认关(后续启用)
 const ALERT_STALE = process.env.CREW_WATCHER_ALERT_STALE !== '0';
@@ -115,11 +129,16 @@ function scanStalePending(staleMinThreshold) {
       if (!e || !e.delivery) continue;
       const st = e.delivery.state;
       if (st !== 'pending' && st !== 'delivered') continue;   // acked 已消费 / 未知态 跳
+      // 2026-09-03 U2 · v1.2 §5.1.1:会话级阈值 override(source=private/session 分别可配)
+      const source = e.source || (e.from && e.from.kind) || 'session';
+      const thresholdKind = source === 'private' ? 'private' : 'session';
+      const effectiveThreshold = loadSessionThreshold(sess, thresholdKind) ?? staleMinThreshold;
       const ageMin = Math.floor((now - new Date(e.ts).getTime()) / 60000);
-      if (ageMin < staleMinThreshold) continue;
+      if (ageMin < effectiveThreshold) continue;
       out.push({
         toSession: sess, id: e.id, ts: e.ts, ageMin,
         state: st,   // 传下去让告警文本区分"没唤醒"vs"送到但没读"
+        source,       // 2026-09-03 U2:private / session 分流
         from: e.from || { kind: 'unknown', id: '' },
         note: (e.note || '').slice(0, 120),
       });
@@ -181,7 +200,7 @@ function alertStale(items, state) {
   let fired = 0, skipped = 0;
   const now = new Date().toISOString();
 
-  // 先过滤:①已 alerted ②死信(age > MAX_STALE_MIN,默认 24h) ③watcher 自循环
+  // 先过滤:①已 alerted ②死信(age > MAX_STALE_MIN,默认 24h) ③watcher 自循环 ④private log-only
   const SCRIPT_ALIASES = new Set(['crew-send', 'crew-notify', 'crew-watcher']);
   const fresh = items.filter((it) => {
     if (state.alerted[it.id]) return false;
@@ -190,6 +209,16 @@ function alertStale(items, state) {
     // A · 斩 watcher 自循环:watcher 发的告警送到别会话,别会话不消费 → 别再产生新告警
     if (it.from && it.from.id === 'crew-watcher') { state.alerted[it.id] = now; return false; }
     if (it.toSession === 'crew-watcher') { state.alerted[it.id] = now; return false; }
+    // 2026-09-03 U2 · v1.2 §5.1 A5:from.kind=private 告警只写 log · 不进入 sendAlert 循环
+    // 避免死循环(watcher 送咚咚私聊告警又变新 private stale)
+    if (it.source === 'private' || (it.from && it.from.kind === 'private')) {
+      try {
+        fs.appendFileSync(PRIVATE_ALERT_LOG,
+          JSON.stringify({ ts: now, kind: 'private-stale', ...it }) + '\n');
+      } catch (_) {}
+      state.alerted[it.id] = now;
+      return false;
+    }
     return true;
   });
   skipped = items.length - fresh.length;

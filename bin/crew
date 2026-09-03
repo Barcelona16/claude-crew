@@ -432,6 +432,15 @@ cmd_web() {
   node "$CWEB" "$@"
 }
 
+cmd_v2_migration_audit() {
+  # crew v2-migration-audit  →  spec 2026-09-03 v1.2 §9.1
+  # 遍历 project.json sessions[] · 逐条检测心跳挂载 · 列未挂 + 最近活跃时间
+  # exit 0 = 全挂载(Day 14 sunset 可放行)· exit 1 = 有未挂载(阻塞 Phase 4)
+  command -v node >/dev/null 2>&1 || die "crew v2-migration-audit 需要 node"
+  local script_dir; script_dir="$(dirname "$0")"
+  node "$script_dir/crew-v2-migration-audit.js" "$@"
+}
+
 cmd_notify() {
   # crew notify <name> "msg" [--no-wake]  = send + wake 复合。
   # send 成功后自动 wake,wake 成功回写 delivery.wokeAt(mark-woke)。
@@ -1464,6 +1473,7 @@ case "$CMD" in
   status)       cmd_status "$@" ;;
   heartbeat)    cmd_heartbeat "$@" ;;
   web)          cmd_web "$@" ;;
+  v2-migration-audit) cmd_v2_migration_audit "$@" ;;
   inbox)        cmd_inbox "$@" ;;
   log)          cmd_log "$@" ;;
   models)       cmd_models "$@" ;;

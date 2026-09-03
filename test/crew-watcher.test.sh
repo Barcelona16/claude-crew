@@ -253,6 +253,68 @@ CREW_WATCHER_ALERT_STALE=0 CREW_WATCHER_AUTOHEAL=0 node "$WATCHER" sweep >/dev/n
   && _ok "陈旧 turn marker 清 · 新 turn marker 留" || _ng "turn sweep 不对"
 [ -f "$CREW_STATE/unrelated.file" ] && _ok "无关文件 unrelated.file 不动" || _ng "误清无关文件"
 
+# --- Case 15: v1.2 U2 · source=private 告警只写 log 不入 drain(A5) ---
+echo "--- Case 15: private log-only 无自循环 ---"
+export FAKE_TMUX_SESSIONS="$FAKE_TMUX_SESSIONS,mia"
+mkdir -p "$CREW_STATE/inbox/mia"
+OLD_PRIV_TS=$(date -u -d "-15 minutes" '+%Y-%m-%dT%H:%M:%S.000Z')
+cat > "$CREW_STATE/inbox/mia/0001-private.json" <<EOF
+{ "id": "priv-15min", "ts": "$OLD_PRIV_TS",
+  "from": { "kind": "private", "id": "wangqiwang1" },
+  "note": "hey mia 前端选模型",
+  "source": "private",
+  "delivery": { "state": "pending", "wokeAt": null, "consumedAt": null } }
+EOF
+# 清 alert 状态,避免历史 alerted 干扰
+rm -f "$CREW_STATE/watcher-state.json"
+rm -f "$CREW_STATE/watcher-alerts.log"
+before_wangqi=$(ls "$CREW_STATE/inbox/wangqiwang1"/*.json 2>/dev/null | wc -l)
+node "$WATCHER" sweep >/dev/null 2>&1
+after_wangqi=$(ls "$CREW_STATE/inbox/wangqiwang1"/*.json 2>/dev/null | wc -l)
+# 断言 1:wangqiwang1 inbox 无新增(不告警咚咚 · 避免自循环)
+[ "$before_wangqi" = "$after_wangqi" ] && _ok "private stale 不告警咚咚(避免自循环)" \
+  || _ng "wangqiwang1 收到 private 告警 · 自循环风险"
+# 断言 2:watcher-alerts.log 有 private-stale 记录
+grep -q "priv-15min" "$CREW_STATE/watcher-alerts.log" 2>/dev/null \
+  && _ok "private stale 写 watcher-alerts.log" \
+  || _ng "log 无 priv-15min 记录"
+# 断言 3:state alerted 里锁 priv-15min(下次不再重复处理)
+grep -q "priv-15min" "$CREW_STATE/watcher-state.json" \
+  && _ok "state alerted 锁 priv-15min" \
+  || _ng "state 未锁 · 下轮会重复"
+
+# --- Case 16: v1.2 U2 · 会话级阈值 override(§5.1.1) ---
+echo "--- Case 16: 会话级 staleMinPrivate override ---"
+export FAKE_TMUX_SESSIONS="$FAKE_TMUX_SESSIONS,nick"
+mkdir -p "$CREW_STATE/inbox/nick" "$CREW_STATE/session-config"
+# 造 15min 前的 private 信封
+cat > "$CREW_STATE/inbox/nick/0001.json" <<EOF
+{ "id": "nick-15min", "ts": "$OLD_PRIV_TS",
+  "from": { "kind": "private", "id": "wangqiwang1" },
+  "note": "test",
+  "source": "private",
+  "delivery": { "state": "pending", "wokeAt": null, "consumedAt": null } }
+EOF
+# 会话级配置 nick 私聊阈值 30min(15min 应不触发)
+cat > "$CREW_STATE/session-config/nick.json" <<'EOF'
+{ "watcher": { "staleMinPrivate": 30, "staleMinSession": 10 } }
+EOF
+rm -f "$CREW_STATE/watcher-state.json" "$CREW_STATE/watcher-alerts.log"
+node "$WATCHER" sweep >/dev/null 2>&1
+# 断言:nick 会话级阈值 30min 生效 · nick-15min 未达阈值 → log 里不应有
+grep -q "nick-15min" "$CREW_STATE/watcher-alerts.log" 2>/dev/null \
+  && _ng "会话级阈值 30min 未生效 · nick-15min 被 log(应被阈值 skip)" \
+  || _ok "nick 会话级阈值 30min 生效 · 15min 私聊未被 log"
+# 反向验证:调低到 5min 会 log
+cat > "$CREW_STATE/session-config/nick.json" <<'EOF'
+{ "watcher": { "staleMinPrivate": 5 } }
+EOF
+rm -f "$CREW_STATE/watcher-state.json" "$CREW_STATE/watcher-alerts.log"
+node "$WATCHER" sweep >/dev/null 2>&1
+grep -q "nick-15min" "$CREW_STATE/watcher-alerts.log" 2>/dev/null \
+  && _ok "阈值 5min 时 15min 私聊被 log(会话级 override 反向生效)" \
+  || _ng "阈值 5min 无效 · log 无 nick-15min"
+
 echo
 echo "=== crew-watcher.test.sh: $pass / $total pass, $fail fail ==="
 [ "$fail" -eq 0 ]
