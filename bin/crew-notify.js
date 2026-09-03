@@ -49,6 +49,9 @@ function parseArgs(argv) {
     // 2026-09-03 stage2 · v3.1 升级 2:允许指定 channel/kind,支持 crew-auto-done(Stop hook 回执)
     else if (a === '--channel') o.channel = argv[++i];  // 默认 'crew-native'
     else if (a === '--kind') o.kind = argv[++i];        // 默认无(write 时可选写入 envelope.kind)
+    // 2026-09-03 v8 · dedup:相同 dedup-key 24h 内跳过写入(Stop hook 用 session_id 作 key 防双发)。
+    // 兼容:无 --dedup-key 走原路径,零影响。marker 落 $CREW_STATE/.dedup/<key>.stamp。
+    else if (a === '--dedup-key') o.dedupKey = argv[++i];
   }
   return o;
 }
@@ -114,10 +117,43 @@ function mirrorToFeedback(envelope, to, project) {
   }
 }
 
+// 2026-09-03 v8 · dedup:相同 dedup-key 24h 内跳过重复写入。
+// marker 落 $CREW_STATE/.dedup/<safeKey>.stamp,内容 = ISO ts。
+// safeKey = sha256(key).slice(0,16) 避免文件名特殊字符,同一 key 稳定映射同 marker。
+// 到期(> 24h)自动允许重发,不删 marker 让下次写覆盖。
+const DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
+function dedupDir() { return path.join(CREW_STATE, '.dedup'); }
+function dedupMarker(key) {
+  const safe = crypto.createHash('sha256').update(String(key)).digest('hex').slice(0, 16);
+  return path.join(dedupDir(), safe + '.stamp');
+}
+function dedupHit(key) {
+  if (!key) return false;
+  const m = dedupMarker(key);
+  try {
+    const s = fs.statSync(m);
+    const ageMs = Date.now() - s.mtimeMs;
+    return ageMs < DEDUP_TTL_MS;
+  } catch (_) { return false; }
+}
+function dedupStamp(key) {
+  if (!key) return;
+  try {
+    fs.mkdirSync(dedupDir(), { recursive: true });
+    fs.writeFileSync(dedupMarker(key), nowISO() + '\n');
+  } catch (_) { /* stamp 失败不阻塞主流程 */ }
+}
+
 // ---- 子命令:write ----
 // 落权威副本 + 镜像 feedback.jsonl。stdout 打印信封文件路径。
+// 2026-09-03 v8:支持 --dedup-key,相同 key 24h 内跳过写入(退 0,stdout 空)。
 function cmdWrite(o) {
   if (!o.to || !o.note) return 1;
+  // dedup 检查(早退)· stdout 不打印路径 · 老调用方按 exit 0 处理(不阻塞流程)
+  if (o.dedupKey && dedupHit(o.dedupKey)) {
+    process.stderr.write('crew-notify: dedup hit key=' + o.dedupKey + ' (24h TTL)\n');
+    return 0;
+  }
   const from = parseFrom(o.from);
   fs.mkdirSync(inboxDir(o.to), { recursive: true });
   // 序号 = 现有 .json/.msg 文件数 + 1(与老 cmd_send 同风格)
@@ -141,6 +177,8 @@ function cmdWrite(o) {
     return 3;
   }
   mirrorToFeedback(envelope, o.to, o.project);
+  // v8 · 写入成功后 stamp marker(dedup-key 有效时)
+  if (o.dedupKey) dedupStamp(o.dedupKey);
   process.stdout.write(fpath + '\n');
   return 0;
 }
