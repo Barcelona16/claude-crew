@@ -95,8 +95,9 @@ function readState(name, key) {
 function readInboxCounts(name) {
   const dir = path.join(CREW_STATE, 'inbox', name);
   let entries = [];
-  try { entries = fs.readdirSync(dir); } catch (_) { return { total: 0, pending: 0, delivered: 0, legacy: 0 }; }
-  let pending = 0, delivered = 0, legacy = 0;
+  try { entries = fs.readdirSync(dir); } catch (_) { return { total: 0, pending: 0, delivered: 0, legacy: 0, oldestPendingAgeMin: null, consumed: 0, lastConsumedTs: null }; }
+  let pending = 0, delivered = 0, legacy = 0, oldestTs = null;
+  const now = Date.now();
   for (const f of entries) {
     if (f === 'consumed') continue;
     if (f.endsWith('.json')) {
@@ -104,10 +105,28 @@ function readInboxCounts(name) {
       if (env && env.delivery) {
         if (env.delivery.state === 'pending') pending++;
         else if (env.delivery.state === 'delivered') delivered++;
+        if (env.ts && ['pending', 'delivered'].includes(env.delivery.state) && (!oldestTs || env.ts < oldestTs)) oldestTs = env.ts;
       }
     } else if (f.endsWith('.msg')) legacy++;
   }
-  return { total: pending + delivered + legacy, pending, delivered, legacy };
+  // 2026-09-03 · 排查增强:consumed 目录数 + 最近消费 ts
+  let consumed = 0, lastConsumedTs = null;
+  try {
+    const consumedDir = path.join(dir, 'consumed');
+    for (const f of fs.readdirSync(consumedDir)) {
+      if (!f.endsWith('.json')) continue;
+      consumed++;
+      try {
+        const env = readJSON(path.join(consumedDir, f));
+        if (env && env.delivery && env.delivery.consumedAt &&
+            (!lastConsumedTs || env.delivery.consumedAt > lastConsumedTs)) {
+          lastConsumedTs = env.delivery.consumedAt;
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+  const oldestPendingAgeMin = oldestTs ? Math.floor((now - new Date(oldestTs).getTime()) / 60000) : null;
+  return { total: pending + delivered + legacy, pending, delivered, legacy, oldestPendingAgeMin, consumed, lastConsumedTs };
 }
 
 function readPendingNudges(name) {
@@ -311,11 +330,23 @@ function handleState(req, res, u) {
     if (mb) return 1;
     return (b.lastHeartbeat || '').localeCompare(a.lastHeartbeat || '');
   });
+  // 2026-09-03 · 顶部状态栏聚合(排查用)
+  const summary = {
+    total: sessions.length,
+    live: sessions.filter((s) => s.status === 'live').length,
+    deadRepl: sessions.filter((s) => s.status === 'dead-repl').length,
+    dead: sessions.filter((s) => s.status === 'dead').length,
+    totalPending: sessions.reduce((a, s) => a + (s.inbox && s.inbox.pending || 0), 0),
+    totalDelivered: sessions.reduce((a, s) => a + (s.inbox && s.inbox.delivered || 0), 0),
+    ctxWarn: sessions.filter((s) => s.ctxPct >= 85).length,  // ctx 快满预警
+    autohealEnabled: process.env.CREW_WATCHER_AUTOHEAL === '1',
+  };
   sendJSON(res, 200, {
     ts: new Date().toISOString(),
     port: PORT,
     crewState: CREW_STATE,
     feedbackJsonl: FEEDBACK_JSONL,
+    summary,
     sessions,
     keys: listKeys(),
     models: listAllModels(),

@@ -51,8 +51,16 @@
   .s-delivered .dot { color: #d4b054; }       /* 🟡 已唤醒未消费仍算未处理 */
   .s-acked .dot { color: #6ecc78; }           /* 🟢 */
   .s-stale .dot { color: #cc5555; }           /* 🔴 */
-  .badges { display: flex; gap: 8px; font-size: 11px; color: #7d8394; }
+  .badges { display: flex; gap: 8px; font-size: 11px; color: #7d8394; flex-wrap: wrap; }
   .badges b { color: #d4b054; }
+  .summary { background: #1c2028; border: 1px solid #2b303a; border-radius: 4px;
+             padding: 8px 12px; margin: 8px 0 14px; font-size: 12px;
+             color: #a0a5b3; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+  .summary b { color: #d4b054; }
+  .summary .sum-live b { color: #6ecc78; }
+  .summary .sum-deadrepl b { color: #d4b054; }
+  .summary .sum-dead b { color: #cc5555; }
+  .summary .sum-ctx b { color: #cc5555; }
   .empty { color: #4a4f5c; font-style: italic; font-size: 11px; padding: 3px 5px; }
   .err { background: #3b1a1a; color: #cc7e7e; padding: 6px 10px; border-radius: 3px;
          margin-bottom: 10px; font-size: 12px; }
@@ -66,6 +74,7 @@
   <button onclick="refresh()">🔄 手动刷新</button>
 </h1>
 <div id="err"></div>
+<div id="summary" class="summary"></div>
 <div class="grid" id="grid"></div>
 
 <script>
@@ -117,6 +126,17 @@ function formatTs(iso) {
   return (d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
+// delivery 时间线格式化(用于 title tooltip):ts → wokeAt → consumedAt
+function deliveryTimeline(m) {
+  const parts = [];
+  if (m.ts) parts.push('创建: ' + m.ts);
+  if (m.wokeAt) parts.push('唤醒: ' + m.wokeAt);
+  if (m.consumedAt) parts.push('消费: ' + m.consumedAt);
+  if (m.state) parts.push('state: ' + m.state);
+  if (m.channel) parts.push('channel: ' + m.channel);
+  return parts.join('\n');
+}
+
 function renderMsg(m, side) {
   // ackOf 是消费后的镜像空 note 记录,不作为独立卡片显示(避免噪音)
   if (m.ackOf) return '';
@@ -124,7 +144,8 @@ function renderMsg(m, side) {
   const arrow = side === 'in' ? '←' : '→';
   const peer = side === 'in' ? fromLabel(m.from) : esc(m.to);
   const ts = formatTs(m.ts);
-  return `<div class="msg ${cls}">
+  const tl = esc(deliveryTimeline(m));
+  return `<div class="msg ${cls}" title="${tl}">
     <span class="dot">${dot(cls)}</span>
     <span class="ts" title="${esc(m.ts || '')}">${ts}</span>
     <span class="from">${arrow}${peer}</span>
@@ -132,9 +153,25 @@ function renderMsg(m, side) {
   </div>`;
 }
 
+// 时长格式化:秒/分/时/天
+function ageLabel(iso) {
+  if (!iso) return '';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (isNaN(ms) || ms < 0) return '';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'min';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h';
+  return Math.floor(h / 24) + 'd';
+}
+
 function renderCard(s) {
-  const statusCls = s.status === 'live' ? 's-live' : (s.status === 'dead' ? 's-dead' : 's-unknown');
-  const cardCls = 'card' + (s.status === 'dead' ? ' dead' : '') +
+  const statusCls = s.status === 'live' ? 's-live' :
+                    (s.status === 'dead' ? 's-dead' :
+                     (s.status === 'dead-repl' ? 's-dead' : 's-unknown'));
+  const cardCls = 'card' + ((s.status === 'dead' || s.status === 'dead-repl') ? ' dead' : '') +
                   ((s.lastHeartbeat && Date.now() - new Date(s.lastHeartbeat).getTime() > 180 * 1000) ? ' stale' : '');
   const ctxCls = s.ctxPct == null ? '' : (s.ctxPct >= 90 ? 'danger' : (s.ctxPct >= 75 ? 'warn' : ''));
   const ctxTxt = s.ctxPct == null ? '' : s.ctxPct + '% ctx';
@@ -145,19 +182,36 @@ function renderCard(s) {
   const modelOpts = MODELS.map((m) => `<option value="${esc(m)}"${m === s.model ? ' selected' : ''}>${esc(m)}</option>`).join('');
   const keyOpts = KEYS.map((k) => `<option value="${esc(k)}"${k === s.key ? ' selected' : ''}>${esc(k).slice(0, 10)}${k.length > 10 ? '…' : ''}</option>`).join('');
 
+  // 状态徽章加持续时长:dead-repl/dead 多久 · 心跳多久前
+  const hbAge = ageLabel(s.lastHeartbeat);
+  const statusLabel = s.status || '?';
+  const statusWithAge = (s.status === 'dead-repl' || s.status === 'dead') && hbAge
+    ? statusLabel + ' ' + hbAge : statusLabel;
+
   const inbox = s.inbox || { pending: 0, delivered: 0, legacy: 0 };
+  // inbox 增强:最老 pending age + consumed 数
+  const oldestBadge = inbox.oldestPendingAgeMin != null
+    ? `<span title="inbox 里最老未消费信封的等待时长">· 最老 <b>${inbox.oldestPendingAgeMin}min</b></span>` : '';
+  const consumedBadge = `<span title="历史 crew inbox 消费过的信封总数;0 = 该会话从没主动消费过(可能不用 crew v2 协议)">· 消费过 <b style="color:${inbox.consumed > 0 ? '#6ecc78' : '#cc5555'}">${inbox.consumed || 0}</b></span>`;
+  const lastConsumeAge = inbox.lastConsumedTs ? ageLabel(inbox.lastConsumedTs) : null;
+  const lastConsumeBadge = lastConsumeAge
+    ? `<span title="上次消费时刻">· 最近消费 <b>${lastConsumeAge}前</b></span>` : '';
   const badges = `
     <span>inbox: <b>${s.inboxCount || 0}</b></span>
     <span>· 未唤醒 <b>${inbox.pending}</b></span>
     <span>· 未消费 <b>${inbox.delivered}</b></span>
     ${inbox.legacy ? `<span>· .msg <b>${inbox.legacy}</b></span>` : ''}
+    ${oldestBadge}
+    ${consumedBadge}
+    ${lastConsumeBadge}
     <span>· pending nudge <b>${s.pendingNudges || 0}</b></span>`;
 
   return `<div class="${cardCls}" data-name="${esc(s.name)}">
     <div class="head">
       <span class="name">${esc(s.name)}</span>
-      <span class="status ${statusCls}">${esc(s.status || '?')}</span>
+      <span class="status ${statusCls}" title="tmuxStatus + 已持续时长">${esc(statusWithAge)}</span>
       ${s.paneIdle === false ? '<span class="status s-unknown">busy</span>' : ''}
+      ${hbAge && s.status === 'live' ? `<span class="ctx" title="心跳最后更新">💓 ${hbAge}</span>` : ''}
       <span class="ctx ${ctxCls}">${ctxTxt}</span>
     </div>
     <div class="meta-row">
@@ -207,11 +261,27 @@ async function doAttach(btn) {
   );
 }
 
+function renderSummary(sum) {
+  if (!sum) return '';
+  const parts = [
+    `<span class="sum-total">共 <b>${sum.total || 0}</b> 会话</span>`,
+    `<span class="sum-live">🟢 live <b>${sum.live || 0}</b></span>`,
+    sum.deadRepl ? `<span class="sum-deadrepl">⚠️ dead-repl <b>${sum.deadRepl}</b></span>` : '',
+    sum.dead ? `<span class="sum-dead">🔴 dead <b>${sum.dead}</b></span>` : '',
+    sum.totalPending ? `<span class="sum-pending">📮 未唤醒 <b>${sum.totalPending}</b></span>` : '',
+    sum.totalDelivered ? `<span class="sum-delivered">📬 未消费 <b>${sum.totalDelivered}</b></span>` : '',
+    sum.ctxWarn ? `<span class="sum-ctx">🔥 ctx≥75% <b>${sum.ctxWarn}</b></span>` : '',
+    `<span class="sum-autoheal">autoheal ${sum.autohealEnabled ? '<b style="color:#6ecc78">on</b>' : '<b style="color:#888">off</b>'}</span>`,
+  ];
+  return parts.filter(Boolean).join(' · ');
+}
+
 async function refresh() {
   document.getElementById('err').innerHTML = '';
   try {
     const d = await fetchState();
     KEYS = d.keys || []; MODELS = d.models || [];
+    document.getElementById('summary').innerHTML = renderSummary(d.summary);
     document.getElementById('grid').innerHTML = (d.sessions || []).map(renderCard).join('');
     document.getElementById('refresh').textContent = '刷新: ' + new Date().toLocaleTimeString() + ` · ${d.sessions.length} 会话`;
     lastLoad = Date.now();
