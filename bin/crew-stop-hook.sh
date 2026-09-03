@@ -157,6 +157,11 @@
                      + "\n<!-- payload:" + JSON.stringify(payload) + " -->";
 
           // (5) 调 crew-notify.js write · argv 传参 message 任意字符安全
+          // 2026-09-03 v8:传 --dedup-key <self>.<session_id> 防跨通道双发
+          //   (会话手动 crew send '完事汇报' + hook 触发同一 turn 只发一条)
+          //   crew-notify.js write 侧命中 24h 内相同 key → 早退 exit 0 不再写
+          //   dedup-key 加 self 前缀避免跨会话相同 session_id 误撞(极小概率)
+          const dedupKey = self + "." + sid;
           try {
             cp.spawnSync(process.execPath, [
               CN, "write",
@@ -165,6 +170,7 @@
               "--note", note,
               "--channel", "crew-auto-done",
               "--kind", "turn-done",
+              "--dedup-key", dedupKey,
             ], { stdio: "ignore", timeout: 5000 });
           } catch (_) { /* 恒不抛 */ }
 
