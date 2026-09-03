@@ -46,6 +46,12 @@ function parseArgs(argv) {
     else if (a === '--id') o.id = argv[++i];
     else if (a === '--limit') o.limit = parseInt(argv[++i], 10);
     else if (a === '--project') o.project = argv[++i];
+    // 2026-09-03 stage2 · v3.1 升级 2:允许指定 channel/kind,支持 crew-auto-done(Stop hook 回执)
+    else if (a === '--channel') o.channel = argv[++i];  // 默认 'crew-native'
+    else if (a === '--kind') o.kind = argv[++i];        // 默认无(write 时可选写入 envelope.kind)
+    // 2026-09-03 v8 · dedup:相同 dedup-key 24h 内跳过写入(Stop hook 用 session_id 作 key 防双发)。
+    // 兼容:无 --dedup-key 走原路径,零影响。marker 落 $CREW_STATE/.dedup/<key>.stamp。
+    else if (a === '--dedup-key') o.dedupKey = argv[++i];
   }
   return o;
 }
@@ -96,10 +102,11 @@ function mirrorToFeedback(envelope, to, project) {
       // 扩展字段:面板老版忽略,新前端读它渲染黄绿。
       delivery: envelope.delivery,
       envelopeId: envelope.id,
-      // 2026-09-02 [coding PR 建议 · comm-redesign spec]:标 channel='crew-native',
-      // agent-bridge/feedback-drain.js 据此过滤(SendMessage 已直进 context,drain 再灌是重复消费)。
+      // 2026-09-02 [coding PR 建议 · comm-redesign spec]:channel 标签,agent-bridge/feedback-drain.js
+      // 据此过滤重复消费。默认 'crew-native'(SendMessage 镜像及一般 crew 会话间信封)。
+      // 2026-09-03 stage2 扩展:envelope.channel 覆盖(如 'crew-auto-done' 用于 Stop hook 自动回执)。
       // 老 drain/前端不认此字段,当无标签处理,零破坏。
-      channel: 'crew-native',
+      channel: envelope.channel || 'crew-native',
     };
     fs.appendFileSync(FEEDBACK_JSONL, JSON.stringify(rec) + '\n');
     return true;
@@ -110,10 +117,57 @@ function mirrorToFeedback(envelope, to, project) {
   }
 }
 
+// 2026-09-03 v8 · dedup:相同 dedup-key 24h 内跳过重复写入。
+// marker 落 $CREW_STATE/.dedup/<safeKey>.stamp,内容 = ISO ts。
+// safeKey = sha256(key).slice(0,16) 避免文件名特殊字符,同一 key 稳定映射同 marker。
+// 到期(> 24h)自动允许重发。
+//
+// 2026-09-03 P2 (Agent-A1 复审):TOCTOU 竞态修
+//   之前 dedupHit → dedupStamp 非原子,两 hook 并发通过 <24h 检查各写一条。
+//   改成 dedupTryStamp 一步到位:writeFileSync(flag: 'wx') 独占创建
+//     - 成功:说明 marker 之前不存在(或已过期被清)· 允许写主流程
+//     - EEXIST:已有 marker · 检查是否 <24h · 是则 hit(拒绝)· 否则 unlink 重试一次
+const DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
+function dedupDir() { return path.join(CREW_STATE, '.dedup'); }
+function dedupMarker(key) {
+  const safe = crypto.createHash('sha256').update(String(key)).digest('hex').slice(0, 16);
+  return path.join(dedupDir(), safe + '.stamp');
+}
+// P2 原子版:返回 true 表示"命中 dedup(拒绝主流程)"· false 表示"已获 stamp(允许并已写入)"
+// 一次系统调用完成 check+stamp,消除 TOCTOU。
+function dedupCheckAndStamp(key) {
+  if (!key) return false;   // 无 key = 兼容路径 · 不参与 dedup
+  const m = dedupMarker(key);
+  try { fs.mkdirSync(dedupDir(), { recursive: true }); } catch (_) {}
+  try {
+    // wx 独占创建 · 已存在则 EEXIST
+    fs.writeFileSync(m, nowISO() + '\n', { flag: 'wx' });
+    return false;   // 我创建的 · 允许
+  } catch (e) {
+    if (e && e.code !== 'EEXIST') return false;   // 未预料错误 · 保守放行(不阻塞)
+    // 已存在 marker · 校验 age
+    try {
+      const s = fs.statSync(m);
+      const ageMs = Date.now() - s.mtimeMs;
+      if (ageMs < DEDUP_TTL_MS) return true;   // hit
+      // 过期 · unlink + 重试独占创建
+      try { fs.unlinkSync(m); } catch (_) {}
+      try { fs.writeFileSync(m, nowISO() + '\n', { flag: 'wx' }); return false; }
+      catch (_) { return true; }   // 另一个进程刚 stamp · 视 hit(不重发)
+    } catch (_) { return false; }   // stat 失败 · 保守放行
+  }
+}
+
 // ---- 子命令:write ----
 // 落权威副本 + 镜像 feedback.jsonl。stdout 打印信封文件路径。
+// 2026-09-03 v8:支持 --dedup-key,相同 key 24h 内跳过写入(退 0,stdout 空)。
 function cmdWrite(o) {
   if (!o.to || !o.note) return 1;
+  // dedup 原子 check+stamp(P2 · 消 TOCTOU)· 命中则早退不写
+  if (o.dedupKey && dedupCheckAndStamp(o.dedupKey)) {
+    process.stderr.write('crew-notify: dedup hit key=' + o.dedupKey + ' (24h TTL)\n');
+    return 0;
+  }
   const from = parseFrom(o.from);
   fs.mkdirSync(inboxDir(o.to), { recursive: true });
   // 序号 = 现有 .json/.msg 文件数 + 1(与老 cmd_send 同风格)
@@ -126,6 +180,10 @@ function cmdWrite(o) {
     id, ts, from, note: o.note,
     delivery: { state: 'pending', wokeAt: null, consumedAt: null },
   };
+  // 2026-09-03 stage2:允许写入 channel/kind,支持 crew-auto-done(Stop hook 回执)。
+  // 未指定则 mirrorToFeedback fallback 到 'crew-native'。kind 常见值:'turn-done'。
+  if (o.channel) envelope.channel = o.channel;
+  if (o.kind) envelope.kind = o.kind;
   const fname = pad4(idx) + '-' + ts.replace(/[:.]/g, '-') + '.json';
   const fpath = path.join(inboxDir(o.to), fname);
   try { writeJSON(fpath, envelope); } catch (e) {
@@ -133,6 +191,7 @@ function cmdWrite(o) {
     return 3;
   }
   mirrorToFeedback(envelope, o.to, o.project);
+  // P2:stamp 已在 dedupCheckAndStamp 里做过(原子)· 这里不用再写
   process.stdout.write(fpath + '\n');
   return 0;
 }

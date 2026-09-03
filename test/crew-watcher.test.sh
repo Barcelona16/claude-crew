@@ -11,6 +11,9 @@
 #   ⑧ 7 天清理 alerted 记录(NaN 时间戳不再误伤)
 
 set -uo pipefail
+
+# 2026-09-03 v8:清 CREW_SESSION 避免继承污染 cmd_inbox 身份校验(测试跑本身不代表任何会话)
+unset CREW_SESSION 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREW="$SCRIPT_DIR/../bin/crew"
 WATCHER="$SCRIPT_DIR/../bin/crew-watcher.js"
@@ -41,6 +44,9 @@ exit 0
 X
 chmod +x "$FAKE_BIN/tmux"
 export PATH="$FAKE_BIN:$PATH"
+# 2026-09-03 v8:让 fake tmux 返测试用的全部 target 会话名(watcher stale 过滤 killed 会话
+# 需要 target 出现在 tmux list-sessions,否则视为已 kill 跳过告警,测试全挂)
+export FAKE_TMUX_SESSIONS="bob,alice,carol,dave,eric,charles,dan,eve,gina,hilda,ivy,jasmin"
 
 # 造一个 15 分钟前的 stale 信封(from=alice 发给 bob)
 OLD_TS=$(date -u -d "-15 minutes" '+%Y-%m-%dT%H:%M:%S.000Z')
@@ -228,6 +234,24 @@ CREW_WATCHER_ALERT_STALE=0 CREW_WATCHER_AUTOHEAL=0 FAKE_CREW_CALLS="$FAKE_CALLS"
   CREW_BIN="$FAKE_BIN/crew" \
   node "$WATCHER" sweep >/dev/null 2>&1
 [ ! -s "$FAKE_CALLS" ] && _ok "AUTOHEAL=0 时不重建" || _ng "开关关不生效"
+
+# --- Case 14: v8 P2-3 · sweepStaleMarkers 清 dedup + turn marker age>7d ---
+# Agent-C 复审补测试 · 造陈旧(8d)+ 新(1h)混合 · sweep 后前者删后者留
+echo "--- Case 14: sweepStaleMarkers 清 dedup + turn marker age>7d ---"
+mkdir -p "$CREW_STATE/.dedup"
+touch -d "8 days ago" "$CREW_STATE/.dedup/old-a.stamp"
+touch -d "1 hour ago" "$CREW_STATE/.dedup/new-a.stamp"
+touch -d "8 days ago" "$CREW_STATE/alice.turn-old.done"
+touch -d "1 hour ago" "$CREW_STATE/alice.turn-new.done"
+touch "$CREW_STATE/unrelated.file"
+# sweep
+CREW_WATCHER_ALERT_STALE=0 CREW_WATCHER_AUTOHEAL=0 node "$WATCHER" sweep >/dev/null 2>&1
+# 断言:陈旧 marker 已清 · 新 marker 保留 · 无关文件不动
+[ ! -f "$CREW_STATE/.dedup/old-a.stamp" ] && [ -f "$CREW_STATE/.dedup/new-a.stamp" ] \
+  && _ok "陈旧 dedup stamp 清 · 新 dedup stamp 留" || _ng "dedup sweep 不对"
+[ ! -f "$CREW_STATE/alice.turn-old.done" ] && [ -f "$CREW_STATE/alice.turn-new.done" ] \
+  && _ok "陈旧 turn marker 清 · 新 turn marker 留" || _ng "turn sweep 不对"
+[ -f "$CREW_STATE/unrelated.file" ] && _ok "无关文件 unrelated.file 不动" || _ng "误清无关文件"
 
 echo
 echo "=== crew-watcher.test.sh: $pass / $total pass, $fail fail ==="

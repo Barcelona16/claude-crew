@@ -267,6 +267,12 @@ cmd_kill() {
   "$CT" kill "$name"
   if [ "$purge" = 1 ]; then
     "$CS" clean "$name" --purge-transcript
+    # 2026-09-03 v8 P0(Agent-A3 复审):--purge 时同步清 project.json sessions[] 残留
+    # crew-register.js --remove 反向删,支持已有;不阻塞 kill 主流程,失败仅 warn。
+    if command -v node >/dev/null 2>&1 && [ -f "$CR" ]; then
+      node "$CR" --name "$name" --remove 2>&1 | sed 's/^/  [registry] /' || \
+        echo "[crew kill --purge] warn: registry remove '$name' failed (project.json 可能仍有残留)" >&2
+    fi
   else
     "$CS" clean "$name"
   fi
@@ -462,14 +468,48 @@ cmd_notify() {
 }
 
 cmd_inbox() {
-  # crew inbox <name> [--peek]
+  # crew inbox <name> [--peek] [--as <caller>]
   # 默认消费:走 crew-notify.js ack —— 回写 delivery.state=acked + 移到 consumed/ + 镜像 ack 到 feedback.jsonl。
   # --peek 只看不消费(直接 dump JSON/msg 文件,不改状态,不归档)。
+  # 身份校验(v8 P0 · Agent-A1 复审加固 2026-09-03):
+  #   - $CREW_SESSION **非空**:身份 = CREW_SESSION · --as **被忽略**(不允许 override · 防绕过)
+  #     · CREW_SESSION ≠ name → exit 1 拒绝 · stderr 不 hint bypass 命令(防教攻击者)
+  #   - $CREW_SESSION **为空**(本地手跑/CI):允许 --as 指定 caller · 无 --as 则不校验(兼容)
   # 兼容:目录里既可能是新 .json 信封,也可能是老 .msg 纯文本(逐步淘汰,消费 rm 无 ack)。
+  # audit(v8 P1):写 $CREW_STATE/audit.log 记 caller + name + 结果(--as 使用/拒绝都记)
   local name="$1"; shift
   local peek=0
-  [ "${1:-}" = "--peek" ] && peek=1
-  [ -z "$name" ] && die "usage: crew inbox <name> [--peek]"
+  local as=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --peek) peek=1; shift ;;
+      --as) as="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -z "$name" ] && die "usage: crew inbox <name> [--peek] [--as <caller>]"
+  # v8 身份校验:CREW_SESSION 非空 = 会话内(harness runtime)· 强制 caller = CREW_SESSION · --as 被忽略
+  # CREW_SESSION 空 = 本地脚本/CI(harness 外)· --as 才生效(兜底)
+  local caller
+  local audit_note=""
+  if [ -n "${CREW_SESSION:-}" ]; then
+    caller="$CREW_SESSION"
+    if [ -n "$as" ] && [ "$as" != "$caller" ]; then
+      audit_note="ignored --as=$as (CREW_SESSION overrides)"
+    fi
+  else
+    caller="$as"
+    [ -n "$as" ] && audit_note="via --as (no CREW_SESSION)"
+  fi
+  # audit log(尽力,不阻塞主流程)
+  local _audit="$CREW_STATE/audit.log"
+  [ -d "$CREW_STATE" ] && printf '%s inbox target=%s caller=%s peek=%s %s\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$name" "${caller:-<none>}" "$peek" "$audit_note" \
+    >> "$_audit" 2>/dev/null
+  if [ -n "$caller" ] && [ "$caller" != "$name" ]; then
+    echo "[crew inbox] denied: caller='$caller' cannot drain inbox of '$name'" >&2
+    return 1
+  fi
   local dir="$CREW_STATE/inbox/$name"
   [ -d "$dir" ] || { echo "(no messages)"; return 0; }
   if [ "$peek" = 1 ]; then

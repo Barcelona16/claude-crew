@@ -18,6 +18,9 @@
 #   M2 老 .msg 纯文本文件与新 JSON 信封混合消费不 crash
 
 set -uo pipefail
+
+# 2026-09-03 v8:清 CREW_SESSION 避免继承污染 cmd_inbox 身份校验(测试跑本身不代表任何会话)
+unset CREW_SESSION 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREW="$SCRIPT_DIR/../bin/crew"
 CN="$SCRIPT_DIR/../bin/crew-notify.js"

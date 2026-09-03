@@ -42,6 +42,8 @@
 
 Hook 触发时把这条 rec 写 target 会话 inbox(通过 `crew notify --no-wake` — 触发者会话可能正忙,不硬 nudge;或按 wake 策略自选)。
 
+**下述 schema 是设计意图**;**实际实现**出于向后兼容(不改 envelope 层字段布局,避免破坏老 drain/面板消费者),把结构化字段全塞进 `note` 里的 `<!-- payload:<JSON> -->` HTML 注释——**单一权威副本原则**,消费者按正则抠出 payload 解析(见下 §3.1)。
+
 ```json
 {
   "id": "<uuid>",
@@ -64,6 +66,30 @@ Hook 触发时把这条 rec 写 target 会话 inbox(通过 `crew notify --no-wak
 **选填**:trigger_id / transcript_snippet / turn_duration_ms / ctx_pct(能拿就填,拿不到不阻塞)
 
 **channel = `crew-auto-done`**(新枚举)——与 crew-native(SendMessage 镜像)、ding-outbound(咚咚外发)、external(外部写入)并列。feedback-drain 侧**跳过 crew-auto-done**(hook 触发的是通知,不是 drain 该消费的反馈),面板加徽章"🤖 auto-done"。
+
+### 3.1 实现细节(self-review 2026-09-03 P1-1 判决:改 spec 对齐实现)
+
+**Envelope 顶层字段**:实现里只写 `id / ts / from / note / delivery / channel / kind`(通过 `crew-notify.js write --channel crew-auto-done --kind turn-done` 落),**不写** trigger_id/session_id/cwd/reason/transcript_snippet 等结构化字段到顶层。
+
+**Note 结构**:
+```
+[auto-done] <self> turn 完成 · reason=<reason>
+<transcript_snippet 若有>
+<!-- payload:{"kind":"turn-done","self":"...","session_id":"...","cwd":"...","reason":"...","trigger_id":"<env.id 或 null>","transcript_snippet":"...","ts":"..."} -->
+```
+
+**消费者读法**(面板/agent-bridge/其他会话):
+```javascript
+const m = envelope.note.match(/<!-- payload:(.+?) -->/);
+const payload = m ? JSON.parse(m[1]) : null;
+```
+
+**为什么这样设计**:
+- Envelope 层保持与老 crew send 完全兼容(老 drain/前端不认多字段就当无视)
+- 结构化数据集中 payload 一处,避免"顶层字段 vs note 字符串"两份权威副本长期漂移
+- HTML 注释包裹让 markdown 渲染器(面板)自动隐藏 payload,人类只看到 `[auto-done] ...` 首行 + snippet
+
+**trade-off**:消费者要正则抠 payload · 但格式稳定(有 U10 单元测试保护),优于分裂两份字段的长期维护成本。
 
 ## 4. 触发者定位(triggerFrom · 关键难题)
 
