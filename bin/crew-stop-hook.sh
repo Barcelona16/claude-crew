@@ -59,14 +59,26 @@
           const reason = j.reason || "";
           const cwd = j.cwd || "";
           if (!self) process.exit(0);
+          // P0-2 修(self-review 2026-09-03 · work 判决):sid="" 直接 exit 0。
+          // 老代码在 sid="" 时 marker 名塌陷为 "<self>.turn-.done",落盘后所有后续
+          // 空 sid turn 共享,永远'发但不去重'。sid 应由 Claude Code CLI 官方 schema
+          // 保证非空,缺则视为非常规调用,静默退出。
+          if (!sid) process.exit(0);
 
           // (1) 幂等 marker:$CREW_STATE/<self>.turn-<sid>.done 存在 → 跳过
           const marker = path.join(CS, self + ".turn-" + sid + ".done");
-          try { if (sid && fs.existsSync(marker)) process.exit(0); } catch (_) {}
+          try { if (fs.existsSync(marker)) process.exit(0); } catch (_) {}
 
           // (2) triggerFrom 反查:inbox/consumed 下最近一条 .json 的 from
           //     (最新消费的信封 = 最可能是本 turn 触发者)
+          // P1-2 修(self-review · work 判决):方案 A 加 2h 时效窗口,防止陈年信封
+          // (如 24h 前 A→B)在 B 后续用户手敲 turn 结束时误路由回 A。
+          // ts 来源优先:envelope.ts(权威副本)· 后备用文件 mtime(极端场景 envelope
+          // 无 ts 时兜底)· 超窗口视同无触发者,与 I3 空 inbox 同静默语义。
+          const WINDOW_MS = 2 * 60 * 60 * 1000; // 2h
+          const nowMs = Date.now();
           let triggerFrom = null;
+          let triggerId = null;   // P1-1 修:补采集 env.id 作为 trigger_id
           try {
             const consumed = path.join(CS, "inbox", self, "consumed");
             const entries = fs.readdirSync(consumed)
@@ -75,24 +87,35 @@
               .reverse();  // 最新在前(文件名 pad4-ts,字典序=时序)
             for (const f of entries) {
               try {
-                const env = JSON.parse(fs.readFileSync(path.join(consumed, f), "utf8"));
+                const fpath = path.join(consumed, f);
+                const env = JSON.parse(fs.readFileSync(fpath, "utf8"));
                 const from = env && env.from;
                 // 只认 session kind,非 self,非空 id
-                if (from && from.kind === "session" && from.id && from.id !== self) {
-                  triggerFrom = from.id;
-                  break;
+                if (!(from && from.kind === "session" && from.id && from.id !== self)) continue;
+                // P1-2:ts 窗口校验
+                let envMs = 0;
+                if (env.ts) {
+                  const t = Date.parse(env.ts);
+                  if (!isNaN(t)) envMs = t;
                 }
+                if (!envMs) {
+                  try { envMs = fs.statSync(fpath).mtimeMs; } catch (_) {}
+                }
+                if (envMs && (nowMs - envMs) > WINDOW_MS) continue; // 超窗口跳过
+                triggerFrom = from.id;
+                triggerId = env.id || null;
+                break;
               } catch (_) { /* 坏 JSON 跳过 */ }
             }
           } catch (_) { /* inbox 不存在等 */ }
 
-          if (!triggerFrom) process.exit(0);  // 无触发者 = 用户手敲 or 全 erp,静默
+          if (!triggerFrom) process.exit(0);  // 无触发者(空/全 erp/全超窗口)静默
 
-          // (3) 抠 transcript 最后一条 assistant text · 512B 上限
+          // (3) 抠 transcript 最后一条 assistant text · 512 字符上限(非字节 · P2-2 修)
+          //     JS String.length 返回 UTF-16 code unit 数,对 BMP 字符≈字符数,中文场景约 1024-1536 字节。
           let snippet = "";
           try {
             if (tp && fs.existsSync(tp)) {
-              // transcript 是 jsonl,倒序遍历找最后 assistant.content[0].text 或 text 字段
               const raw = fs.readFileSync(tp, "utf8");
               const lines = raw.split(/\n/).filter(Boolean);
               for (let i = lines.length - 1; i >= 0; i--) {
@@ -118,12 +141,14 @@
 
           // (4) 组装 note(人类可读 + 结构化都在 note 里 · 单一权威副本原则,避免 envelope 层分裂字段)
           //     turn-done note 首行"[auto-done] "触发面板徽章展示,body 是 JSON structured payload
+          //     P1-1 修:补 trigger_id(反查命中的 env.id · 消费者可关联到具体触发信封)
           const payload = {
             kind: "turn-done",
             self,
             session_id: sid,
             cwd,
             reason,
+            trigger_id: triggerId,
             transcript_snippet: snippet,
             ts: new Date().toISOString(),
           };
