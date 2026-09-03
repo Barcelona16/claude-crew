@@ -209,7 +209,7 @@ exit 0
 X
 chmod +x "$FAKE_BIN/crew"
 FAKE_CALLS="$T/crew-calls.log"; : > "$FAKE_CALLS"
-CREW_WATCHER_ALERT_STALE=0 FAKE_CREW_CALLS="$FAKE_CALLS" \
+CREW_WATCHER_ALERT_STALE=0 CREW_WATCHER_AUTOHEAL=1 FAKE_CREW_CALLS="$FAKE_CALLS" \
   CREW_WATCHER_AUTOHEAL_BLACKLIST=crew-dev,work \
   CREW_BIN="$FAKE_BIN/crew" \
   node "$WATCHER" sweep >/dev/null 2>&1
@@ -220,7 +220,7 @@ grep -q "crew-dev" "$FAKE_CALLS" && _ng "crew-dev 不该被 heal(黑名单)" || 
 echo "--- Case 12: autoheal 冷却期 ---"
 : > "$FAKE_CALLS"
 # 再跑一次,应该在冷却期内跳过
-CREW_WATCHER_ALERT_STALE=0 FAKE_CREW_CALLS="$FAKE_CALLS" \
+CREW_WATCHER_ALERT_STALE=0 CREW_WATCHER_AUTOHEAL=1 FAKE_CREW_CALLS="$FAKE_CALLS" \
   CREW_WATCHER_AUTOHEAL_BLACKLIST=crew-dev,work \
   CREW_BIN="$FAKE_BIN/crew" \
   node "$WATCHER" sweep >/dev/null 2>&1

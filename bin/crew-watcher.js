@@ -36,13 +36,18 @@ const STALE_MIN = parseInt(process.env.CREW_WATCHER_STALE_MIN || '10', 10);
 
 // 开关:告警 1 默认开(首版核心),其它默认关(后续启用)
 const ALERT_STALE = process.env.CREW_WATCHER_ALERT_STALE !== '0';
+// A:死信上限 · age > MAX_STALE_MIN 的信封不告警(默认 24h)
+const MAX_STALE_MIN = parseInt(process.env.CREW_WATCHER_MAX_STALE_MIN || '1440', 10);
+// B:斩 watcher 自循环 · from/to 是 crew-watcher 的告警不产生新告警
+// C:发件人白名单不咚咚 · from.id 是脚本别名(crew-send/notify/watcher)且找不到真人时静默
 const ALERT_CTX = process.env.CREW_WATCHER_ALERT_CTX === '1';
 const ALERT_SILENT = process.env.CREW_WATCHER_ALERT_SILENT === '1';
 const ALERT_HB = process.env.CREW_WATCHER_ALERT_HB === '1';
 
 // C 方案:dead-repl 自动重建(2026-09-02 用户拍板)——检测心跳 tmuxStatus=dead-repl
 // 时,自动尝试 crew <name> 拉回(walk launcher fallback,保 --resume 历史)。
-const AUTOHEAL_DEAD_REPL = process.env.CREW_WATCHER_AUTOHEAL !== '0';
+// 2026-09-03:改为默认关(env=1 才开)—— 之前测试污染刷屏事故后决定观察观察再开。
+const AUTOHEAL_DEAD_REPL = process.env.CREW_WATCHER_AUTOHEAL === '1';
 // 冷却:同一会话 N 分钟只重建一次(默认 10min,防死循环)
 const AUTOHEAL_COOLDOWN_MIN = parseInt(process.env.CREW_WATCHER_AUTOHEAL_COOLDOWN_MIN || '10', 10);
 // 不自动重建的会话(元协调层 + crew-dev 自己 + 人类工作会话需人工确认)
@@ -176,20 +181,34 @@ function alertStale(items, state) {
   let fired = 0, skipped = 0;
   const now = new Date().toISOString();
 
-  // 先过滤已 alerted 的,再按发送者聚合
-  const fresh = items.filter((it) => !state.alerted[it.id]);
+  // 先过滤:①已 alerted ②死信(age > MAX_STALE_MIN,默认 24h) ③watcher 自循环
+  const SCRIPT_ALIASES = new Set(['crew-send', 'crew-notify', 'crew-watcher']);
+  const fresh = items.filter((it) => {
+    if (state.alerted[it.id]) return false;
+    // B · 死信上限:超 24h 的信封不告警了,反正也不会被读
+    if (it.ageMin >= MAX_STALE_MIN) { state.alerted[it.id] = now; return false; }
+    // A · 斩 watcher 自循环:watcher 发的告警送到别会话,别会话不消费 → 别再产生新告警
+    if (it.from && it.from.id === 'crew-watcher') { state.alerted[it.id] = now; return false; }
+    if (it.toSession === 'crew-watcher') { state.alerted[it.id] = now; return false; }
+    return true;
+  });
   skipped = items.length - fresh.length;
   if (fresh.length === 0) return { fired: 0, skipped };
 
-  // 聚合:{ fromKey: [items...] } —— fromKey = kind+id,scripty(crew-send/crew-notify)聚合到"你(用户)"
+  // 聚合:{ fromKey: [items...] }
+  // D · 修 · 脚本别名兜底不再直接扔 wangqiwang1:
+  //   - 找不到真发件人(from.id 是 crew-send/notify/watcher)= 系统告警自身失败,静默 mark alerted
+  //   - 真会话名(如 backend/proj-y32g7)才聚合发告警到该会话
   const groups = {};
   for (const it of fresh) {
     let key;
-    if (it.from.kind === 'session' && it.from.id &&
-        it.from.id !== 'crew-send' && it.from.id !== 'crew-notify' && it.from.id !== 'crew-watcher') {
+    if (it.from.kind === 'session' && it.from.id && !SCRIPT_ALIASES.has(it.from.id)) {
       key = 'session:' + it.from.id;
     } else {
-      key = 'erp:wangqiwang1';   // 兜底:脚本别名或未知,统一由用户接管
+      // 脚本别名/未知 → 静默 mark alerted(不扰用户)
+      state.alerted[it.id] = now;
+      skipped++;
+      continue;
     }
     (groups[key] = groups[key] || []).push(it);
   }
