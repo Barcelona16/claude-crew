@@ -135,11 +135,13 @@ function readPendingNudges(name) {
 // 用它反向把原信封记录的 state 提升到 acked——避免前端看到"pending 已 30 分钟"却其实早消费了。
 function readMessages(name, limit) {
   const lines = readTail(FEEDBACK_JSONL, 2000);
-  // 先扫一遍收集 ack 镜像的 envelope id 集合
+  // 先扫一遍:①收集 ack 镜像的 envelope id ②记录本会话最新 replyOut ts(后续判"inbound 后已回复"用)
   const ackedIds = new Set();
+  let lastReplyOutTs = '';
   for (const l of lines) {
     let r; try { r = JSON.parse(l); } catch (_) { continue; }
     if (r && r.ackOf) ackedIds.add(r.ackOf);
+    if (r && r.replyOut && r.sender === name && r.ts && r.ts > lastReplyOutTs) lastReplyOutTs = r.ts;
   }
   const inbound = [], outbound = [];
   for (const l of lines) {
@@ -153,6 +155,11 @@ function readMessages(name, limit) {
     else state = r.replyOut ? 'acked' : 'delivered';   // 老记录兜底,不判 stale 红
     // 若这条 envelope 有 ack 镜像 → 合并为 acked
     if (r.envelopeId && ackedIds.has(r.envelopeId)) state = 'acked';
+    // 2026-09-03 修:inbound 入站消息(咚咚私聊等,无 delivery)如果本会话在其之后已经 replyOut,
+    // 说明消息被看到并回复了,应升为 acked 绿色。类比人聊天:发一句我回一句,那句变"已回复"。
+    if (!r.delivery && !r.replyOut && sess === name && r.ts && lastReplyOutTs && r.ts < lastReplyOutTs) {
+      state = 'acked';
+    }
     const rec = {
       ts: r.ts,
       from: { kind: r.source === 'session' ? 'session' : (r.source === 'group' ? 'group' : 'erp'),
