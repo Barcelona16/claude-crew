@@ -11,6 +11,9 @@
 #   ⑧ 7 天清理 alerted 记录(NaN 时间戳不再误伤)
 
 set -uo pipefail
+
+# 2026-09-03 v8:清 CREW_SESSION 避免继承污染 cmd_inbox 身份校验(测试跑本身不代表任何会话)
+unset CREW_SESSION 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREW="$SCRIPT_DIR/../bin/crew"
 WATCHER="$SCRIPT_DIR/../bin/crew-watcher.js"
@@ -41,6 +44,9 @@ exit 0
 X
 chmod +x "$FAKE_BIN/tmux"
 export PATH="$FAKE_BIN:$PATH"
+# 2026-09-03 v8:让 fake tmux 返测试用的全部 target 会话名(watcher stale 过滤 killed 会话
+# 需要 target 出现在 tmux list-sessions,否则视为已 kill 跳过告警,测试全挂)
+export FAKE_TMUX_SESSIONS="bob,alice,carol,dave,eric,charles,dan,eve,gina,hilda,ivy,jasmin"
 
 # 造一个 15 分钟前的 stale 信封(from=alice 发给 bob)
 OLD_TS=$(date -u -d "-15 minutes" '+%Y-%m-%dT%H:%M:%S.000Z')
