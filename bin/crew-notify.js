@@ -46,6 +46,9 @@ function parseArgs(argv) {
     else if (a === '--id') o.id = argv[++i];
     else if (a === '--limit') o.limit = parseInt(argv[++i], 10);
     else if (a === '--project') o.project = argv[++i];
+    // 2026-09-03 stage2 · v3.1 升级 2:允许指定 channel/kind,支持 crew-auto-done(Stop hook 回执)
+    else if (a === '--channel') o.channel = argv[++i];  // 默认 'crew-native'
+    else if (a === '--kind') o.kind = argv[++i];        // 默认无(write 时可选写入 envelope.kind)
   }
   return o;
 }
@@ -96,10 +99,11 @@ function mirrorToFeedback(envelope, to, project) {
       // 扩展字段:面板老版忽略,新前端读它渲染黄绿。
       delivery: envelope.delivery,
       envelopeId: envelope.id,
-      // 2026-09-02 [coding PR 建议 · comm-redesign spec]:标 channel='crew-native',
-      // agent-bridge/feedback-drain.js 据此过滤(SendMessage 已直进 context,drain 再灌是重复消费)。
+      // 2026-09-02 [coding PR 建议 · comm-redesign spec]:channel 标签,agent-bridge/feedback-drain.js
+      // 据此过滤重复消费。默认 'crew-native'(SendMessage 镜像及一般 crew 会话间信封)。
+      // 2026-09-03 stage2 扩展:envelope.channel 覆盖(如 'crew-auto-done' 用于 Stop hook 自动回执)。
       // 老 drain/前端不认此字段,当无标签处理,零破坏。
-      channel: 'crew-native',
+      channel: envelope.channel || 'crew-native',
     };
     fs.appendFileSync(FEEDBACK_JSONL, JSON.stringify(rec) + '\n');
     return true;
@@ -126,6 +130,10 @@ function cmdWrite(o) {
     id, ts, from, note: o.note,
     delivery: { state: 'pending', wokeAt: null, consumedAt: null },
   };
+  // 2026-09-03 stage2:允许写入 channel/kind,支持 crew-auto-done(Stop hook 回执)。
+  // 未指定则 mirrorToFeedback fallback 到 'crew-native'。kind 常见值:'turn-done'。
+  if (o.channel) envelope.channel = o.channel;
+  if (o.kind) envelope.kind = o.kind;
   const fname = pad4(idx) + '-' + ts.replace(/[:.]/g, '-') + '.json';
   const fpath = path.join(inboxDir(o.to), fname);
   try { writeJSON(fpath, envelope); } catch (e) {
