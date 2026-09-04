@@ -57,10 +57,9 @@ function tmuxExactName(target) {
 // 判据(AND 4 条):
 //   ① 全 pane 有空 ❯ 输入框(Claude Code REPL 空闲特征;编辑中/忙态无此空框)
 //      底部提示行空格是 U+00A0 NBSP,必须 hex 字符类 [\x20\xa0] 才匹配
-//   ② 全 pane 不含 spinner 字符(✻/✽/⠴/⠦/⠋/⠙/⠹/⠸/⠼/⠶/⠧/⠇/⠏ 等 Braille + Ink 常用)
-//      REPL turn 里持续 tool call 时 pane 里必有 spinner · 是 REPL 忙态最强信号
-//   ③ 全 pane 不含 "queued messages" / "Press up to edit"(REPL turn 里 send-keys 送入
-//      被 TUI 排队等消费的确凿信号,此时 nudge 就算送进也会卡)
+//   ② pane 底部 20 行不含 spinner 字符(✻/✽/⠴/⠦/⠋/⠙/⠹/⠸/⠼/⠶/⠧/⠇/⠏ 等 Braille + Ink 常用)
+//      REPL 忙态 spinner 只在 pane 底部(current turn 状态行)· 历史滚动区里的 ✽ 是老 turn 遗留 · 不算忙
+//   ③ pane 底部 20 行不含 "queued messages" / "Press up to edit"(TUI 排队标记同样在底部状态行)
 //   ④ 700ms 间隔两次全 pane 快照一致(spinner 毫秒级重绘,静态摘要不动)
 function paneIdle(paneName) {
   try {
@@ -69,19 +68,21 @@ function paneIdle(paneName) {
       if (r.status !== 0) return null;
       return String(r.stdout || '');
     };
+    // 只取 pane 底部 20 行做 spinner + queued 检测(避免历史滚动区里的老 spinner 字符误判)
+    const bottomOf = (s) => s.split('\n').slice(-20).join('\n');
     const s1 = cap();
     if (s1 === null) return true;
     if (!/❯[\x20\xa0]*(\n|$)/.test(s1)) return false;
-    // spinner 检测:Ink 常用 Braille + ✻/✽ 星号
-    if (/[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]/.test(s1)) return false;
-    // TUI 排队消息标记
-    if (/queued messages|Press up to edit/.test(s1)) return false;
+    const b1 = bottomOf(s1);
+    if (/[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]/.test(b1)) return false;
+    if (/queued messages|Press up to edit/.test(b1)) return false;
     sleepSync(700);
     const s2 = cap();
     if (s2 === null) return true;
-    if (/[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]/.test(s2)) return false;
-    if (/queued messages|Press up to edit/.test(s2)) return false;
-    return s1 === s2;
+    const b2 = bottomOf(s2);
+    if (/[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]/.test(b2)) return false;
+    if (/queued messages|Press up to edit/.test(b2)) return false;
+    return b1 === b2;
   } catch (_) { return true; }
 }
 

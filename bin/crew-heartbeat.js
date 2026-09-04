@@ -78,7 +78,8 @@ function resolveTmux(target, tmuxNames) {
 }
 
 // pane idle 判据(和 crew-wake.js 完全一致 —— 抄过来别 require,避免耦合)
-// AND 4 条:❯ 空框 · 无 spinner · 无 queued messages 标记 · 700ms 快照一致
+// AND 4 条:❯ 空框 · 底部 20 行无 spinner · 底部 20 行无 queued messages 标记 · 700ms 快照一致
+// (spinner + queued 只在 pane 底部状态行 · 历史滚动区里的 ✽ 是老 turn 遗留 · 不算忙)
 function paneIdle(paneName) {
   try {
     const cap = () => {
@@ -86,17 +87,20 @@ function paneIdle(paneName) {
       if (r.status !== 0) return null;
       return String(r.stdout || '');
     };
+    const bottomOf = (s) => s.split('\n').slice(-20).join('\n');
     const s1 = cap();
     if (s1 === null) return { idle: true, snapshot: '' };
     if (!/❯[\x20\xa0]*(\n|$)/.test(s1)) return { idle: false, snapshot: s1 };
-    if (/[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]/.test(s1)) return { idle: false, snapshot: s1 };
-    if (/queued messages|Press up to edit/.test(s1)) return { idle: false, snapshot: s1 };
+    const b1 = bottomOf(s1);
+    if (/[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]/.test(b1)) return { idle: false, snapshot: s1 };
+    if (/queued messages|Press up to edit/.test(b1)) return { idle: false, snapshot: s1 };
     sleepSync(700);
     const s2 = cap();
     if (s2 === null) return { idle: true, snapshot: s1 };
-    if (/[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]/.test(s2)) return { idle: false, snapshot: s2 };
-    if (/queued messages|Press up to edit/.test(s2)) return { idle: false, snapshot: s2 };
-    return { idle: s1 === s2, snapshot: s2 };
+    const b2 = bottomOf(s2);
+    if (/[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]/.test(b2)) return { idle: false, snapshot: s2 };
+    if (/queued messages|Press up to edit/.test(b2)) return { idle: false, snapshot: s2 };
+    return { idle: b1 === b2, snapshot: s2 };
   } catch (_) { return { idle: true, snapshot: '' }; }
 }
 

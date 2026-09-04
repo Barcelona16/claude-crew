@@ -21,12 +21,11 @@ trap 'rm -rf "$TMP"; tmux kill-session -t panetest-idle 2>/dev/null || true; tmu
 mk_fake_session() {
   local name="$1" pane_content="$2"
   # 建 fake session · cat 一个 file 让 pane 显示指定内容
+  # 真机 Claude REPL 状态行/spinner 在 pane 底部 · 用 5 行 tmux 高度让内容在底部
   local f="$TMP/$name.txt"
   echo -e "$pane_content" > "$f"
-  # 先删旧的
   tmux kill-session -t "$name" 2>/dev/null || true
-  # detached 建 · cat + sleep 保持 pane 内容
-  tmux new-session -d -s "$name" -x 200 -y 50 "cat '$f' && sleep 300"
+  tmux new-session -d -s "$name" -x 200 -y 5 "cat '$f' && sleep 300"
   sleep 0.3
 }
 
