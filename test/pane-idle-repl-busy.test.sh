@@ -1,0 +1,85 @@
+#!/bin/bash
+# pane-idle-repl-busy.test.sh — paneIdle 加 REPL 忙态检测(2026-09-04)
+# 覆盖:
+#   1. spinner(✻/✽/Braille)→ non-idle
+#   2. "queued messages" 标记 → non-idle
+#   3. "Press up to edit" 标记 → non-idle
+#   4. 空 ❯ 框且无以上标记 → idle
+set -eu
+
+pass=0; fail=0
+t() {
+  local name="$1"
+  if "$2"; then pass=$((pass+1)); echo "✓ $((pass)) $name"
+  else fail=$((fail+1)); echo "✗ FAIL $name"; fi
+}
+
+TMP=$(mktemp -d /tmp/panetest-XXXX)
+trap 'rm -rf "$TMP"; tmux kill-session -t panetest-idle 2>/dev/null || true; tmux kill-session -t panetest-spin 2>/dev/null || true; tmux kill-session -t panetest-queue 2>/dev/null || true' EXIT
+
+# 用一个 tmux fake pane 塞不同内容 · 断言 paneIdle 返 false/true
+mk_fake_session() {
+  local name="$1" pane_content="$2"
+  # 建 fake session · cat 一个 file 让 pane 显示指定内容
+  local f="$TMP/$name.txt"
+  echo -e "$pane_content" > "$f"
+  # 先删旧的
+  tmux kill-session -t "$name" 2>/dev/null || true
+  # detached 建 · cat + sleep 保持 pane 内容
+  tmux new-session -d -s "$name" -x 200 -y 50 "cat '$f' && sleep 300"
+  sleep 0.3
+}
+
+# ---- 1. 空 ❯ 框 · idle ----
+test_case_idle_empty_prompt() {
+  mk_fake_session "panetest-idle" $'some output\n❯ \n\n  session-footer'
+  local r
+  r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-idle'))")
+  [ "$r" = "true" ]
+}
+t "case-1 空 ❯ 框 · paneIdle=true" test_case_idle_empty_prompt
+
+# ---- 2. spinner ✻ · non-idle ----
+test_case_busy_spinner_star() {
+  mk_fake_session "panetest-spin" $'✻ Working...\n❯ \n\n  session-footer'
+  local r
+  r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-spin'))")
+  [ "$r" = "false" ]
+}
+t "case-2 spinner ✻ · paneIdle=false" test_case_busy_spinner_star
+
+# ---- 3. Braille spinner ⠋ · non-idle ----
+test_case_busy_spinner_braille() {
+  mk_fake_session "panetest-spin" $'⠋ Bootstrapping\n❯ \n\n  session-footer'
+  local r
+  r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-spin'))")
+  [ "$r" = "false" ]
+}
+t "case-3 Braille ⠋ · paneIdle=false" test_case_busy_spinner_braille
+
+# ---- 4. queued messages 标记 · non-idle ----
+test_case_busy_queued_msg() {
+  mk_fake_session "panetest-queue" $'work done\n❯ Press up to edit queued messages\n\n  footer'
+  local r
+  r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-queue'))")
+  [ "$r" = "false" ]
+}
+t "case-4 queued messages 标记 · paneIdle=false" test_case_busy_queued_msg
+
+# ---- 5. crew-heartbeat 版本同步(源码断言) ----
+test_case_heartbeat_synced() {
+  grep -q 'queued messages\\|Press up to edit' /work/claude-crew/bin/crew-heartbeat.js
+  grep -q '[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]' /work/claude-crew/bin/crew-heartbeat.js
+}
+t "case-5 crew-heartbeat paneIdle 也含 spinner+queued 检测" test_case_heartbeat_synced
+
+# ---- 6. crew-wake.js 版本一致(不用 require · 避免子孙耦合;两份手工同步 A5) ----
+test_case_wake_syntax() {
+  node -c /work/claude-crew/bin/crew-wake.js
+  node -c /work/claude-crew/bin/crew-heartbeat.js
+}
+t "case-6 crew-wake + crew-heartbeat 语法过" test_case_wake_syntax
+
+echo
+if [ "$fail" -gt 0 ]; then echo "FAIL: $fail failed"; exit 1; fi
+echo "ALL PASS $pass"

@@ -78,6 +78,7 @@ function resolveTmux(target, tmuxNames) {
 }
 
 // pane idle 判据(和 crew-wake.js 完全一致 —— 抄过来别 require,避免耦合)
+// AND 4 条:❯ 空框 · 无 spinner · 无 queued messages 标记 · 700ms 快照一致
 function paneIdle(paneName) {
   try {
     const cap = () => {
@@ -88,9 +89,13 @@ function paneIdle(paneName) {
     const s1 = cap();
     if (s1 === null) return { idle: true, snapshot: '' };
     if (!/❯[\x20\xa0]*(\n|$)/.test(s1)) return { idle: false, snapshot: s1 };
+    if (/[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]/.test(s1)) return { idle: false, snapshot: s1 };
+    if (/queued messages|Press up to edit/.test(s1)) return { idle: false, snapshot: s1 };
     sleepSync(700);
     const s2 = cap();
     if (s2 === null) return { idle: true, snapshot: s1 };
+    if (/[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]/.test(s2)) return { idle: false, snapshot: s2 };
+    if (/queued messages|Press up to edit/.test(s2)) return { idle: false, snapshot: s2 };
     return { idle: s1 === s2, snapshot: s2 };
   } catch (_) { return { idle: true, snapshot: '' }; }
 }
