@@ -38,23 +38,32 @@ test_case_idle_empty_prompt() {
 }
 t "case-1 空 ❯ 框 · paneIdle=true" test_case_idle_empty_prompt
 
-# ---- 2. spinner ✻ · non-idle ----
-test_case_busy_spinner_star() {
-  mk_fake_session "panetest-spin" $'✻ Working...\n❯ \n\n  session-footer'
+# ---- 2. 活 spinner(动作词+秒计数)· non-idle ----
+test_case_busy_working_with_secs() {
+  mk_fake_session "panetest-spin" $'✻ Working… (15s · ↓ 1.2k tokens)\n❯ \n\n  footer'
   local r
   r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-spin'))")
   [ "$r" = "false" ]
 }
-t "case-2 spinner ✻ · paneIdle=false" test_case_busy_spinner_star
+t "case-2 Working…(15s) · paneIdle=false" test_case_busy_working_with_secs
 
-# ---- 3. Braille spinner ⠋ · non-idle ----
-test_case_busy_spinner_braille() {
-  mk_fake_session "panetest-spin" $'⠋ Bootstrapping\n❯ \n\n  session-footer'
+# ---- 3. Frolicking + 秒计数 · non-idle ----
+test_case_busy_frolicking() {
+  mk_fake_session "panetest-spin" $'· Frolicking… (10s · ↓ 32 tokens)\n❯ \n\n  footer'
   local r
   r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-spin'))")
   [ "$r" = "false" ]
 }
-t "case-3 Braille ⠋ · paneIdle=false" test_case_busy_spinner_braille
+t "case-3 Frolicking…(10s) · paneIdle=false" test_case_busy_frolicking
+
+# ---- 3a. "Churned for X · done" 是结束标记 · idle(关键 case) ----
+test_case_churned_done_is_idle() {
+  mk_fake_session "panetest-done" $'✻ Churned for 7m 34s · done 5:23 PM\n❯ \n\n  footer'
+  local r
+  r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-done'))")
+  [ "$r" = "true" ]
+}
+t "case-3a Churned for X · done · paneIdle=true(★关键)" test_case_churned_done_is_idle
 
 # ---- 4. queued messages 标记 · non-idle ----
 test_case_busy_queued_msg() {
@@ -67,10 +76,11 @@ t "case-4 queued messages 标记 · paneIdle=false" test_case_busy_queued_msg
 
 # ---- 5. crew-heartbeat 版本同步(源码断言) ----
 test_case_heartbeat_synced() {
-  grep -q 'queued messages\\|Press up to edit' /work/claude-crew/bin/crew-heartbeat.js
-  grep -q '[✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⠶]' /work/claude-crew/bin/crew-heartbeat.js
+  grep -q 'queued messages' /work/claude-crew/bin/crew-heartbeat.js
+  grep -q 'BUSY_RE' /work/claude-crew/bin/crew-heartbeat.js
+  grep -q 'Frolicking' /work/claude-crew/bin/crew-heartbeat.js
 }
-t "case-5 crew-heartbeat paneIdle 也含 spinner+queued 检测" test_case_heartbeat_synced
+t "case-5 crew-heartbeat paneIdle 也含 BUSY_RE + queued 检测" test_case_heartbeat_synced
 
 # ---- 6. crew-wake.js 版本一致(不用 require · 避免子孙耦合;两份手工同步 A5) ----
 test_case_wake_syntax() {
