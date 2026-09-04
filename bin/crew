@@ -111,10 +111,12 @@ fi
 CMD="$1"; shift
 
 cmd_ls() {
+  local json_out=0 a
+  for a in "$@"; do [ "$a" = "--json" ] && json_out=1; done
   local live_sessions
   live_sessions=$("$CT" list 2>/dev/null || echo "")
   local kr="$SCRIPT_DIR/crew-keyresolve.js"
-  printf '  %-20s %-9s %-56s %-10s %-30s\n' "NAME" "STATUS" "MODEL" "KEY" "DIR"
+  [ "$json_out" -eq 0 ] && printf '  %-20s %-9s %-56s %-10s %-30s\n' "NAME" "STATUS" "MODEL" "KEY" "DIR"
 
   # 2026-08-31 perf:两遍式 —— 第一遍纯 bash/proc 收集每会话 name/sid/backend(真模型)/dir/tmuxname
   # 到数组;然后【一次】node --batch 解析所有会话的 model/key(原来每会话 spawn 一次 node ≈占 ls
@@ -177,6 +179,8 @@ cmd_ls() {
 
   # 第二遍:打印(查批量表;缺则回落 state)
   local i
+  local json_first=1
+  [ "$json_out" -eq 1 ] && printf '['
   for i in "${!NAMES[@]}"; do
     name="${NAMES[$i]}"
     local sid="${SIDS[$i]}" backend="${BACKENDS[$i]}" dir="${DIRS[$i]}" tmuxname="${TMUXNS[$i]}" key=""
@@ -191,8 +195,18 @@ cmd_ls() {
     elif [ -n "$sid" ]; then
       status="resumable"
     fi
-    printf '  %-20s %-9s %-56s %-10s %-30s\n' "$name" "$status" "$backend" "$key" "$dir"
+    if [ "$json_out" -eq 1 ]; then
+      # 逐字段 JSON 转义(反斜杠与双引号),输出 {name,status,model,key,dir} 数组
+      _crew_json_esc() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+      [ "$json_first" -eq 1 ] && json_first=0 || printf ','
+      printf '{"name":"%s","status":"%s","model":"%s","key":"%s","dir":"%s"}' \
+        "$(_crew_json_esc "$name")" "$(_crew_json_esc "$status")" "$(_crew_json_esc "$backend")" \
+        "$(_crew_json_esc "$key")" "$(_crew_json_esc "$dir")"
+    else
+      printf '  %-20s %-9s %-56s %-10s %-30s\n' "$name" "$status" "$backend" "$key" "$dir"
+    fi
   done
+  [ "$json_out" -eq 1 ] && printf ']\n'
 }
 
 cmd_attach() {
