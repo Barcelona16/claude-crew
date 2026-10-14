@@ -16,14 +16,18 @@ Zero third-party deps (stdlib http.server + urllib).
 Config (all under ~/.config/claude-crew unless overridden):
   keys.conf        <alias>=<api-key>                          (existing crew keys file)
   key-policy.conf  <realmodel> = <alias1> <alias2> ...        (priority, high -> low)
-CCR config (~/.claude-code-router/config.json) must have one provider per (model, key) pair
-  (same base_url, different api_key) — crew setup generates these.
+CCR 3 keeps its live configuration in SQLite. Crew keeps a separate provider
+map (``~/.config/claude-crew/ccr-providers.json`` by default) with one provider
+per (model, key) pair, then applies it through CCR's authenticated local RPC.
 
 Env:
   CREW_PROXY_PORT     listen port (default 8788)
   CREW_CCR_URL        upstream CCR base (default http://127.0.0.1:3456)
   CREW_CONFIG_DIR     config dir (default ~/.config/claude-crew, honors XDG_CONFIG_HOME)
-  CREW_CCR_CONFIG     CCR config.json path (default ~/.claude-code-router/config.json)
+  CREW_CCR_CONFIG     crew provider-map path (default ~/.config/claude-crew/ccr-providers.json)
+  CREW_CCR_V3_ADAPTER path to ccr_v3.py (default next to this script)
+  CREW_CCR_WEB_URL    CCR 3 management URL (default http://127.0.0.1:3458)
+  CREW_CCR_WEB_TOKEN  CCR 3 management token; required for provider-map updates
   CREW_PROXY_FAILS    consecutive failures before a key trips (default 3)
   CREW_PROXY_COOLDOWN tripped-key cooldown seconds (default 60)
   CREW_PROXY_STATE    circuit-breaker state dump (default ~/.local/share/claude-crew/proxy-state.json)
@@ -75,13 +79,11 @@ REGISTER_RETRY_BASE = float(os.environ.get("CREW_REGISTER_RETRY_BASE", "1.5"))  
 # Anything else is admin-granted later. Comma-separated env override.
 REGISTER_ALLOW = [m.strip() for m in (os.environ.get("CREW_REGISTER_ALLOW")
     or "Claude-Opus-4.6-joybuilder,Claude-Opus-4.7-joybuilder,Claude-Opus-4.8-joybuilder,GLM-5.2,GLM-5.2-joybuilder").split(",") if m.strip()]
-CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.expanduser("~/.claude-code-router/config.json")
+CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.join(CFG_DIR, "ccr-providers.json")
 CCR_URL   = (os.environ.get("CREW_CCR_URL") or "http://127.0.0.1:3456").rstrip("/")
-# Command run to make CCR pick up newly-written providers (self-registration appends to
-# CCR's config.json, and CCR has no hot-reload — only a restart). Empty = do nothing (the
-# default off, so a laptop where CCR is managed by launchd/systemd isn't disrupted); the
-# shared container sets CREW_CCR_RELOAD_CMD="ccr restart".
-CCR_RELOAD_CMD = os.environ.get("CREW_CCR_RELOAD_CMD", "")
+CCR_V3_ADAPTER = os.environ.get("CREW_CCR_V3_ADAPTER") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "ccr_v3.py"
+)
 PORT      = int(os.environ.get("CREW_PROXY_PORT", "8788"))
 FAIL_N    = int(os.environ.get("CREW_PROXY_FAILS", "3"))
 COOLDOWN  = float(os.environ.get("CREW_PROXY_COOLDOWN", "60"))
@@ -142,13 +144,35 @@ def load_policy():
 
 
 def load_ccr_providers():
-    """CCR config -> list of {name, models[], api_key}."""
+    """Crew's CCR 3 provider map -> list of {name, models[], api_key}."""
     try:
         with open(CCR_CFG) as f:
             cfg = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
     return cfg.get("Providers") or cfg.get("providers") or []
+
+
+def load_ccr_gateway_key():
+    """Return crew's private CCR 3 loopback gateway key, if configured.
+
+    Claude Code talks to crew-proxy using the harmless session token ``test``.
+    CCR 3 instead authenticates every gateway request against APIKEYS, which is
+    managed by :mod:`ccr_v3`.  Never pass Claude's token through to CCR: it is
+    not an upstream provider credential and it is not a CCR gateway key.
+    """
+    try:
+        with open(CCR_CFG) as f:
+            cfg = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return ""
+    gateway = cfg.get("gateway")
+    if isinstance(gateway, dict):
+        value = gateway.get("api_key") or gateway.get("apiKey")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    value = cfg.get("APIKEY")
+    return value.strip() if isinstance(value, str) else ""
 
 
 COOLDOWN_FILE = os.path.join(CFG_DIR, "cooldown.conf")
@@ -253,18 +277,28 @@ def register_allow_list():
     return list(REGISTER_ALLOW)
 
 
-def reload_ccr():
-    """Best-effort: make CCR pick up config.json changes (it has no hot-reload). Runs
-    CCR_RELOAD_CMD in a shell with a timeout; never raises — a failed reload must not fail
-    the registration (an admin can always `ccr restart` manually). No-op if unconfigured."""
-    if not CCR_RELOAD_CMD:
-        return
+def sync_ccr_config():
+    """Apply the provider map through CCR 3's authenticated management RPC.
+
+    The adapter performs an atomic CCR configuration save and restarts its
+    gateway when needed. It deliberately never edits CCR's SQLite file.
+    """
+    if not os.path.isfile(CCR_V3_ADAPTER):
+        log.error("CCR 3 adapter is missing: %s", CCR_V3_ADAPTER)
+        return False
     try:
-        r = subprocess.run(CCR_RELOAD_CMD, shell=True, timeout=30,
+        r = subprocess.run([sys.executable, CCR_V3_ADAPTER, "apply", "--provider-map", CCR_CFG],
+                           timeout=30,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        log.info("CCR reload (%s) rc=%s", CCR_RELOAD_CMD, r.returncode)
+        if r.returncode:
+            log.error("CCR 3 provider-map apply failed (rc=%s): %s", r.returncode,
+                      r.stdout.decode("utf-8", "replace").strip())
+            return False
+        log.info("CCR 3 provider-map applied")
+        return True
     except Exception as e:
-        log.warning("CCR reload failed (%s): %s", CCR_RELOAD_CMD, e)
+        log.error("CCR 3 provider-map apply failed: %s", e)
+        return False
 
 
 def mask_key(key):
@@ -1204,10 +1238,22 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(n) if n else b""
 
     def _fwd_headers(self):
-        """Client headers minus hop-by-hop; Host rewritten to CCR."""
+        """Client headers minus hop-by-hop, with CCR 3 loopback auth.
+
+        Client ``Authorization`` and ``x-api-key`` headers authenticate to
+        crew-proxy, not CCR.  Replace them with the generated local CCR key so
+        a selected crew key never leaks into the CCR control plane.
+        """
         skip = {"host", "content-length", "connection", "transfer-encoding",
                 "proxy-connection", "keep-alive"}
         out = {k: v for k, v in self.headers.items() if k.lower() not in skip}
+        for name in tuple(out):
+            if name.lower() in {"authorization", "x-api-key"}:
+                del out[name]
+        gateway_key = load_ccr_gateway_key()
+        if gateway_key:
+            out["Authorization"] = f"Bearer {gateway_key}"
+            out["x-api-key"] = gateway_key
         return out
 
     def _send_err(self, code, msg):
@@ -1636,6 +1682,8 @@ class Handler(BaseHTTPRequestHandler):
             os.replace(tmp, CCR_CFG)
         except OSError as e:
             return self._send_json({"ok": False, "error": f"CCR write failed (backup at {backup}): {e}"}, 500)
+        if not sync_ccr_config():
+            return self._send_json({"ok": False, "error": "provider map saved but CCR 3 apply failed"}, 502)
         log.info("added CCR provider '%s' + key '%s' (backup %s)", pname, alias, backup)
         return self._send_json({"ok": True, "provider": pname, "backup_path": backup})
 
@@ -1708,6 +1756,8 @@ class Handler(BaseHTTPRequestHandler):
             removed = before - len(provs)
         except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
             return self._send_json({"ok": False, "error": f"CCR config update failed: {e}"}, 500)
+        if not sync_ccr_config():
+            return self._send_json({"ok": False, "error": "provider map saved but CCR 3 apply failed"}, 502)
         log.info("deleted key '%s' (providers removed: %d, force=%s)", alias, removed, force)
         return self._send_json({"ok": True, "deleted": alias, "providers_removed": removed})
 
@@ -1951,11 +2001,8 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as e:
             return self._send_json({"ok": False, "error": f"gateway-auth write failed: {e}"}, 500)
         log.info("self-registered key alias '%s' into %d models; allow=%s", alias, len(tmpl), entry["allow_models"])
-        # New CCR providers were appended above; CCR has no hot-reload, so restart it (best-
-        # effort) — otherwise the freshly-added providers 404 ("provider not found") until the
-        # next manual restart, which is exactly how 4.6 kept breaking after each registration.
-        if added_models:
-            reload_ccr()
+        if added_models and not sync_ccr_config():
+            return self._send_json({"ok": False, "error": "provider map saved but CCR 3 apply failed"}, 502)
         return self._send_json({"ok": True, "alias": alias, "models": sorted(set(tmpl)),
                                 "allow_models": entry["allow_models"], "key_masked": mask_key(key)})
 
@@ -2145,7 +2192,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         model = payload.get("model", "") or ""
-        realmodel = model.split(",", 1)[1] if "," in model else model
+        selected_provider, sep, realmodel = model.partition("/")
+        if not sep:
+            selected_provider = ""
+            realmodel = model
         stream = bool(payload.get("stream", False))
 
         policy = load_policy().get(realmodel, [])
@@ -2166,6 +2216,15 @@ class Handler(BaseHTTPRequestHandler):
 
         keys = load_keys()
         providers = load_ccr_providers()
+
+        # A crew session records the full CCR 3 selector (provider/model).
+        # Preserve that explicit key choice for the first try, while retaining
+        # the model policy as the failover order.
+        if selected_provider:
+            preferred_alias = next((alias for alias, key in keys.items()
+                                    if provider_for(realmodel, key, providers) == selected_provider), "")
+            if preferred_alias in policy:
+                policy = [preferred_alias] + [alias for alias in policy if alias != preferred_alias]
         now = time.time()
 
         tried = []
@@ -2197,7 +2256,9 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 continue
 
-            fwd = {**payload, "model": f"{provider},{realmodel}"}
+            # CCR 3 uses ``provider/model`` selectors.  Comma selectors were
+            # a CCR 2 convention and are treated as an unknown model in v3.
+            fwd = {**payload, "model": f"{provider}/{realmodel}"}
             fwd_body = json.dumps(fwd).encode()
             log.info("→ %-24s via key '%s'%s (stream=%s)", realmodel, alias,
                      " [FORCED]" if forced else "", stream)

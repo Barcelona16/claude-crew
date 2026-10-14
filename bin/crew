@@ -45,6 +45,9 @@ set -uo pipefail
 
 CREW_STATE="${CREW_STATE:-${XDG_DATA_HOME:-$HOME/.local/share}/claude-crew}"
 CREW_HOME="${CREW_HOME:-$HOME/.config/claude-crew}"
+# CCR 3 stores its live state in SQLite.  Keep crew's own provider map outside
+# that database; setup/ccr_v3.py applies it through the authenticated CCR RPC.
+CCR_PROVIDER_MAP="${CREW_CCR_CONFIG:-$CREW_HOME/ccr-providers.json}"
 # SCRIPT_DIR = 真实 bin/ 目录。crew 常经软链调用(~/.local/bin/crew -> <clone>/bin/crew),
 # 需先解析软链链,否则 SCRIPT_DIR 会误指 ~/.local/bin(那里没有 crew-* 兄弟工具)→ exit 127。
 # 用手动 while 循环而非 `readlink -f`:macOS 自带 readlink 不支持 -f(会返回空),while 版 mac+Linux 通用。
@@ -169,7 +172,7 @@ cmd_ls() {
     local batch_in="" i
     for i in "${!NAMES[@]}"; do batch_in+="${NAMES[$i]}"$'\t'"${BACKENDS[$i]}"$'\n'; done
     local batch_out
-    batch_out=$(printf '%s' "$batch_in" | env -i HOME="$HOME" PATH="$PATH" CREW_STATE="$CREW_STATE" CREW_HOME="$CREW_HOME" node "$kr" --batch 2>/dev/null)
+    batch_out=$(printf '%s' "$batch_in" | env -i HOME="$HOME" PATH="$PATH" CREW_STATE="$CREW_STATE" CREW_HOME="$CREW_HOME" CREW_CCR_CONFIG="$CCR_PROVIDER_MAP" node "$kr" --batch 2>/dev/null)
     local bn bm bk
     while IFS=$'\t' read -r bn bm bk; do
       [ -z "$bn" ] && continue
@@ -603,7 +606,7 @@ cmd_log() {
 # 是真 token(joycode 的真值恰好也叫 joycode)。joycode 系还可从 :8765 /v1/models 实时拉(更全),
 # 但 CCR models[] 已够用且不依赖代理在线,优先用它。
 ccr_models_for_key() {
-  local alias="$1" cfg="$HOME/.claude-code-router/config.json"
+  local alias="$1" cfg="$CCR_PROVIDER_MAP"
   [ -f "$cfg" ] || return 0; command -v node >/dev/null 2>&1 || return 0
   # 别名 → 真值(keys.conf: alias=token);查不到就用别名本身当值(joycode 那种)
   local kv=""
@@ -621,10 +624,10 @@ ccr_models_for_key() {
   ' "$cfg" 2>/dev/null
 }
 
-# 同上,但返回 "provider,model" 全名(可直接当 backend / --model 用,让 CCR 精确路由)。
+# 同上,但返回 CCR 3 的 "provider/model" selector(可直接当 backend / --model 用)。
 # switch/pick 菜单用这个 —— 选中即得可用的 backend 值,无需再拼 provider。
 ccr_models_for_key_full() {
-  local alias="$1" cfg="$HOME/.claude-code-router/config.json"
+  local alias="$1" cfg="$CCR_PROVIDER_MAP"
   [ -f "$cfg" ] || return 0; command -v node >/dev/null 2>&1 || return 0
   local kv=""
   if [ -f "$CREW_HOME/keys.conf" ]; then
@@ -636,7 +639,7 @@ ccr_models_for_key_full() {
     const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
     const ps=c.Providers||c.providers||[];
     const out=[];
-    for(const p of ps){ if((p.api_key||p.apiKey)===process.env.KEY) for(const m of (p.models||[])){ var full=p.name+","+m; if(out.indexOf(full)<0) out.push(full); } }
+    for(const p of ps){ if((p.api_key||p.apiKey)===process.env.KEY) for(const m of (p.models||[])){ var full=p.name+"/"+m; if(out.indexOf(full)<0) out.push(full); } }
     process.stdout.write(out.join("\n"));
   ' "$cfg" 2>/dev/null
 }
@@ -677,7 +680,7 @@ sys.stdout.write(urllib.request.urlopen(r,timeout=12).read().decode())' 2>/dev/n
 
 # 某 key 的 gateway origin(scheme://host):取 CCR 里该 key 某 provider 的 api_base_url。(移植 v1)
 ccr_origin_for_key() {
-  local kv="$1" cfg="$HOME/.claude-code-router/config.json"
+  local kv="$1" cfg="$CCR_PROVIDER_MAP"
   [ -f "$cfg" ] || return 0; command -v node >/dev/null 2>&1 || return 0
   KEY="$kv" node -e '
     const fs=require("fs");
@@ -709,18 +712,18 @@ _pick_multi() {
   fi
 }
 
-# 重启 CCR 让 config 变更生效:launchd(mac)/systemd(Linux user)/回落 ccr restart(容器)。失败静默。
-ccr_restart() {
-  if command -v launchctl >/dev/null 2>&1 && launchctl print "gui/$(id -u)/${CREW_CCR_LABEL:-com.claudecrew.ccr}" >/dev/null 2>&1; then
-    launchctl kickstart -k "gui/$(id -u)/${CREW_CCR_LABEL:-com.claudecrew.ccr}" >/dev/null 2>&1 && return 0
+# CCR 3 的 provider 修改通过管理 RPC 原子保存，由 CCR 决定是否重启网关。
+ccr_apply_provider_map() {
+  local adapter="${CREW_CCR_V3_ADAPTER:-$SCRIPT_DIR/../setup/ccr_v3.py}"
+  command -v python3 >/dev/null 2>&1 || die "CCR 3 provider 同步需要 python3"
+  [ -f "$adapter" ] || die "CCR 3 adapter 不存在: $adapter"
+  # setup.sh stores this local management credential mode 0600.  Interactive
+  # `crew sync-models` is launched from a fresh shell, not from the service,
+  # so recover it here instead of requiring users to export a secret manually.
+  if [ -z "${CREW_CCR_WEB_TOKEN:-}" ] && [ -r "$CREW_HOME/ccr-web-token" ]; then
+    export CREW_CCR_WEB_TOKEN="$(cat "$CREW_HOME/ccr-web-token")"
   fi
-  if command -v systemctl >/dev/null 2>&1 && systemctl --user status "${CREW_CCR_UNIT:-claudecrew-ccr}" >/dev/null 2>&1; then
-    systemctl --user restart "${CREW_CCR_UNIT:-claudecrew-ccr}" >/dev/null 2>&1 && return 0
-  fi
-  # 回落:直接 ccr restart(165 容器 nohup 起法)
-  if command -v ccr >/dev/null 2>&1; then
-    ( ccr restart >/dev/null 2>&1 & ) 2>/dev/null || true
-  fi
+  python3 "$adapter" apply --provider-map "$CCR_PROVIDER_MAP"
 }
 
 cmd_models() {
@@ -782,7 +785,7 @@ cmd_sync_models() {
     [ -n "$sm_key" ] || die "没选 key"
   fi
   local sm_kv; sm_kv=$(lookup_key "$sm_key")
-  local ccrcfg="$HOME/.claude-code-router/config.json"
+  local ccrcfg="$CCR_PROVIDER_MAP"
   [ -f "$ccrcfg" ] || die "CCR config 不存在 ($ccrcfg)"
   # 2) 拉上游模型
   local is_joycode=0 sm_remote=""
@@ -853,10 +856,10 @@ EOF
     process.stdout.write(String(added));
   ') || { echo "写入失败;已从 $sm_bak 恢复"; cp "$sm_bak" "$ccrcfg"; return 1; }
   echo "== sync-models: 给 key '$sm_key' 加了 $sm_added 个 provider/model (备份: $sm_bak) =="
-  # 6) 有变更才重启 CCR
+  # 6) 有变更才通过 CCR 3 RPC 应用 provider map
   if [ "${sm_added:-0}" -gt 0 ] 2>/dev/null; then
-    ccr_restart
-    echo "  已重启 CCR — 新模型生效(crew models $sm_key 查看)"
+    ccr_apply_provider_map
+    echo "  已同步 CCR 3 — 新模型生效(crew models $sm_key 查看)"
   fi
 }
 
@@ -1115,7 +1118,7 @@ cmd_switch() {
   cur_key=$("$CS" get "$name" key 2>/dev/null || echo "")
   cur_be=$("$CS" get "$name" backend 2>/dev/null || echo "")
   picked_key=$(_list_keys | _pick_one "选 key ($name,当前: ${cur_key:-无})" "$cur_key")
-  # model 菜单:列【该 key 支持的模型】(ccr_models_for_key_full,provider,model 全名,直接可用)。
+  # model 菜单:列【该 key 支持的模型】(ccr_models_for_key_full,provider/model 全名,直接可用)。
   # 拿不到(该 key 无 CCR provider)→ 提示补 key,不再暴露 backend 文件名。
   local model_opts
   model_opts=$(ccr_models_for_key_full "$picked_key")
@@ -1408,7 +1411,7 @@ cmd_spawn() {
       local _pk; _pk=$(_list_keys | _pick_one "选 key ($name)" "")
       [ -n "$_pk" ] && KEY="$_pk"
     fi
-    # 2) 再选该 key 支持的模型(provider,model 全名,可直接用);拿不到 → 提示补 key,不暴露文件名
+    # 2) 再选该 key 支持的模型(provider/model 全名,可直接用);拿不到 → 提示补 key,不暴露文件名
     local _mopts=""
     [ -n "$KEY" ] && _mopts=$(ccr_models_for_key_full "$KEY")
     if [ -z "$_mopts" ]; then

@@ -41,19 +41,20 @@ git clone <repo> && cd claude-crew
 GATEWAY_TOKEN=<your API token> bash setup.sh    # or just `bash setup.sh` to be prompted for the token
 ```
 
-It: installs crew + claude-code-router (`npm i -g`) → **generates/merges** the CCR provider
-config with your token (leaves your existing providers untouched) → writes model presets +
-`keys.conf` + `key-policy.conf` → installs `crew-proxy` → runs CCR (`:3456`) and crew-proxy
-(`:8788`) as background services (**launchd on macOS / systemd --user on Linux**) → sets the
-default model.
+It installs crew + claude-code-router 3 (`npm i -g`) → **generates/merges** crew's CCR3 provider
+map with your token (leaves your existing providers untouched) → writes model presets +
+`keys.conf` + `key-policy.conf` → installs `crew-proxy` → runs CCR management (`:3458`), its
+gateway (`:3456`), and crew-proxy (`:8788`) as background services (**launchd on macOS / systemd
+--user on Linux**) → sets the default model.
 
-**Prerequisites (each person's own)**: Node.js, tmux, Claude Code CLI, python3 (used by
-crew-proxy); **your own model API token**. When done, edit `~/.claude-code-router/config.json`
-and replace `__BASE_URL__` / `__MODEL__` with the official APIs you use (Anthropic / OpenAI /
-etc.), then line up the preset names under `~/.config/claude-crew/backends/*.conf`.
+**Prerequisites (each person's own)**: Node.js **22+**, tmux, Claude Code CLI, and python3;
+**your own model API token**. When done, edit `~/.config/claude-crew/ccr-providers.json` with
+the official API endpoints/models you use, then line up preset names under
+`~/.config/claude-crew/backends/*.conf`. The map is applied through CCR3's local RPC; do not edit
+CCR's SQLite database directly.
 
 Then: `crew models` to see models · `crew up` to ensure deps are running · `crew <name>
---model <your model>` to go. **Keys stay local** (`~/.claude-code-router/config.json`,
+--model <provider/model>` to go. **Keys stay local** (`~/.config/claude-crew/ccr-providers.json`,
 `~/.config/claude-crew/keys.conf`) — never committed.
 
 ## Usage
@@ -170,8 +171,8 @@ crew-proxy ships a local control panel — open **http://127.0.0.1:8788/dashboar
 - **Keys** — each key's healthy/tripped state, request count, ok/fail, consecutive failures, cooldown
 - **Sessions** — every crew session (name/status/model/key/dir); each row has **copy** (copies the `crew <name> --model ...` command), **kill**, and **edit** (change model/key)
 - **Recent requests** — a live request feed (model · key · status · whether it failed over)
-- **+ add key/provider** — fill in alias/key/model/base_url to write a new provider into your CCR
-  config (**config.json is backed up first**; run `crew up` afterwards to reload CCR)
+- **+ add key/provider** — fill in alias/key/model/base_url to write a new provider into crew's
+  provider map (backed up first, then applied through the CCR3 RPC)
 
 The panel binds `127.0.0.1` only. Every write op (kill / edit / add provider) validates input to
 prevent injection. **Token usage** is tallied per key and per model (input/output tokens, parsed

@@ -36,11 +36,11 @@ git clone <repo> && cd claude-crew
 GATEWAY_TOKEN=<你的API token> bash setup.sh    # 或直接 bash setup.sh 交互输入 token
 ```
 
-它会:装 crew + claude-code-router(`npm i -g`)→ 用你的 token **生成/合并** CCR provider 配置(不动你已有的 provider)→ 铺模型预设 + `keys.conf` + `key-policy.conf` → 装 `crew-proxy` → **macOS 用 launchd / Linux 用 systemd --user** 把 CCR(`:3456`)和 crew-proxy(`:8788`)起成常驻服务 → 设默认模型。
+它会:装 crew + claude-code-router 3 (`npm i -g`)→ 用你的 token **生成/合并** crew 的 CCR3 provider map(不动你已有的 provider)→ 铺模型预设 + `keys.conf` + `key-policy.conf` → 装 `crew-proxy` → **macOS 用 launchd / Linux 用 systemd --user** 把 CCR 管理面(`:3458`)、网关(`:3456`)和 crew-proxy(`:8788`)起成常驻服务 → 设默认模型。
 
-**前提(各人自备)**:Node.js、tmux、Claude Code CLI、python3(crew-proxy 用);**自己的模型 API token**。装完编辑 `~/.claude-code-router/config.json` 把 `__BASE_URL__` / `__MODEL__` 换成你各家官方 API(Anthropic / OpenAI / 等),再把 `~/.config/claude-crew/backends/*.conf` 的预设名对上。
+**前提(各人自备)**:Node.js **22+**、tmux、Claude Code CLI、python3;**自己的模型 API token**。装完编辑 `~/.config/claude-crew/ccr-providers.json` 的 provider endpoint/model,再把 `~/.config/claude-crew/backends/*.conf` 的预设名对上。该 map 由 crew 通过 CCR3 本地 RPC 应用；不要手改 CCR 的 SQLite。
 
-完事:`crew models` 看模型 · `crew up` 确保依赖在跑 · `crew <名> --model <你的模型>` 开跑。**密钥只落本机**(`~/.claude-code-router/config.json`、`~/.config/claude-crew/keys.conf`),不进 git。
+完事:`crew models` 看模型 · `crew up` 确保依赖在跑 · `crew <名> --model <provider/model>` 开跑。**密钥只落本机**(`~/.config/claude-crew/ccr-providers.json`、`~/.config/claude-crew/keys.conf`),不进 git。
 
 ## 用法
 
@@ -141,8 +141,7 @@ crew-proxy 自带一个本地控制面板,浏览器打开 **http://127.0.0.1:878
 - **Keys**:每把 key 的健康/熔断状态、请求数、成功/失败、连续失败数、冷却倒计时
 - **Sessions**:所有 crew 会话(名/状态/模型/key/目录),每行可 **copy**(复制 `crew <名> --model ...` 命令)、**kill**、**edit 改 model/key**
 - **Recent requests**:近期请求流(模型 · key · 状态 · 是否 failover)
-- **+ add key/provider**:填别名/key/模型/base_url 一键写入 CCR config(**写前自动备份** config.json,
-  之后 `crew up` 重载 CCR 生效)
+- **+ add key/provider**:填别名/key/模型/base_url 一键写入 provider map（写前自动备份），并立即通过 CCR3 RPC 应用
 
 面板只监听 `127.0.0.1`(本机),写操作(kill / 改配置 / 加 provider)都做了输入校验防注入。
 **token 用量**按 key/模型累计(input/output tokens,从上游响应的 usage 字段解析,**在响应转发完

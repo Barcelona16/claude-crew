@@ -6,5 +6,12 @@ ExecStart=__PY__ __PROXY_SCRIPT__
 Restart=always
 RestartSec=5
 Environment=HOME=__HOME__
+Environment=CREW_CONFIG_DIR=__CREW_CONFIG_DIR__
+Environment=CREW_CCR_CONFIG=__CCR_PROVIDER_MAP__
+Environment=CREW_CCR_V3_ADAPTER=__CCR_ADAPTER__
+Environment=CREW_CCR_URL=http://127.0.0.1:__CCR_GATEWAY_PORT__
+Environment=CREW_CCR_PORT=__CCR_GATEWAY_PORT__
+Environment=CREW_CCR_WEB_URL=http://127.0.0.1:__CCR_WEB_PORT__
+Environment=CREW_CCR_WEB_TOKEN=__CCR_WEB_TOKEN__
 [Install]
 WantedBy=default.target

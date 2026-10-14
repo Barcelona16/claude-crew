@@ -31,16 +31,19 @@ with open(os.path.join(_cfg, "key-policy.conf"), "w") as f:
 # CCR config: one provider per (model, key) pair
 _ccr_cfg = os.path.join(_tmp, "ccr.json")
 with open(_ccr_cfg, "w") as f:
-    json.dump({"Providers": [
+    json.dump({"gateway": {"api_key": "crew-local-test-key"}, "Providers": [
         {"name": "p1", "models": ["MODEL_X"], "api_key": "KEY_ONE"},
         {"name": "p2", "models": ["MODEL_X"], "api_key": "KEY_TWO"},
         {"name": "p3", "models": ["MODEL_X"], "api_key": "KEY_THREE"},
     ]}, f)
 
 _state = os.path.join(_tmp, "state.json")
+_adapter = os.path.join(_tmp, "ccr_v3_adapter.py")
+with open(_adapter, "w") as f:
+    f.write("import sys\nsys.exit(0)\n")
 
 # Mock upstream (stands in for CCR). Decides pass/fail based on which provider was routed.
-MOCK = {"fail_providers": set(), "hits": []}
+MOCK = {"fail_providers": set(), "hits": [], "models": [], "auth": []}
 
 class MockCCR(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
@@ -48,8 +51,10 @@ class MockCCR(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(n) or b"{}")
         model = body.get("model", "")
-        provider = model.split(",", 1)[0]
+        provider = model.split("/", 1)[0]
         MOCK["hits"].append(provider)
+        MOCK["models"].append(model)
+        MOCK["auth"].append((self.headers.get("Authorization"), self.headers.get("x-api-key")))
         if provider in MOCK["fail_providers"]:
             code = MOCK.get("fail_code", 429)
             payload = json.dumps({"error": {"message": f"forced {code} for {provider}"}}).encode()
@@ -76,6 +81,7 @@ threading.Thread(target=_mock_srv.serve_forever, daemon=True).start()
 # env must be set BEFORE importing crew_proxy (module reads env at import)
 os.environ["CREW_CONFIG_DIR"] = _cfg
 os.environ["CREW_CCR_CONFIG"] = _ccr_cfg
+os.environ["CREW_CCR_V3_ADAPTER"] = _adapter
 os.environ["CREW_CCR_URL"] = f"http://127.0.0.1:{_mock_port}"
 os.environ["CREW_REGISTER_URL"] = f"http://127.0.0.1:{_mock_port}"
 os.environ["CREW_REGISTER_MODEL"] = "GLM-5.2"
@@ -119,6 +125,8 @@ def post(model="MODEL_X", headers=None):
 
 def reset():
     MOCK["hits"].clear()
+    MOCK["models"].clear()
+    MOCK["auth"].clear()
     MOCK["retry_after"] = None
     cp.BREAKER._fails.clear()
     cp.BREAKER._tripped.clear()
@@ -143,6 +151,19 @@ code, body = post()
 check("first request succeeds (via backup)", code == 200)
 check("landed on p2 after p1 failed", body.get("provider") == "p2")
 check("p1 was attempted then p2", MOCK["hits"] == ["p1", "p2"])
+check("CCR 3 selector uses provider/model", MOCK["models"] == ["p1/MODEL_X", "p2/MODEL_X"])
+check("CCR 3 receives its local gateway key", MOCK["auth"] == [
+    ("Bearer crew-local-test-key", "crew-local-test-key"),
+    ("Bearer crew-local-test-key", "crew-local-test-key"),
+])
+
+# A persisted crew session carries provider/model.  Keep that selected provider
+# first, rather than silently falling back to the policy's first alias.
+print("Integration explicit CCR 3 selector:")
+reset(); MOCK["fail_providers"] = set()
+code, body = post("p2/MODEL_X")
+check("selected provider wins first attempt", code == 200 and body.get("provider") == "p2")
+check("selected provider/model is forwarded", MOCK["models"] == ["p2/MODEL_X"])
 
 # ── integration: primary trips after N, later requests skip it ────────────────────
 print("Integration trip-and-skip:")

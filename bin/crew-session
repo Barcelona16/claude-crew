@@ -81,21 +81,22 @@ cmd_set() {
   validate_name "$name" || return 1
   validate_field "$field" || return 1
   # backend 格式守门(2026-09-01):历史踩坑 work.backend 被写成裸 "GLM-5.3" 让会话起不来。
-  # 中央校验合法值:①含逗号(provider,model 全名)②有 $CREW_HOME/backends/<X>.conf 文件
+  # 中央校验合法值:①CCR 3 provider/model selector②有 $CREW_HOME/backends/<X>.conf 文件
   # ③CCR 里某 provider 的 models[] 含该裸模型名(launcher 兜底能救的最后场景)
   # 任一命中即通过;不合法直接拒写不埋雷。
   # CREW_SESSION_SKIP_VALIDATE=1 env 可绕(测试/adopt/迁移场景),生产不设。
   if [ "$field" = backend ] && [ -n "$value" ] && [ "${CREW_SESSION_SKIP_VALIDATE:-0}" != "1" ]; then
     local _ok=0 _CH="${CREW_HOME:-$HOME/.config/claude-crew}"
     case "$value" in
-      *,*) _ok=1 ;;   # 含逗号:provider,model 全名
+      */*) _ok=1 ;;   # CCR 3:provider/model selector
     esac
     if [ "$_ok" = 0 ] && [ -f "$_CH/backends/$value.conf" ]; then _ok=1; fi
-    if [ "$_ok" = 0 ] && command -v node >/dev/null 2>&1 && [ -f "$HOME/.claude-code-router/config.json" ]; then
+    local _crew_provider_map="${CREW_CCR_CONFIG:-$_CH/ccr-providers.json}"
+    if [ "$_ok" = 0 ] && command -v node >/dev/null 2>&1 && [ -f "$_crew_provider_map" ]; then
       # 查 CCR 里有无 provider 的 models[] 含该裸值
-      RM="$value" node -e '
+      RM="$value" CREW_PROVIDER_MAP="$_crew_provider_map" node -e '
         try {
-          const c=JSON.parse(require("fs").readFileSync(process.env.HOME+"/.claude-code-router/config.json","utf8"));
+          const c=JSON.parse(require("fs").readFileSync(process.env.CREW_PROVIDER_MAP,"utf8"));
           const ps=c.Providers||c.providers||[];
           const hit=ps.some(p=>(p.models||[]).indexOf(process.env.RM)>=0);
           process.exit(hit?0:1);
@@ -104,7 +105,7 @@ cmd_set() {
     fi
     if [ "$_ok" != 1 ]; then
       echo "[crew-session] invalid backend '$value' for '$name' — must be:" >&2
-      echo "  ① 'provider,model' 全名(如 joycode-oai,GLM-5.3),或" >&2
+      echo "  ① 'provider/model' CCR 3 selector(如 joycode-oai/GLM-5.3),或" >&2
       echo "  ② 存在 \$CREW_HOME/backends/<name>.conf,或" >&2
       echo "  ③ CCR 里某 provider 的 models[] 含该裸值" >&2
       echo "  查合法值:crew models" >&2

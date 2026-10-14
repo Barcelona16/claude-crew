@@ -6,9 +6,9 @@ TOKEN_DESC="JD gateway token (your own; stays local)"
 CCR_TEMPLATE="ccr-config.template.json"
 DEFAULT_BACKEND="Claude-Opus-4.8-joybuilder"
 
-# Model presets to generate: "<preset-name>|<provider,realmodel>" per entry.
+# Model presets to generate: "<preset-name>|<provider/realmodel>" per entry.
 PRESETS=(
-  "Claude-Opus-4.8-joybuilder|opus,Claude-Opus-4.8-joybuilder"
-  "GLM-5.2|glm,GLM-5.2"
-  "kimi-k3-joybuilder|kimi,kimi-k3-joybuilder"
+  "Claude-Opus-4.8-joybuilder|opus/Claude-Opus-4.8-joybuilder"
+  "GLM-5.2|glm/GLM-5.2"
+  "kimi-k3-joybuilder|kimi/kimi-k3-joybuilder"
 )

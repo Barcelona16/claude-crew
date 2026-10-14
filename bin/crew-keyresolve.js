@@ -61,17 +61,22 @@ var policy = {};
   }
 })();
 
-// CCR config: providers + Router.default ("provider,model")
-var ccr = {}; try { ccr = JSON.parse(rd(HOME + "/.claude-code-router/config.json")); } catch (e) {}
+// CCR 3 provider map. CCR itself stores the live config in SQLite, while crew
+// keeps this private JSON map for deterministic key/model resolution.
+var ccr = {}; try { ccr = JSON.parse(rd(process.env.CREW_CCR_CONFIG || (CONF + "/ccr-providers.json"))); } catch (e) {}
 var provs = ccr.Providers || ccr.providers || [];
 function provKey(n) { for (var j = 0; j < provs.length; j++) { if (provs[j] && provs[j].name === n) return (provs[j].api_key || provs[j].apiKey || "") + ""; } return ""; }
-var rdef = ((ccr.Router && ccr.Router.default) || "") + "", dprov = rdef, dmodel = rdef, ci = rdef.indexOf(",");
+var rdef = ((ccr.Router && ccr.Router.default) || "") + "", dprov = rdef, dmodel = rdef, ci = rdef.indexOf("/");
 if (ci >= 0) { dprov = rdef.slice(0, ci); dmodel = rdef.slice(ci + 1); }
+if (!dmodel && provs[0]) {
+  dprov = (provs[0].name || "") + "";
+  dmodel = ((provs[0].models || [])[0] || "") + "";
+}
 
 // A model's backend conf tells us its BASE_URL (routing mode) when there is no live env.
-// Match by realmodel against each backends/*.conf MODEL ("provider,realmodel" or "realmodel").
+// Match by realmodel against each backends/*.conf MODEL ("provider/realmodel" or "realmodel").
 // Returns { base, prov } — prov is the provider prefix when the conf carries one
-// ("joycode-oai,Kimi-K3" -> "joycode-oai"), so a policy-less model can still resolve the
+// ("joycode-oai/Kimi-K3" -> "joycode-oai"), so a policy-less model can still resolve the
 // key its CCR provider actually uses (crew-proxy passthrough rides that provider's key).
 function deriveBaseFromBackends(rm) {
   var out = { base: "", prov: "", model: "" };
@@ -84,7 +89,7 @@ function deriveBaseFromBackends(rm) {
     if (txt) {
       m = /(^|\n)[ \t]*MODEL[ \t]*=[ \t]*([^\n]+)/.exec(txt);
       if (m) {
-        mm = m[2].trim(); c = mm.indexOf(",");
+        mm = m[2].trim(); c = mm.indexOf("/");
         if (c >= 0) { out.prov = mm.slice(0, c).trim(); mm = mm.slice(c + 1); }
         // The conf's real model segment — lets callers replace a backend NAME (opus47)
         // with the model it actually routes to (Claude-Opus-4.7-joybuilder) for display.
@@ -98,7 +103,7 @@ function deriveBaseFromBackends(rm) {
       if (!/\.conf$/.test(files[i])) continue;
       txt = rd(dir + "/" + files[i]);
       m = /(^|\n)[ \t]*MODEL[ \t]*=[ \t]*([^\n]+)/.exec(txt); if (!m) continue;
-      mm = m[2].trim(); c = mm.indexOf(",");
+      mm = m[2].trim(); c = mm.indexOf("/");
       if (c >= 0) { out.prov = mm.slice(0, c).trim(); mm = mm.slice(c + 1); }
       if (mm.trim() !== rm) { out.prov = ""; continue; }
       out.model = mm.trim();
@@ -122,7 +127,7 @@ function resolveOne(sess, opts) {
   var model = opts.backend || "";
   if (!model && sess) model = rd(STATE + "/" + sess + ".backend").trim();
   if (model === "" || model === "-" || model === "default") model = dmodel;   // ambient plain -> concrete
-  var mprov = ""; var mi = model.indexOf(","); if (mi >= 0) { mprov = model.slice(0, mi); model = model.slice(mi + 1); }
+  var mprov = ""; var mi = model.indexOf("/"); if (mi >= 0) { mprov = model.slice(0, mi); model = model.slice(mi + 1); }
   var realmodel = model;
 
   // ---- routing mode: live ANTHROPIC_BASE_URL wins; else derive from conf; else proxy default ----

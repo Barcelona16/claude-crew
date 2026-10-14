@@ -55,8 +55,8 @@ account/quota). The internal CCR template routes through `llm-gw.jd.local`.
 > internal plugin repo `claude-crew-joycode` (on JD coding). After the core `setup.sh`, run that
 > plugin's `install.sh` — it adds the `joycode_*` presets + proxy.
 
-Then: `crew models` · `crew up` (ensure deps up) · `crew <name> --model GLM-5.2`. **Keys stay
-local** (`~/.claude-code-router/config.json`, `~/.config/claude-crew/keys.conf`) — never committed.
+Then: `crew models` · `crew up` (ensure deps up) · `crew <name> --model glm/GLM-5.2`. **Keys stay
+local** (`~/.config/claude-crew/ccr-providers.json`, `~/.config/claude-crew/keys.conf`) — never committed.
 
 ## Usage
 
@@ -176,8 +176,8 @@ crew-proxy ships a local control panel — open **http://127.0.0.1:8788/dashboar
 - **Keys** — each key's healthy/tripped state, request count, ok/fail, consecutive failures, cooldown
 - **Sessions** — every crew session (name/status/model/key/dir); each row has **copy** (copies the `crew <name> --model ...` command), **kill**, and **edit** (change model/key)
 - **Recent requests** — a live request feed (model · key · status · whether it failed over)
-- **+ add key/provider** — fill in alias/key/model/base_url to write a new provider into your CCR
-  config (**config.json is backed up first**; run `crew up` afterwards to reload CCR)
+- **+ add key/provider** — fill in alias/key/model/base_url to write a new provider into crew's
+  provider map (backed up first, then applied through the CCR3 RPC)
 
 The panel binds `127.0.0.1` only. Every write op (kill / edit / add provider) validates input to
 prevent injection. **Token usage** is tallied per key and per model (input/output tokens, parsed

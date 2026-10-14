@@ -164,17 +164,17 @@ out=$("$BIN" help 2>&1)
 echo "$out" | grep -q "用法:" && _ok "help 输出用法" || _ng "help 缺用法" ""
 
 # --- Case 21-26: backend 校验 + 审计日志(2026-09-01)---
-echo "--- Case 21: backend provider,model 合法 ---"
+echo "--- Case 21: backend provider/model 合法 ---"
 setup
 export CREW_HOME="$CREW_STATE/../crewhome-$$"; mkdir -p "$CREW_HOME/backends"
 HOME_ORIG="$HOME"
 export HOME="$CREW_STATE/../fakehome-$$"; mkdir -p "$HOME/.claude-code-router"
-cat > "$HOME/.claude-code-router/config.json" <<'CCR'
-{"Providers":[{"name":"newkey-4.7","api_key":"53c5","models":["Claude-Opus-4.7-joybuilder"]}]}
+cat > "$CREW_HOME/ccr-providers.json" <<'CCR'
+{"gateway":{"api_key":"crew-test"},"Providers":[{"name":"newkey-4.7","api_key":"53c5","models":["Claude-Opus-4.7-joybuilder"]}]}
 CCR
-"$BIN" set alpha backend "newkey-4.7,Claude-Opus-4.7-joybuilder" >/dev/null
-[ "$?" = 0 ] && [ "$("$BIN" get alpha backend)" = "newkey-4.7,Claude-Opus-4.7-joybuilder" ] \
-  && _ok "provider,model 全名放行" || _ng "合法值被拒" ""
+"$BIN" set alpha backend "newkey-4.7/Claude-Opus-4.7-joybuilder" >/dev/null
+[ "$?" = 0 ] && [ "$("$BIN" get alpha backend)" = "newkey-4.7/Claude-Opus-4.7-joybuilder" ] \
+  && _ok "provider/model CCR 3 selector 放行" || _ng "合法值被拒" ""
 
 echo "--- Case 22: backend 裸模型名 CCR 含之 ---"
 "$BIN" set alpha backend "Claude-Opus-4.7-joybuilder" >/dev/null

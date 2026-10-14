@@ -3,7 +3,7 @@
 <plist version="1.0"><dict>
   <key>Label</key><string>com.claudecrew.proxy</string>
   <key>ProgramArguments</key><array><string>__PY__</string><string>__PROXY_SCRIPT__</string></array>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string><key>HOME</key><string>__HOME__</string></dict>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string><key>HOME</key><string>__HOME__</string><key>CREW_CONFIG_DIR</key><string>__CREW_CONFIG_DIR__</string><key>CREW_CCR_CONFIG</key><string>__CCR_PROVIDER_MAP__</string><key>CREW_CCR_V3_ADAPTER</key><string>__CCR_ADAPTER__</string><key>CREW_CCR_URL</key><string>http://127.0.0.1:__CCR_GATEWAY_PORT__</string><key>CREW_CCR_PORT</key><string>__CCR_GATEWAY_PORT__</string><key>CREW_CCR_WEB_URL</key><string>http://127.0.0.1:__CCR_WEB_PORT__</string><key>CREW_CCR_WEB_TOKEN</key><string>__CCR_WEB_TOKEN__</string></dict>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>5</integer>
   <key>StandardOutPath</key><string>__HOME__/.claude-code-router/proxy.launchd.out.log</string>
   <key>StandardErrorPath</key><string>__HOME__/.claude-code-router/proxy.launchd.err.log</string>

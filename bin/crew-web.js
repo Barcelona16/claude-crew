@@ -16,7 +16,7 @@
 // - $CREW_STATE/inbox/<name>/*.json + *.msg(未消费统计)
 // - $CREW_STATE/pending-nudges.jsonl(待补发)
 // - $CREW_STATE/<name>.tmux/.sid/.backend/.key/.dir(会话 state)
-// - CCR config.json(切换菜单的 keys / models 列表来源;白名单校验用)
+// - crew CCR 3 provider map(切换菜单的 keys / models 列表来源;白名单校验用)
 //
 // 用法:
 //   crew-web.js [--port 18060]
@@ -39,7 +39,11 @@ const PORT = parseInt(process.env.CREW_WEB_PORT || '18060', 10);
 const SCRIPT_DIR = __dirname;
 const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
 const FRONTEND_HTML = path.join(REPO_ROOT, 'web', 'frontend.html');
-const CCR_CONFIG = path.join(process.env.HOME || '/root', '.claude-code-router', 'config.json');
+const CREW_HOME = process.env.CREW_HOME || path.join(
+  process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || '/root', '.config'),
+  'claude-crew',
+);
+const CCR_PROVIDER_MAP = process.env.CREW_CCR_CONFIG || path.join(CREW_HOME, 'ccr-providers.json');
 
 // ---- 工具 ----
 function readTail(file, n) {
@@ -236,9 +240,9 @@ function sessionCard(name, msgLimit) {
   };
 }
 
-// CCR 里所有 key(别名 → 真值)。切换菜单 + 白名单来源。
+// crew provider map 里所有 key(别名 → 真值)。切换菜单 + 白名单来源。
 function listKeys() {
-  const cfg = readJSON(CCR_CONFIG);
+  const cfg = readJSON(CCR_PROVIDER_MAP);
   if (!cfg) return [];
   // keys.conf 别名(有些环境用 keys.conf,有些直接 provider.api_key 里)
   // 这里保守:遍历 Providers[].api_key 拿唯一集合作为 key 白名单
@@ -250,25 +254,25 @@ function listKeys() {
 
 // CCR 里某 key 支持的模型 —— 全部 provider 的 models union
 function listModelsForKey(key) {
-  const cfg = readJSON(CCR_CONFIG);
+  const cfg = readJSON(CCR_PROVIDER_MAP);
   if (!cfg) return [];
   const providers = cfg.Providers || cfg.providers || [];
   const models = new Set();
   for (const p of providers) {
     if (p && p.api_key === key && Array.isArray(p.models)) {
-      for (const m of p.models) models.add(p.name ? p.name + ',' + m : m);
+      for (const m of p.models) models.add(p.name ? p.name + '/' + m : m);
     }
   }
   return Array.from(models);
 }
 
 function listAllModels() {
-  const cfg = readJSON(CCR_CONFIG);
+  const cfg = readJSON(CCR_PROVIDER_MAP);
   if (!cfg) return [];
   const providers = cfg.Providers || cfg.providers || [];
   const models = new Set();
   for (const p of providers) {
-    if (p && Array.isArray(p.models)) for (const m of p.models) models.add(p.name ? p.name + ',' + m : m);
+    if (p && Array.isArray(p.models)) for (const m of p.models) models.add(p.name ? p.name + '/' + m : m);
   }
   return Array.from(models);
 }
@@ -416,7 +420,7 @@ module.exports = {
   buildFrontend, sessionCard, listCrewSessions, listKeys, listAllModels,
   readMessages, readInboxCounts, readPendingNudges,
   handleState, handleSwitch, handleAttach, handleRequest,
-  PORT, CREW_STATE, FEEDBACK_JSONL,
+  PORT, CREW_STATE, FEEDBACK_JSONL, CREW_HOME, CCR_PROVIDER_MAP,
 };
 
 // ---- CLI ----

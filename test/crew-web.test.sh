@@ -40,10 +40,11 @@ FAKE
 chmod +x "$FAKE_BIN/tmux"
 export PATH="$FAKE_BIN:$PATH"
 
-# 假 CCR config(白名单来源)
-mkdir -p "$T/.claude-code-router"
-cat > "$T/.claude-code-router/config.json" <<'JSON'
-{ "Providers": [
+# 假 CCR 3 provider map(白名单来源)
+export CREW_HOME="$T/.config/claude-crew"
+mkdir -p "$CREW_HOME"
+cat > "$CREW_HOME/ccr-providers.json" <<'JSON'
+{ "gateway": {"api_key":"crew-test"}, "Providers": [
   { "name": "prov1", "api_key": "key-abc", "models": ["Claude-Opus-4.7", "Claude-Sonnet-4"] },
   { "name": "prov2", "api_key": "key-xyz", "models": ["GLM-5.3"] }
 ]}
@@ -52,7 +53,7 @@ export HOME="$T"
 
 # 假会话:alice 有全套 state,bob 只有心跳
 touch "$CREW_STATE/alice.tmux"
-echo "prov1,Claude-Opus-4.7" > "$CREW_STATE/alice.backend"
+echo "prov1/Claude-Opus-4.7" > "$CREW_STATE/alice.backend"
 echo "key-abc" > "$CREW_STATE/alice.key"
 echo "/work/alice" > "$CREW_STATE/alice.dir"
 cat > "$CREW_STATE/heartbeat/alice.json" <<'JSON'
@@ -87,7 +88,7 @@ echo "--- Case 1: sessionCard alice ---"
 node -e "
 const w=require('$CWEB');
 const s=w.sessionCard('alice');
-process.exit(s.name==='alice'&&s.status==='live'&&s.ctxPct===42&&s.model==='prov1,Claude-Opus-4.7'&&s.inboxCount===1?0:1)
+process.exit(s.name==='alice'&&s.status==='live'&&s.ctxPct===42&&s.model==='prov1/Claude-Opus-4.7'&&s.inboxCount===1?0:1)
 " && _ok "sessionCard 字段完整(name/status/ctxPct/model/inboxCount)" || _ng "sessionCard 字段不对"
 
 # ---- Case 2: inbound/outbound 归属 ----

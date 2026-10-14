@@ -1,21 +1,18 @@
 {
-  "LOG": false,
-  "HOST": "127.0.0.1",
-  "PORT": 3456,
-  "APIKEY": "",
-  "API_TIMEOUT_MS": "600000",
-  "_comment": "Fill in each provider with a real endpoint. Your token from setup goes into api_key (__GATEWAY_TOKEN__ is replaced at install). One provider block per model. The `name,model` string (e.g. \"anthropic,claude-opus-4-6\") is what crew presets route on — see setup.sh. Transformer: use \"Anthropic\" for the Anthropic Messages API, \"OpenAI\" for OpenAI-compatible chat/completions (most other vendors).",
+  "schema": "claude-crew-ccr-v3-provider-map/v1",
+  "gateway": { "api_key": "__CCR_GATEWAY_KEY__" },
+  "_comment": "Fill in each provider with a real endpoint. Your token from setup goes into api_key (__GATEWAY_TOKEN__ is replaced at install). One provider block per model. The `name/model` selector (for example `anthropic/claude-opus-4-6`) is what crew sessions use. This is crew's provider map; CCR 3's live state stays in SQLite and is updated through its authenticated local RPC. Transformer: use `Anthropic` for the Anthropic Messages API, `OpenAI` for OpenAI-compatible chat/completions.",
   "Providers": [
     { "name": "anthropic", "api_base_url": "https://api.anthropic.com/v1/messages",        "api_key": "__GATEWAY_TOKEN__", "models": ["__MODEL__"], "transformer": { "use": ["Anthropic"] } },
     { "name": "openai",    "api_base_url": "https://api.openai.com/v1/chat/completions",     "api_key": "__GATEWAY_TOKEN__", "models": ["__MODEL__"], "transformer": { "use": ["OpenAI"] } }
   ],
   "Router": {
-    "default": "__PROVIDER__,__MODEL__",
-    "background": "__PROVIDER__,__MODEL__",
-    "think": "__PROVIDER__,__MODEL__",
-    "longContext": "__PROVIDER__,__MODEL__",
+    "default": "__PROVIDER__/__MODEL__",
+    "background": "__PROVIDER__/__MODEL__",
+    "think": "__PROVIDER__/__MODEL__",
+    "longContext": "__PROVIDER__/__MODEL__",
     "longContextThreshold": 60000,
-    "webSearch": "__PROVIDER__,__MODEL__",
-    "image": "__PROVIDER__,__MODEL__"
+    "webSearch": "__PROVIDER__/__MODEL__",
+    "image": "__PROVIDER__/__MODEL__"
   }
 }

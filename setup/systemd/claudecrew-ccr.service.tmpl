@@ -2,9 +2,10 @@
 Description=claude-code-router (crew dependency)
 After=network-online.target
 [Service]
-ExecStart=__NODE__ __CCR_CLI__ start
+ExecStart=__NODE__ __CCR_CLI__ start --no-open --port __CCR_WEB_PORT__
 Restart=always
 RestartSec=5
 Environment=HOME=__HOME__
+Environment=CCR_WEB_AUTH_TOKEN=__CCR_WEB_TOKEN__
 [Install]
 WantedBy=default.target

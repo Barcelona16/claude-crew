@@ -142,12 +142,12 @@ load_backend_conf() {
   fi
   local conf="$CREW_HOME/backends/$backend.conf"
   # v1 兼容(2026-08-30 切换 work 时踩):conf 缺失时按 v1 双路径判:
-  # 1) backend 名带逗号(如 "joycode-oai,GLM-5.3") → 合成 ccr backend(BASE_URL=crew-proxy:8788,
+  # 1) backend 名带 CCR 3 selector(如 "joycode-oai/GLM-5.3") → 合成 ccr backend(BASE_URL=crew-proxy:8788,
   #    MODEL 保全串,TOKEN=test,KEY_MODE=ccr)—— 让 CCR 路由
-  # 2) backend 名无逗号 → 报错让用户显式传 --model provider,model
+  # 2) backend 名无 selector → 报错让用户显式传 --model provider/model
   if [ ! -f "$conf" ]; then
     case "$backend" in
-      *,*)
+      */*)
         # v1 line 313-315 逻辑:合成 ccr backend
         BK_BASE_URL="http://127.0.0.1:${CREW_PROXY_PORT:-8788}"
         BK_MODEL="$backend"
@@ -159,14 +159,14 @@ load_backend_conf() {
         return 0
         ;;
       *)
-        # 2026-09-01 裸模型名兜底:backend 无 conf 且不含逗号(如 "GLM-5.3")—— 以前直接拒起
-        # (work backend 被写成裸 GLM-5.3 就起不来的坑)。改为先查 CCR:哪个 provider 的 models[]
-        # 含这个 realmodel,查到就合成 provider,realmodel 的 ccr backend 起(走 crew-proxy:8788)。
+        # 裸模型名兜底:backend 无 conf 且不含 CCR 3 selector(如 "GLM-5.3")。
+        # 查 CCR provider map，查到就合成 provider/model 的 backend（走 crew-proxy:8788）。
         local _prov=""
-        if command -v node >/dev/null 2>&1 && [ -f "$HOME/.claude-code-router/config.json" ]; then
-          _prov=$(RM="$backend" node -e '
+        local _crew_provider_map="${CREW_CCR_CONFIG:-$CREW_HOME/ccr-providers.json}"
+        if command -v node >/dev/null 2>&1 && [ -f "$_crew_provider_map" ]; then
+          _prov=$(RM="$backend" CREW_PROVIDER_MAP="$_crew_provider_map" node -e '
             const fs=require("fs");
-            const c=JSON.parse(fs.readFileSync(process.env.HOME+"/.claude-code-router/config.json","utf8"));
+            const c=JSON.parse(fs.readFileSync(process.env.CREW_PROVIDER_MAP,"utf8"));
             const ps=c.Providers||c.providers||[];
             const p=ps.find(p=>(p.models||[]).indexOf(process.env.RM)>=0);
             if(p) process.stdout.write(p.name);
@@ -174,13 +174,13 @@ load_backend_conf() {
         fi
         if [ -n "$_prov" ]; then
           BK_BASE_URL="http://127.0.0.1:${CREW_PROXY_PORT:-8788}"
-          BK_MODEL="$_prov,$backend"
+          BK_MODEL="$_prov/$backend"
           BK_TOKEN="test"; BK_KEY_MODE="ccr"; BK_CLAUDE_FLAGS=""
           BK_ENV_EXTRA="MAX_THINKING_TOKENS=0 CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1"
-          echo "[crew-launcher] 裸模型名 '$backend' 无 conf,查 CCR 反推 provider='$_prov' → 合成 ccr backend '$_prov,$backend'(via :8788)" >&2
+          echo "[crew-launcher] 裸模型名 '$backend' 无 conf,查 CCR 反推 provider='$_prov' → 合成 CCR 3 selector '$_prov/$backend'(via :8788)" >&2
           return 0
         fi
-        echo "[crew-launcher] backend '$backend' 无 conf、不含逗号、CCR 里也无 provider 提供它,拒起。用 --model provider,model(例:joycode-oai,GLM-5.3)或 crew addkey/sync-models" >&2
+        echo "[crew-launcher] backend '$backend' 无 conf、不含 CCR 3 selector、provider map 里也无 provider 提供它,拒起。用 --model provider/model(例:joycode-oai/GLM-5.3)或 crew addkey/sync-models" >&2
         return 1
         ;;
     esac
