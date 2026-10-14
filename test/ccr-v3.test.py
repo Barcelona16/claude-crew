@@ -60,7 +60,10 @@ with tempfile.TemporaryDirectory(prefix="crew-ccr-v3-test-") as tmp:
             length = int(self.headers.get("Content-Length", "0"))
             calls.append((self.headers.get("x-ccr-web-auth"), json.loads(self.rfile.read(length))))
             if calls[-1][1]["method"] == "getConfig":
-                payload = {"ok": True, "value": {"gateway": {"corePort": 3457}}}
+                payload = {"ok": True, "value": {
+                    "gateway": {"corePort": 3457},
+                    "customField": "must-survive",
+                }}
             else:
                 payload = {"ok": True, "value": {}}
             data = json.dumps(payload).encode()
@@ -97,3 +100,4 @@ with tempfile.TemporaryDirectory(prefix="crew-ccr-v3-test-") as tmp:
     check("apply saves merged configuration", calls[2][1]["method"] == "saveConfig")
     saved = calls[2][1]["args"][0]
     check("saved configuration carries providers", saved["Providers"][0]["name"] == "key-01-openai")
+    check("saveApiKeys ACK cannot discard existing CCR settings", saved["customField"] == "must-survive")

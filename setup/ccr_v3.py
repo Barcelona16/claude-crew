@@ -168,8 +168,11 @@ def merge_gateway_api_keys(current: object, provider_map: dict[str, object]) -> 
 def command_apply(path: Path) -> int:
     provider_map = read_provider_map(path)
     current = rpc_call("getConfig", [])
-    with_gateway_key = rpc_call("saveApiKeys", [merge_gateway_api_keys(current, provider_map)])
-    next_config = merge_config(with_gateway_key, provider_map)
+    # saveApiKeys is a side-effect RPC.  CCR releases return either an ACK or
+    # a configuration-shaped object here, so it must never become the merge
+    # baseline: only the preceding getConfig result is guaranteed complete.
+    rpc_call("saveApiKeys", [merge_gateway_api_keys(current, provider_map)])
+    next_config = merge_config(current, provider_map)
     rpc_call("saveConfig", [next_config, {"applyProfile": False}])
     providers = map_providers(provider_map)
     models = {
