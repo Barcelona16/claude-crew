@@ -1,0 +1,20 @@
+bin/crew-statusline.sh
+  s_126d1b559bd363::t_a0516c22d8f5d3 136,138
+  s_126d1b559bd363::t_381bb334c8e501 99-104
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "1800e1e4abe7c766b9fd9f4fb705baf758f65494",
+  "prompts": {},
+  "sessions": {
+    "s_126d1b559bd363": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "242cfb2e-0fad-48c9-9821-d512c9a619bd",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
