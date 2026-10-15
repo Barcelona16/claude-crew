@@ -243,9 +243,10 @@ echo "$result" | grep -q "newkey-4.7,Claude-Opus-4.7-joybuilder" && _ok "orphan.
 # --append-system-prompt "$(cat FILE)" 会被 shell 展开为文件内容,故用文件里的独特串断言注入。
 # ============================================================================
 HOOK_SH="$SCRIPT_DIR/../bin/crew-sendmsg-hook.sh"
+STATUSLINE_SH="$SCRIPT_DIR/../bin/crew-statusline.sh"
 COMM_MD="$SCRIPT_DIR/../templates/comm-protocol.md"
 
-# ---- Case 19: settings.json 生成(合法 JSON + PostToolUse + hook 路径 + matcher)----
+# ---- Case 19: settings.json 生成(合法 JSON + hooks + status line)----
 echo "--- Case 19: settings.json 生成 ---"
 N="${TEST_PREFIX}-set"
 "$CS" set "$N" backend mock >/dev/null
@@ -255,10 +256,23 @@ if [ -x "$HOOK_SH" ] && command -v node >/dev/null 2>&1; then
   [ -f "$SF" ] && _ok "settings 文件生成" || _ng "settings 未生成" ""
   node -e "const s=JSON.parse(require('fs').readFileSync('$SF'));const h=s.hooks.PostToolUse[0];process.exit(h.matcher==='SendMessage'&&h.hooks[0].command.endsWith('crew-sendmsg-hook.sh')?0:1)" \
     && _ok "settings 合法 JSON:matcher=SendMessage + hook 指向 crew-sendmsg-hook.sh" || _ng "settings 内容不对:$(cat $SF 2>/dev/null)" ""
+  node -e "const fs=require('fs'),path=require('path'),s=JSON.parse(fs.readFileSync('$SF'));process.exit(s.statusLine&&s.statusLine.type==='command'&&path.resolve(s.statusLine.command)===path.resolve('$STATUSLINE_SH')?0:1)" \
+    && _ok "settings 注册 crew statusLine（显示实际模型/key）" || _ng "settings 缺 statusLine:$(cat $SF 2>/dev/null)" ""
 else
   _ok "(跳过:无 node 或 hook 不可执行)"
   _ok "(跳过 settings 内容检查)"
+  _ok "(跳过 statusLine 内容检查)"
 fi
+
+# ---- Case 19b: CCR session 不能同时继承两种 Anthropic 认证变量 ----
+echo "--- Case 19b: CCR auth 环境互斥 ---"
+N="${TEST_PREFIX}-auth"
+"$CS" set "$N" backend mock >/dev/null
+CREW_LAUNCHER_KEEP=1 "$CL" spawn --name "$N" --mode fg >/dev/null 2>&1
+launcher="/tmp/crew-launch-$N.sh"
+grep -qFx 'unset ANTHROPIC_API_KEY' "$launcher" \
+  && _ok "带 AUTH_TOKEN 的 crew launcher 会 unset ANTHROPIC_API_KEY" \
+  || _ng "launcher 未清理冲突的 ANTHROPIC_API_KEY" ""
 
 # ---- Case 20: launcher argv 含 --settings 指向该文件 ----
 echo "--- Case 20: --settings 拼进 argv ---"

@@ -376,14 +376,21 @@ cmd_spawn() {
   local settings_file="$CREW_STATE/$name.settings"
   local hook_cmd="$SCRIPT_DIR/crew-sendmsg-hook.sh"
   local stop_hook_cmd="$SCRIPT_DIR/crew-stop-hook.sh"
+  local statusline_cmd="$SCRIPT_DIR/crew-statusline.sh"
   local sendmsg_tool="${CREW_SENDMSG_TOOL:-SendMessage}"
   if command -v node >/dev/null 2>&1 && [ -x "$hook_cmd" ]; then
     local _stmp="$settings_file.tmp.$$"
     # Stop hook 可选:文件存在且可执行才挂载(避免旧安装升级期缺失导致启动失败)
     local _has_stop_hook=""
     [ -x "$stop_hook_cmd" ] && _has_stop_hook="1"
+    # Claude Code's native header shows the requested model but its bottom bar
+    # does not expose the routed provider/key. Register crew's status line for
+    # every session so a CCR-routed GLM session is not mistaken for the image's
+    # default Claude model.
+    local _statusline_cmd=""
+    [ -x "$statusline_cmd" ] && _statusline_cmd="$statusline_cmd"
     if HOOK_CMD="$hook_cmd" MATCHER="$sendmsg_tool" \
-       STOP_HOOK_CMD="$stop_hook_cmd" HAS_STOP="$_has_stop_hook" \
+       STOP_HOOK_CMD="$stop_hook_cmd" HAS_STOP="$_has_stop_hook" STATUSLINE_CMD="$_statusline_cmd" \
        node -e '
         const fs=require("fs");
         const hooks={PostToolUse:[{matcher:process.env.MATCHER,
@@ -392,7 +399,11 @@ cmd_spawn() {
           hooks.Stop=[{matcher:"*",
             hooks:[{type:"command",command:process.env.STOP_HOOK_CMD}]}];
         }
-        process.stdout.write(JSON.stringify({hooks},null,2)+"\n");
+        const settings={hooks};
+        if (process.env.STATUSLINE_CMD) {
+          settings.statusLine={type:"command",command:process.env.STATUSLINE_CMD};
+        }
+        process.stdout.write(JSON.stringify(settings,null,2)+"\n");
       ' > "$_stmp" 2>/dev/null; then
       mv -f "$_stmp" "$settings_file" && extra_settings=" --settings $(printf %q "$settings_file")"
     else
@@ -435,6 +446,10 @@ cmd_spawn() {
       echo 'rm -f "$0" 2>/dev/null || true'
     fi
     echo "export PATH=/work/node20/bin:\$PATH LANG=C.UTF-8 LC_ALL=C.UTF-8 IS_SANDBOX=1"
+    # CCR sessions use ANTHROPIC_AUTH_TOKEN. `make claude` sets an API key only
+    # to make a bare `claude` usable before Crew picks a route; retaining both
+    # variables makes Claude Code warn and can select the wrong auth mode.
+    [ -n "${BK_TOKEN:-}" ] && echo "unset ANTHROPIC_API_KEY"
     # 2026-08-31 修 Bug A:在起 claude 前 cd 到会话工作目录(对齐 v1:858/888)。v2 之前直接
     # 在 tmux pane 当前目录起 claude → 换模型/重启会话丢工作目录,且 --resume 按错目录找历史崩。
     [ -n "$dir" ] && printf 'cd %s || { echo "[crew] cannot cd to %s" >&2; exit 1; }\n' "$(printf %q "$dir")" "$(printf %q "$dir")"
