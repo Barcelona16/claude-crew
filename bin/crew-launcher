@@ -446,10 +446,6 @@ cmd_spawn() {
       echo 'rm -f "$0" 2>/dev/null || true'
     fi
     echo "export PATH=/work/node20/bin:\$PATH LANG=C.UTF-8 LC_ALL=C.UTF-8 IS_SANDBOX=1"
-    # CCR sessions use ANTHROPIC_AUTH_TOKEN. `make claude` sets an API key only
-    # to make a bare `claude` usable before Crew picks a route; retaining both
-    # variables makes Claude Code warn and can select the wrong auth mode.
-    [ -n "${BK_TOKEN:-}" ] && echo "unset ANTHROPIC_API_KEY"
     # 2026-08-31 修 Bug A:在起 claude 前 cd 到会话工作目录(对齐 v1:858/888)。v2 之前直接
     # 在 tmux pane 当前目录起 claude → 换模型/重启会话丢工作目录,且 --resume 按错目录找历史崩。
     [ -n "$dir" ] && printf 'cd %s || { echo "[crew] cannot cd to %s" >&2; exit 1; }\n' "$(printf %q "$dir")" "$(printf %q "$dir")"

@@ -264,15 +264,18 @@ else
   _ok "(跳过 statusLine 内容检查)"
 fi
 
-# ---- Case 19b: CCR session 不能同时继承两种 Anthropic 认证变量 ----
-echo "--- Case 19b: CCR auth 环境互斥 ---"
+# ---- Case 19b: CCR session 只写入所需的 ANTHROPIC_AUTH_TOKEN ----
+echo "--- Case 19b: CCR auth 环境最小化 ---"
 N="${TEST_PREFIX}-auth"
 "$CS" set "$N" backend mock >/dev/null
 CREW_LAUNCHER_KEEP=1 "$CL" spawn --name "$N" --mode fg >/dev/null 2>&1
 launcher="/tmp/crew-launch-$N.sh"
-grep -qFx 'unset ANTHROPIC_API_KEY' "$launcher" \
-  && _ok "带 AUTH_TOKEN 的 crew launcher 会 unset ANTHROPIC_API_KEY" \
-  || _ng "launcher 未清理冲突的 ANTHROPIC_API_KEY" ""
+grep -qF 'ANTHROPIC_AUTH_TOKEN=mocktoken' "$launcher" \
+  && _ok "CCR launcher 只写入所需的 ANTHROPIC_AUTH_TOKEN" \
+  || _ng "launcher 缺 ANTHROPIC_AUTH_TOKEN" ""
+grep -qF 'ANTHROPIC_API_KEY' "$launcher" \
+  && _ng "launcher 不应再写入 ANTHROPIC_API_KEY" "" \
+  || _ok "launcher 未写入 ANTHROPIC_API_KEY"
 
 # ---- Case 20: launcher argv 含 --settings 指向该文件 ----
 echo "--- Case 20: --settings 拼进 argv ---"
