@@ -984,7 +984,7 @@ cmd_doctor() {
 cmd_version() {
   local commit
   commit=$(cd "$SCRIPT_DIR/.." && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "crew v3.0.0 (会话间通信走官方 SendMessage/ListAgents + --name 寻址对齐 + hook 记日志;commit $commit)"
+  echo "crew v3.1.0 (v3.0 通信协议 + proxy 错误转译触发 auto-compact + statusline 上下文/目录/分支;commit $commit)"
 }
 
 # 会话最近活跃时间(epoch):transcript .jsonl mtime + state 文件 mtime 取 max。0=无从判定。
