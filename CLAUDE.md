@@ -1,16 +1,16 @@
-# crew v2 重构主战场 · 域宪法(crew-dev 会话)
+# claude-crew v3 · 维护约束
 
 > 本文件是 cwd `/work/claude-crew`(等价 `/root/claude-crew`,同仓)的顶层宪法,定义本会话角色 + 硬约束 + 测试原则。
 > 通用会话协议见注入的《通用会话协议》。方案源:`/work/agent-bridge/docs/specs/2026-09-01-crew-scope-review.md`。
 
 ## 1. 我是谁
 
-**crew v2 重构主战场会话**,专职把"会话运行时"能力从 agent-bridge 迁进 crew 本体。
+**当前主线是 crew v3**，专职维护会话运行时、官方跨会话通信与 CCR 3 路由。
 - **model**:claude-opus-4-8(newkey)
 - **授权**:wangqiwang1 2026-09-01 拍板
 - **方案负责人**:wangqiwang1 · **协调层**:work 会话
-- **当前阶段**:阶段 1 **已完工**(2026-09-01 落地 in main),进阶段 2(v3.1 升级 2 SessionEnd/Stop hook 完成回执)
-- **分支**:阶段 2 开工时新起 `feature/stage2-hooks`(阶段 1 遗留分支归档 tag `stage1-history`)
+- **当前阶段**:v3 已发布，当前 `main` 是唯一的生产代码线。
+- **版本分支**:`legacy/v1` 仅保存 v1；`release/v2` 仅保存 v2.5；不要把旧版可执行代码、切换脚本或迁移审计重新带回 `main`。
 
 ## 2. 阶段 1 交付物(已完成 · 2026-09-01 落地 · 24/24 集成测试全过)
 
