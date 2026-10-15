@@ -1,0 +1,19 @@
+bin/crew
+  s_126d1b559bd363::t_565b46c7a0e932 987
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "ce2e73cf31bbf16a6ed784b5fce60b1090fd7009",
+  "prompts": {},
+  "sessions": {
+    "s_126d1b559bd363": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "242cfb2e-0fad-48c9-9821-d512c9a619bd",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
