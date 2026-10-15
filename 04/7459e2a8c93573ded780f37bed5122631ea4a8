@@ -1,0 +1,31 @@
+setup/crew_proxy.py
+  s_126d1b559bd363::t_89f48d456c28b6 108-110
+  s_126d1b559bd363::t_93dee080b92fb9 2377-2378,2380
+  s_126d1b559bd363::t_0c51e249a4a552 2370-2376,2379,2381-2393,2410-2411
+  s_126d1b559bd363::t_ed1d0df32b2017 95-107,111-135
+bin/crew-statusline.sh
+  s_126d1b559bd363::t_2a87344f9be6fc 116-117,137-140
+  s_126d1b559bd363::t_4d838d9815b2c7 158
+  s_126d1b559bd363::t_39b0d0737a5131 143-145,152-157,159-164
+  s_126d1b559bd363::t_61c41deed3824f 168,173,175
+  s_126d1b559bd363::t_7de0027754be9f 113,119,121-122,131-132
+  s_126d1b559bd363::t_6b621b4a99babe 2,6-7,20-21,31-38,108-112,114-115,118,120,123-130,133-136,141-142,146-151,165
+test/crew_proxy_ptl.py
+  s_126d1b559bd363::t_d29b5d31d8ef4f 1-188
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "047459e2a8c93573ded780f37bed5122631ea4a8",
+  "prompts": {},
+  "sessions": {
+    "s_126d1b559bd363": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "242cfb2e-0fad-48c9-9821-d512c9a619bd",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
