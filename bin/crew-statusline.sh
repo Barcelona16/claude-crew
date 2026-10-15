@@ -1,8 +1,10 @@
 #!/bin/bash
-# crew-statusline.sh —— Claude Code statusLine:会话底部常显「会话名 · 模型 · 🔑key」。
+# crew-statusline.sh —— Claude Code statusLine:会话底部常显「会话名 · 模型 · 🔑key · 上下文 · git分支」。
 #
 # 为什么需要它:/model 和 stdin JSON 的 display_name 都只给通用档名("Opus 4.8"),
 # 看不出实际路由到哪个后端 + 用哪把 key。覆盖 crew / `ccr code` 直起 / 直连三种起法。
+# 2026-10-15 增段:上下文占比(自定义 statusline 会替换掉内置百分比显示,所以必须
+# 自己从 stdin JSON 的 context_window 字段算出来补上)+ git 分支 + 输出风格。
 #
 # 关键设计:绝不显示含糊的 "default"。模型和 key 都解析成**具体真值**:
 #   - 模型:CREW_MODEL / CREW_BACKEND / <sess>.backend;若是 "default"/"-"/空(ambient 明文
@@ -15,7 +17,8 @@
 #     不同路由默认 key 不同,所以必须按 base_url 分别解析,别一律叫 "default"。
 #
 # 铁律:每次渲染调用 —— 必须快、绝不报错、绝不空白。解析用 node(读 CCR/keys/policy 三文件),
-# node 缺失或失败则降级到纯 env 展示。node 实测 ~70ms,可接受。
+# node 缺失或失败则降级到纯 env 展示。node 实测 ~70ms,可接受。jq 缺失时上下文段静默省略
+# (脚本其余部分只用 sed/grep,不依赖 jq)。
 set +e 2>/dev/null
 
 # Claude Code 从 stdin 灌 session JSON(可能空);读掉但不阻塞(claude 会关 stdin)。
@@ -25,6 +28,14 @@ STATE="${CREW_STATE:-$HOME/.local/share/claude-crew}"
 
 # 从 stdin JSON 抠一个字符串字段(best-effort,不管嵌套;失败返回空)。
 json_str(){ printf '%s' "$input" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -1; }
+# 从 stdin JSON 抠一个数字字段(整数部分;jq 缺失时 sed 兜底)。
+json_num(){
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$input" | jq -r "$1 // empty" 2>/dev/null
+  else
+    printf '%s' "$input" | sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\([0-9][0-9.]*\).*/\1/p" | head -1 | cut -d. -f1
+  fi
+}
 
 # ---------- 1) 会话名 ----------
 sess="${CREW_SESSION:-}"
@@ -94,13 +105,72 @@ case "$lc" in
   *)        c_model=$'\033[37m' ;;   # 其它/未知
 esac
 
+# ---------- 3.5) 上下文段(2026-10-15)----------
+# 自定义 statusline 替换掉内置的上下文百分比,必须自己补。数据源:stdin JSON 的
+# context_window(CC ≥2.1 提供 used_percentage/remaining_percentage/context_window_size/
+# total_input_tokens)。分级变色:>90% 红(危险,即将自动压缩)、75-90% 黄(注意)、
+# 其余绿(健康)。jq 缺失/字段缺失时整段静默省略,不影响其他段。
+# 注意:input=0 时(部分网关不回传 usage,如 GLM 直连)只显 0%,不编造数据。
+ctx_seg=""
+used="$(json_num '.context_window.used_percentage' 'used_percentage')"
+in_tok="$(json_num '.context_window.total_input_tokens' 'total_input_tokens')"
+if [ -n "$used" ] && [ "$used" != "null" ] 2>/dev/null && { [ -z "$in_tok" ] || [ "$in_tok" != "null" ] && [ "$in_tok" -gt 0 ] 2>/dev/null; }; then
+  # 剩余 token 绝对值(千位简写,如 116k)——比纯百分比更有行动价值(还够聊几个回合)。
+  win_tok="$(json_num '.context_window.context_window_size' 'context_window_size')"
+  left_k=""
+  if [ -n "$in_tok" ] && [ -n "$win_tok" ] && [ "$in_tok" -ge 0 ] && [ "$win_tok" -gt 0 ] 2>/dev/null; then
+    left_k="$(( (win_tok - in_tok) / 1000 ))k"
+  fi
+  used="${used%.*}"  # 42.0 -> 42(有小数时)
+  case "$used" in
+    ''|*[!0-9]*) ;;                       # 非数字:整段跳过
+    *) if [ "$used" -ge 90 ]; then c_ctx=$'\033[31m'    # red   >=90% 快压缩了
+       elif [ "$used" -ge 75 ]; then c_ctx=$'\033[33m'  # yellow 75-89%
+       else c_ctx=$'\033[32m'                           # green <75%
+       fi
+       if [ -n "$left_k" ] && [ "$used" -gt 0 ]; then
+         ctx_seg="$(printf ' %s·%s %s◧%s%% %s(%s left)%s' "$c_dim" "$c_reset" "$c_ctx" "$used" "$c_ctx" "$left_k" "$c_reset")"
+       else
+         ctx_seg="$(printf ' %s·%s %s◧%s%%%s' "$c_dim" "$c_reset" "$c_ctx" "$used" "$c_reset")"
+       fi ;;
+  esac
+elif [ -n "$used" ] && [ "$used" = "0" ] 2>/dev/null; then
+  # usage=0 且 input_tokens 也是 0/缺失:网关没回传真实 usage(GLM 链路常见),
+  # 显暗色 ◨? 而不是骗人的绿色 0%。
+  ctx_seg="$(printf ' %s·%s %s◧?%s' "$c_dim" "$c_reset" "$c_dim" "$c_reset")"
+fi
+
+# ---------- 3.6) git 分支段 + 工作目录段(2026-10-15)----------
+# cwd:优先 stdin JSON 的 workspace.current_dir(会话可 cd,比启动目录准),降级 PWD。
+# 显示 $HOME 缩写 + 只显尾部两级(路径长会挤掉模型段;两级足够定位)。
+git_seg=""
+cwd="$(json_str current_dir)"; [ -z "$cwd" ] && cwd="$(json_str cwd)"
+[ -z "$cwd" ] && cwd="$PWD"
+if [ -n "$cwd" ] && [ -f "$cwd/.git/HEAD" ]; then
+  br="$(sed -n 's|^ref: refs/heads/||p' "$cwd/.git/HEAD" 2>/dev/null | head -1)"
+  [ -n "$br" ] && git_seg="$(printf ' %s·%s %s%s%s%s' "$c_dim" "$c_reset" "$c_dim" "$br" "$c_reset" "")"
+fi
+dir_seg=""
+if [ -n "$cwd" ] && [ "$cwd" != "/" ]; then
+  d_show="${cwd/#$HOME/\~}"
+  # 尾部两级(tilde 单独成段不算层级)
+  case "$d_show" in
+    "~"|"/tmp"|"/var/tmp") ;;        # 家目录本身/系统临时目录:整段显示
+    */*)
+      tail2="$(printf '%s' "$d_show" | awk -F/ '{ if (NF>=2) print $(NF-1)"/"$NF; else print $NF }')"
+      [ -n "$tail2" ] && d_show="$tail2"
+      ;;
+  esac
+  dir_seg="$(printf ' %s·%s %s%s%s' "$c_dim" "$c_reset" "$c_dim" "$d_show" "$c_reset")"
+fi
+
 # ---------- 4) 输出(单行,无尾换行)----------
-# 组装:⬡ [<会话名> · ]<模型> · 🔑<key>
+# 组装:⬡ [<会话名> · ]<模型> · 🔑<key> · ◨上下文% (剩余) · 分支 · 目录
 c_key=$'\033[35m'   # magenta 区分 key 段
 key_seg="$(printf ' %s·%s %s🔑%s%s' "$c_dim" "$c_reset" "$c_key" "$key" "$c_reset")"
 
 if [ -n "$sess" ]; then
-  printf '%s⬡ %s ·%s %s%s%s%s' "$c_dim" "$sess" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg"
+  printf '%s⬡ %s ·%s %s%s%s%s%s%s%s' "$c_dim" "$sess" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg" "$ctx_seg" "$git_seg" "$dir_seg"
 else
-  printf '%s⬡%s %s%s%s%s' "$c_dim" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg"
+  printf '%s⬡%s %s%s%s%s%s%s%s' "$c_dim" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg" "$ctx_seg" "$git_seg" "$dir_seg"
 fi

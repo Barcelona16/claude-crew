@@ -92,6 +92,47 @@ STATE_FILE = os.environ.get("CREW_PROXY_STATE") or os.path.expanduser(
 )
 FAIL_CODES = {401, 403, 429}  # plus any 5xx and connection errors (see _is_fail)
 
+# ── upstream error-message translation (2026-10-15) ─────────────────────────────
+# Claude Code's auto-compact / reactive-compact recovery keys on the *text* of the
+# error message it receives (see its isPromptTooLong classifier):
+#   n.includes("prompt is too long") || n.includes("input is too long for requested model")
+# The llm-gw GLM gateway instead answers 400 with {"error":{"cause":"...code":"1261",
+# "message":"Prompt exceeds max length"...}} — none of the recognized substrings — so
+# Claude Code treats it as an ordinary 400, retries, and dies instead of compacting.
+# _translate_upstream_error() rewrites such bodies to the exact Anthropic wording so
+# the client's recovery kicks in. Translation happens only on non-2xx, JSON,
+# non-streaming bodies; every other byte passes through untouched.
+_PTL_SOURCE_PATTERNS = (
+    "prompt exceeds max length",   # llm-gw GLM code 1261
+    "prompt too long",
+    "exceeds the maximum context length",  # OpenAI variant A
+    "maximum context length is",   # OpenAI variant B: "This model's maximum context length is N tokens. However, you requested M..."
+    "context length exceeded",
+    "input is too long",           # generic short form some gateways emit
+)
+
+def translate_prompt_too_long(body_bytes):
+    """If an error body indicates context overflow in non-Anthropic wording, return
+    replacement bytes in Anthropic's format; otherwise return None (pass through)."""
+    try:
+        doc = json.loads(body_bytes)
+    except Exception:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    # Rendered source text: CCR wraps provider errors as {"error":{"message":
+    # "Error from provider(...): {...original json...}", ...}} — search the whole body.
+    hay = json.dumps(doc, ensure_ascii=False).lower()
+    if not any(p in hay for p in _PTL_SOURCE_PATTERNS):
+        return None
+    # Anthropic's native envelope. "prompt is too long: X tokens > Y maximum" carries
+    # the token counts Claude Code parses for head-truncation; we don't have them from
+    # the GLM gateway, so emit the count-less form the classifier also accepts
+    # (zSr uses substring matching, lKe's regex just yields undefined — still triggers).
+    out = {"type": "error", "error": {"type": "invalid_request_error",
+                                      "message": "prompt is too long: input tokens and max_tokens exceed context limit."}}
+    return json.dumps(out, ensure_ascii=False).encode()
+
 # _passthrough 退避重试(2026-09-01):单 key 会话遇 429/5xx/连接错时,proxy 自己退避重发同一
 # 请求(不换模型/不换 key——纯"等几秒重试"),吸收瞬时波动,claude 侧少报 API error。全 env 可调。
 PT_MAX_RETRY   = int(os.environ.get("CREW_PROXY_MAX_RETRY", "2"))       # 额外重试次数(最多打 1+N 次)
@@ -2324,12 +2365,32 @@ class Handler(BaseHTTPRequestHandler):
         code = getattr(resp, "status", None) or getattr(resp, "code", 200)
         headers = resp.headers
         ct = headers.get("Content-Type", "application/json")
-        self.send_response(code)
         hop = {"connection", "transfer-encoding", "keep-alive", "content-length",
                "proxy-connection"}
-        for k, v in headers.items():
-            if k.lower() not in hop:
-                self.send_header(k, v)
+        fwd_headers = [(k, v) for k, v in headers.items() if k.lower() not in hop]
+
+        # Non-streaming upstream error (GLM "Prompt exceeds max length" etc.) ->
+        # translate to Anthropic wording so Claude Code's auto-compact triggers.
+        # Streaming errors cannot be rewritten mid-flight (headers already sent by
+        # the SSE pass-through below), but llm-gw answers context overflow with a
+        # plain JSON 400 before any SSE starts, so the streaming path never sees it.
+        # Content-Type is not checked: translate_prompt_too_long parses the body and
+        # returns None for non-JSON, so a mislabeled header can't cause a misfire.
+        data = None
+        if not streaming and code >= 400:
+            data = resp.read()
+            translated = translate_prompt_too_long(data)
+            if translated is not None:
+                log.info("↑ translated upstream %d error to Anthropic 'prompt is too long' "
+                         "(%d bytes -> %d bytes)", code, len(data), len(translated))
+                data = translated
+                fwd_headers = [(k, v) for k, v in fwd_headers if k.lower() != "content-type"]
+                fwd_headers.append(("Content-Type", "application/json"))
+            # fall through: `data` now holds either the original or the translated body
+
+        self.send_response(code)
+        for k, v in fwd_headers:
+            self.send_header(k, v)
         buf = bytearray() if capture else None
         if streaming:
             self.send_header("Connection", "close")
@@ -2346,7 +2407,8 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
         else:
-            data = resp.read()
+            if data is None:
+                data = resp.read()
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             try:
