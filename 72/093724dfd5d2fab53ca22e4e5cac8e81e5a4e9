@@ -1,0 +1,90 @@
+test/crew-notify.test.sh
+  s_0c677a4ddf216d::t_83405b34617a45 81,83,123,127,151,155
+  s_0c677a4ddf216d::t_1033083d15f29d 210-214
+test/crew-wake.test.sh
+  s_0c677a4ddf216d::t_bc204b3ff71584 111-112
+bin/crew-notify.js
+  s_0c677a4ddf216d::t_3c0a7be6983013 35-41
+test/crew-statusline.test.sh
+  s_0c677a4ddf216d::t_6556fd1edde015 1-31,35-37,41-43,47-77
+  s_0c677a4ddf216d::t_2820cf078b8951 32-34,38-40,44-46
+setup/ccr_v3.py
+  s_0c677a4ddf216d::t_f7a11d40705449 284-285
+  s_0c677a4ddf216d::t_808139f59d21df 206-269
+  s_0c677a4ddf216d::t_c2377f24e0ab47 273
+test/crew-watcher.test.sh
+  s_0c677a4ddf216d::t_2466514ab8f608 129
+  s_0c677a4ddf216d::t_e0d25c02094630 258-261
+  s_0c677a4ddf216d::t_9463e7b2a169f7 58-67
+  s_0c677a4ddf216d::t_50c2e40b061d59 52-57,68,185,276
+CLAUDE.md
+  s_0c677a4ddf216d::t_cd6751424a032c 43-44
+bin/crew-statusline.sh
+  s_0c677a4ddf216d::t_ac62acc3f215b1 175,177
+  s_0c677a4ddf216d::t_0b1c61dbd6fcd2 134
+  s_0c677a4ddf216d::t_e1d869c344df28 31-38
+  s_0c677a4ddf216d::t_b94a623e490f3d 107-113,115-133,135,137-140,143
+  s_0c677a4ddf216d::t_b239208277fc39 114,136,141-142,170
+test/pane-idle-repl-busy.test.sh
+  s_0c677a4ddf216d::t_0d1e2e62057847 17-18,39,48,57,66,75,82-84,91
+  s_0c677a4ddf216d::t_8a769436a5f7e9 19
+bin/crew-session
+  s_0c677a4ddf216d::t_64a9328d5fc3a6 126-127
+  s_0c677a4ddf216d::t_0e98a2200cd9f3 125,128-129
+test/crew-kill.test.sh
+  s_0c677a4ddf216d::t_112ecef33cc2e6 105
+test/crew-session.test.sh
+  s_0c677a4ddf216d::t_83405b34617a45 31,95
+  s_0c677a4ddf216d::t_54f35ba2327f94 32
+  s_0c677a4ddf216d::t_35d8c43454ac61 33,208
+test/ccr-v3.test.py
+  s_0c677a4ddf216d::t_a6addcf7ee4de8 8
+  s_0c677a4ddf216d::t_42fb51fb700c48 112-118,198,217
+  s_0c677a4ddf216d::t_3fd99c2ef5a3be 105-111,119-197,199-216,218-235
+test/agent-policy.test.sh
+  s_0c677a4ddf216d::t_e93c40a11c28c5 31-32
+  s_0c677a4ddf216d::t_580cedc5fd35c4 2-14,17-20,25-30,33-86,88-91,93-94
+test/crew-integration.test.sh
+  s_0c677a4ddf216d::t_bc204b3ff71584 88,91,162-164,167,177,215,235
+test/crew-launcher.test.sh
+  s_0c677a4ddf216d::t_0d1e2e62057847 32
+  s_0c677a4ddf216d::t_7414e8f8254bd4 75-80
+  s_0c677a4ddf216d::t_634c0aaa34fabe 120-123,125
+bin/crew-web.js
+  s_0c677a4ddf216d::t_3c0a7be6983013 36-39
+bin/crew-watcher.js
+  s_0c677a4ddf216d::t_3c0a7be6983013 183
+.gitignore
+  s_0c677a4ddf216d::t_e1949efb67e308 11-13
+bin/crew
+  s_0c677a4ddf216d::t_255bad80408a43 1006-1008,1011-1019,1021-1030,1032-1033
+  s_0c677a4ddf216d::t_2a2265748cb699 950-959,964,966,992-996,998-1005,1009-1010,1020,1031,1034-1040
+  s_0c677a4ddf216d::t_92e970ed2b19d3 960
+  s_0c677a4ddf216d::t_9b7f54e44af2fa 961-963,965,967-979,988-991,997
+  s_0c677a4ddf216d::t_80ae7d0f249c2f 980-987
+  s_126d1b559bd363::t_9239b0d3f143ba 170-172,181,192-195
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "72093724dfd5d2fab53ca22e4e5cac8e81e5a4e9",
+  "prompts": {},
+  "sessions": {
+    "s_0c677a4ddf216d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "59444e61-8851-4442-9b02-f314404c57c4",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    },
+    "s_126d1b559bd363": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "242cfb2e-0fad-48c9-9821-d512c9a619bd",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
