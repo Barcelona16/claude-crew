@@ -7,8 +7,11 @@
 
 ## [Unreleased]
 
-- 命令分层帮助(日常 9 命令 + 进阶;`crew help` 两栏,新人只看第一栏)
-- `crew version` 自动带最近版本 release note(读 CHANGELOG.md)
+## [3.3.0] - 2026-10-16
+
+### 新增
+- **分层帮助**:`crew help` 两栏(日常 9 命令 + 进阶分组),`--all` 全量、`help <cmd>` 单命令搜索;不砍命令,兼容既有脚本。
+- **release note 体系**:CHANGELOG.md(回填 1.x→3.2.0);`crew version` 读头部渲染版本+摘要,`--notes` 看最近 3 版全文。
 
 ## [3.2.0] - 2026-10-16
 
