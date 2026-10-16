@@ -1,0 +1,37 @@
+CLAUDE.md
+  s_0c677a4ddf216d::t_03f596edf91fc6 44-45
+bin/crew
+  s_0c677a4ddf216d::t_0be4c64f724a53 643-645,653-659,662-663,666-668,679,683,685-686,748,750,752
+  s_0c677a4ddf216d::t_b414d9ffa3e9f9 29
+  s_0c677a4ddf216d::t_72dad779958c64 684,687-690
+  s_0c677a4ddf216d::t_adeb8b5d50642e 1325-1330,1540-1545,1631-1636
+  s_0c677a4ddf216d::t_7a4f86db6f82a3 1321-1322,1535,1626
+  s_0c677a4ddf216d::t_d7f49690e03595 646-652,660-661,664-665,669-678,680-682,691-747,749,751
+setup/ccr_v3.py
+  s_0c677a4ddf216d::t_2c9c665ba5d920 146-165
+test/ccr-v3.test.py
+  s_0c677a4ddf216d::t_3f15c733c23fc4 49-59
+test/crew-models-autodiscover.test.sh
+  s_0c677a4ddf216d::t_fa6e829ea83b12 1-51,54-69,71-105,112,115-152,168,177-203,207-209,212-226
+  s_0c677a4ddf216d::t_fd93885c993d18 70
+  s_0c677a4ddf216d::t_eb4e3a15fca96f 106-111,113-114,153-167,169-176
+  s_0c677a4ddf216d::t_312a041ccf85d3 204-206,210-211
+  s_0c677a4ddf216d::t_f3c7255ee031b8 53
+  s_0c677a4ddf216d::t_0bb1050a8aaf27 52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "9162557a40d29ba09fdca571a569e1b6736c0b40",
+  "prompts": {},
+  "sessions": {
+    "s_0c677a4ddf216d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "59444e61-8851-4442-9b02-f314404c57c4",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
