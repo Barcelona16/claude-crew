@@ -40,6 +40,8 @@
 - **失败先诊断根因**,不用 `--no-verify` 绕过。
 - **部署走 git**,box 上改代码必提交(不提交=下次 pull 覆盖丢代码)。
 - **中文汇报**(用户偏好)。
+- **改 key 必重跑 apply**:`ccr-providers.json` 的 `gateway.api_key`(crew-proxy→CCR 的转发凭证)及任何 provider 的 `api_key` 改动后,必须执行 `ccr_v3.py apply` 让 CCR 3 认可;`gateway.api_key` 不要手动填成 JD 网关 key,保持与 CCR 3 认可 key(经 apply 对齐)一致,否则 crew-proxy 转发 key 与 CCR 认可 key 分叉,所有会话 401 `ccr-public-auth-context`(2026-10-16 实测踩坑:gateway 被手改成 8b04 但未 apply,CCR 3 自持 sk-ccr)。分叉检测:`python3 setup/ccr_v3.py drift --provider-map <map>`(rc=0 一致 / 1 分叉 / 2 CCR 不可达)。
+- **settings.json 的 BASE_URL 只指 crew-proxy**:`~/.claude/settings.json` 的 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_BASE_URL` / `CLAUDE_AGENT_API_BASE_URL` 必须指 `http://127.0.0.1:8788`(crew-proxy),**不得**改成 `:3456` 直连 CCR —— 直连会带错 token(`ANTHROPIC_AUTH_TOKEN=test` 不被 CCR 认)→ 401;也不得设 `apiKeyHelper`(与 AUTH_TOKEN 冲突,谁生效不定)。CCR 3 原生集成/任何工具改写 settings.json 后必须跑 `crew doctor` 复查(2026-10-16 事故根因①,doctor 已内置此检查)。
 
 ## 4. 回执规约(关键节点三路并发)
 

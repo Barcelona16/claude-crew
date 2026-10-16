@@ -203,10 +203,74 @@ def command_client_key(path: Path) -> int:
     print(map_gateway_key(read_provider_map(path)))
     return 0
 
+def command_drift(path: Path) -> int:
+    """Compare the provider map against CCR 3's live configuration.
+
+    Exit 0 = no drift; 1 = drift found (report + the apply command to fix);
+    2 = CCR RPC unreachable (distinct from drift so callers can prompt to
+    start CCR first).  Read-only: it never saves, because key changes must go
+    through an explicit human-run ``apply`` (CLAUDE.md §3, 2026-10-16 incident).
+    """
+    provider_map = read_provider_map(path)
+    gateway_key = map_gateway_key(provider_map)
+    wanted = {p["name"]: p for p in map_providers(provider_map)}
+    live = rpc_call("getConfig", [])
+    if not isinstance(live, dict):
+        raise CcrRpcError("CCR getConfig returned an invalid response")
+
+    problems: list[str] = []
+
+    def _mask(value: str) -> str:
+        return (value[:8] + "…" + value[-4:]) if len(value) > 14 else value
+
+    # 1) gateway key: what crew-proxy sends must be accepted by live CCR.
+    #    (The 2026-10-16 401: map's gateway key hand-edited without apply.)
+    live_keys = live.get("APIKEYS") or []
+    accepted = {(e.get("key") or "") for e in live_keys if isinstance(e, dict)}
+    if gateway_key not in accepted and live.get("APIKEY") != gateway_key:
+        problems.append(
+            f"gateway key drift: provider map sends {_mask(gateway_key)} but live CCR "
+            f"accepts {sorted(_mask(k) for k in accepted) or '(none)'} — rerun "
+            f"`{sys.argv[0]} apply` (or crew proxy sync) and restart crew-proxy"
+        )
+
+    # 2) providers: every map provider must exist live with the same key+models.
+    live_providers = {p.get("name"): p for p in (live.get("Providers") or [])
+                      if isinstance(p, dict)}
+    for name, want in wanted.items():
+        got = live_providers.get(name)
+        if got is None:
+            problems.append(f"provider '{name}' missing in live CCR (map-only)")
+            continue
+        if (got.get("api_key") or "") != (want.get("api_key") or ""):
+            problems.append(
+                f"provider '{name}' api_key drift: map {_mask(want.get('api_key') or '')} "
+                f"vs live {_mask(got.get('api_key') or '')}"
+            )
+        want_models = {m for m in (want.get("models") or []) if isinstance(m, str) and m}
+        got_models = {m for m in (got.get("models") or []) if isinstance(m, str) and m}
+        if want_models != got_models:
+            problems.append(
+                f"provider '{name}' model drift: map-only {sorted(want_models - got_models)} "
+                f"live-only {sorted(got_models - want_models)}"
+            )
+
+    # 3) live-only providers are informational (user's own CCR entries), not drift.
+
+    if problems:
+        print("CCR drift detected:", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        print("fix: rerun apply (ccr_v3.py apply) so CCR 3 accepts the map's keys",
+              file=sys.stderr)
+        return 1
+    print("no drift: provider map matches live CCR configuration", file=sys.stderr)
+    return 0
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Apply a claude-crew provider map to CCR 3")
-    parser.add_argument("command", choices=("apply", "validate", "client-key"))
+    parser.add_argument("command", choices=("apply", "validate", "client-key", "drift"))
     parser.add_argument(
         "--provider-map",
         type=Path,
@@ -217,6 +281,8 @@ def main(argv: list[str] | None = None) -> int:
         return command_apply(args.provider_map)
     if args.command == "validate":
         return command_validate(args.provider_map)
+    if args.command == "drift":
+        return command_drift(args.provider_map)
     return command_client_key(args.provider_map)
 
 

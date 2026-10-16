@@ -29,7 +29,7 @@ TOKEN=mocktoken
 KEY_MODE=direct
 EOF
   # copy policy templates
-  cp /work/claude-crew/templates/*.md "$CREW_HOME/templates/" 2>/dev/null || true
+  cp "$SCRIPT_DIR/../templates/"*.md "$CREW_HOME/templates/" 2>/dev/null || true
 }
 teardown() {
   # kill tmux 测试 session
@@ -72,8 +72,12 @@ echo "--- Case 4: fg 已有 sid → resume ---"
 N="${TEST_PREFIX}-c"
 "$CS" set "$N" backend mock >/dev/null
 "$CS" set "$N" sid "existing-sid-xyz" >/dev/null
-out=$("$CL" spawn --name "$N" --mode fg 2>&1)
-echo "$out" | grep -q -- "--resume existing-sid-xyz" && _ok "已有 sid → --resume 复用" || _ng "应 --resume 已有 sid,实际:$out" ""
+out=$("$CL" spawn --name "$N" --mode fg 2>&1
+)
+# 2026-10-16 修正断言:sid 有 state 但【无 transcript jsonl】→ §F 行为是 --session-id
+# (让 claude 自然以该 sid 写 transcript),不是 --resume(--resume 无 jsonl 会秒退)。
+# --resume 分支的真实覆盖在 Case 12/13(sid_alive + 死 sid 自愈)。
+echo "$out" | grep -q -- "--session-id existing-sid-xyz" && _ok "已有 sid 无 jsonl → --session-id 复用(§F)" || _ng "应 --session-id existing-sid-xyz,实际:$out" ""
 
 # --- Case 5: --fresh 强制新 sid ---
 echo "--- Case 5: --fresh 强制新 sid ---"
@@ -113,9 +117,12 @@ sz=$(wc -c < "$launcher")
 # --- Case 8: unknown backend conf 报错 ---
 echo "--- Case 8: 未知 backend conf ---"
 N="${TEST_PREFIX}-g"
-"$CS" set "$N" backend "nonexistent-backend" >/dev/null
+# 2026-10-16 修正:crew-session set 有中央校验(2026-09-01)会当场拒写 invalid backend
+# (那层拒绝在 crew-session.test.sh 已覆盖)。这里测 launcher 兜底:SKIP_VALIDATE=1 模拟
+# 历史脏 state(值已写入),launcher 必须拒起。
+CREW_SESSION_SKIP_VALIDATE=1 "$CS" set "$N" backend "nonexistent-backend" >/dev/null
 out=$("$CL" spawn --name "$N" --mode fg 2>&1) || true
-echo "$out" | grep -q "not found" && _ok "未知 backend conf 报 not found" || _ng "未知 backend 应报,实际:$out" ""
+echo "$out" | grep -q "拒起" && _ok "未知 backend(脏 state)launcher 拒起" || _ng "未知 backend 应拒起,实际:$out" ""
 
 # --- Case 9: mode 参数校验 ---
 echo "--- Case 9: mode 参数校验 ---"

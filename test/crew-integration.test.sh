@@ -85,10 +85,10 @@ for i in $(seq 1 100); do
 done
 # 消费全部
 out=$("$CREW" inbox X 2>&1)
-consumed=$(echo "$out" | grep -oE "consumed [0-9]+ message" | grep -oE "[0-9]+")
+consumed=$(echo "$out" | grep -oE "consumed [0-9]+ message" | grep -oE "[0-9]+" | tr -d ' ')
 [ "$consumed" = "100" ] && _ok "100 条全消费(consumed=$consumed)" || _ng "消费=$consumed(期望 100)"
 # 归档目录也应有 100 条
-archived=$(ls "$CREW_STATE/inbox/X/consumed"/*.json 2>/dev/null | wc -l)
+archived=$(ls "$CREW_STATE/inbox/X/consumed"/*.json 2>/dev/null | wc -l | tr -d ' ')
 [ "$archived" = "100" ] && _ok "归档 consumed/ 100 条" || _ng "归档=$archived"
 
 # --- I3 饱和补发 ---
@@ -159,9 +159,12 @@ rc=$(FAKE_TMUX_DEAD=1 node "$CW" X >/dev/null 2>&1; echo $?)
 [ "$rc" = 1 ] && _ok "tmux server 未起 wake exit 1(=会话不存在)" || _ng "exit=$rc(期望 1)"
 
 # --- C1b tmux 二进制不可执行 → exit 3 ---
+# NODE_BIN:优先 env,其次 PATH 里的 node,最后 box 的 /work/node20(Linux box 兼容兜底)。
+NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
+[ -z "$NODE_BIN" ] && [ -x /work/node20/bin/node ] && NODE_BIN=/work/node20/bin/node
 echo "--- C1b tmux 二进制不可执行 → exit 3 ---"
 EMPTY_BIN="$T/nobin"; mkdir -p "$EMPTY_BIN"
-rc=$(PATH="$EMPTY_BIN" /work/node20/bin/node "$CW" X >/dev/null 2>&1; echo $?)
+rc=$(PATH="$EMPTY_BIN" "$NODE_BIN" "$CW" X >/dev/null 2>&1; echo $?)
 [ "$rc" = 3 ] && _ok "tmux 二进制不可执行 wake exit 3" || _ng "exit=$rc(期望 3)"
 
 # --- C2 心跳时 tmux server 未起 → tmuxStatus=unknown ---
@@ -171,7 +174,7 @@ rc=$(PATH="$EMPTY_BIN" /work/node20/bin/node "$CW" X >/dev/null 2>&1; echo $?)
 echo "--- C2 心跳采样时 tmux 二进制不可执行 → unknown ---"
 touch "$CREW_STATE/hbdead.tmux"
 # 关键:只保留 EMPTY_BIN,不带 fake tmux 的 PATH,让 tmux 二进制真找不到 → spawnSync error
-PATH="$EMPTY_BIN" /work/node20/bin/node "$CH" --once 2>/dev/null || true
+PATH="$EMPTY_BIN" "$NODE_BIN" "$CH" --once 2>/dev/null || true
 node -e "
 try{const j=JSON.parse(require('fs').readFileSync('$CREW_STATE/heartbeat/hbdead.json'));process.exit(j.tmuxStatus==='unknown'?0:1)}catch(e){process.exit(2)}" \
   && _ok "tmux 二进制不可执行时 tmuxStatus=unknown" || _ng "tmuxStatus 不对(或文件缺)"
@@ -209,7 +212,7 @@ echo "--- M1 老 crew send 与 crew notify --no-wake 行为等价 ---"
 rm -rf "$CREW_STATE/inbox/mtest"
 CREW_SESSION_NAME=oldA "$CREW" send mtest "old-style" >/dev/null 2>&1
 CREW_SESSION_NAME=newA "$CREW" notify mtest "new-style" --no-wake >/dev/null 2>&1
-n=$(ls "$CREW_STATE/inbox/mtest"/*.json 2>/dev/null | wc -l)
+n=$(ls "$CREW_STATE/inbox/mtest"/*.json 2>/dev/null | wc -l | tr -d ' ')
 [ "$n" = "2" ] && _ok "两种入口都落 JSON 信封(2 条)" || _ng "信封数=$n"
 # 两条都应有 from.kind=session
 ok=$(node -e "
@@ -229,7 +232,7 @@ CREW_SESSION_NAME=srcA "$CREW" send mix "json envelope" >/dev/null 2>&1
 out=$("$CREW" inbox mix 2>&1)
 echo "$out" | grep -q "legacy plain text" && _ok "老 .msg 内容消费到" || _ng ".msg 未消费"
 echo "$out" | grep -q "json envelope" && _ok "新 JSON 内容消费到" || _ng "JSON 信封未消费"
-consumed=$(echo "$out" | grep -oE "consumed [0-9]+ message" | grep -oE "[0-9]+")
+consumed=$(echo "$out" | grep -oE "consumed [0-9]+ message" | grep -oE "[0-9]+" | tr -d ' ')
 [ "$consumed" = "2" ] && _ok "混合消费共 2 条" || _ng "混合消费=$consumed"
 
 echo

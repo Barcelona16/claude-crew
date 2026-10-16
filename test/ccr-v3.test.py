@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -101,3 +102,134 @@ with tempfile.TemporaryDirectory(prefix="crew-ccr-v3-test-") as tmp:
     saved = calls[2][1]["args"][0]
     check("saved configuration carries providers", saved["Providers"][0]["name"] == "key-01-openai")
     check("saveApiKeys ACK cannot discard existing CCR settings", saved["customField"] == "must-survive")
+
+# ---- drift: provider map vs live CCR config divergence check (2026-10-16 401 incident) ----
+# 事故根因之一:provider map 的 gateway.api_key 被手改但没重跑 apply,CCR 3 live
+# 配置仍持旧 key → crew-proxy 转发必 401。drift 子命令把「map vs live」的分叉
+# 显式暴露出来(只报告,不自动改 —— 改 key 必须人工 apply,CLAUDE.md §3 硬约束)。
+import contextlib
+
+class _Cap:
+    """Capture writes into a list (stdout/stderr redirection for drift tests)."""
+    def __init__(self, sink):
+        self.sink = sink
+    def write(self, s):
+        self.sink.append(s)
+
+def _drift_server(responses):
+    """Fake CCR RPC server. responses: {method: value}. Returns (server, calls)."""
+    calls = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            req = json.loads(self.rfile.read(length))
+            calls.append((self.headers.get("x-ccr-web-auth"), req))
+            payload = {"ok": True, "value": responses.get(req["method"], {})}
+            data = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, calls
+
+@contextlib.contextmanager
+def _drift_env(url):
+    old_env = {name: os.environ.get(name) for name in ("CREW_CCR_WEB_URL", "CREW_CCR_WEB_TOKEN")}
+    os.environ["CREW_CCR_WEB_URL"] = url
+    os.environ["CREW_CCR_WEB_TOKEN"] = "test-web-token"
+    try:
+        yield
+    finally:
+        server.shutdown()
+        for name, value in old_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+with tempfile.TemporaryDirectory(prefix="crew-ccr-drift-test-") as tmp:
+    root = Path(tmp)
+    drift_map = root / "providers.json"
+    drift_map.write_text(json.dumps({
+        "gateway": {"api_key": "sk-ccr-map-key"},
+        "Providers": [{
+            "name": "opus", "api_base_url": "http://gw/v1/chat/completions",
+            "api_key": "KEY-A", "models": ["Claude-Opus-4.8-joybuilder"],
+            "transformer": {"use": ["OpenAI"]},
+        }],
+    }), encoding="utf-8")
+
+    # 场景 1:完全一致 → rc=0,无 drift 输出
+    server, calls = _drift_server({"getConfig": {
+        "APIKEY": "sk-ccr-map-key",
+        "APIKEYS": [{"id": "local-gateway", "key": "sk-ccr-map-key", "name": "Local Gateway"}],
+        "Providers": [{"name": "opus", "api_key": "KEY-A",
+                       "models": ["Claude-Opus-4.8-joybuilder"]}],
+    }})
+    with _drift_env(f"http://127.0.0.1:{server.server_address[1]}"):
+        buf_err, buf_out = [], []
+        _err, _out = sys.stderr, sys.stdout
+        sys.stderr, sys.stdout = _Cap(buf_err), _Cap(buf_out)
+        try:
+            rc = ccr_v3.command_drift(drift_map)
+        finally:
+            sys.stderr, sys.stdout = _err, _out
+    check("drift: consistent config returns 0", rc == 0)
+    check("drift: consistent config reports no drift", "no drift" in "".join(buf_err + buf_out))
+
+    # 场景 2:gateway key 分叉(事故现场:map 被手改成新 key,live 仍旧 key)
+    server, calls = _drift_server({"getConfig": {
+        "APIKEY": "sk-ccr-OLD-live-key",
+        "APIKEYS": [{"id": "local-gateway", "key": "sk-ccr-OLD-live-key", "name": "Local Gateway"}],
+        "Providers": [{"name": "opus", "api_key": "KEY-A",
+                       "models": ["Claude-Opus-4.8-joybuilder"]}],
+    }})
+    with _drift_env(f"http://127.0.0.1:{server.server_address[1]}"):
+        buf_err, buf_out = [], []
+        _err, _out = sys.stderr, sys.stdout
+        sys.stderr, sys.stdout = _Cap(buf_err), _Cap(buf_out)
+        try:
+            rc = ccr_v3.command_drift(drift_map)
+        finally:
+            sys.stderr, sys.stdout = _err, _out
+    check("drift: gateway key divergence returns 1", rc == 1)
+    joined = "".join(buf_err + buf_out)
+    check("drift: reports gateway key divergence", "gateway key" in joined and "apply" in joined)
+
+    # 场景 3:provider key 分叉 + 模型集分叉 + live 缺 provider
+    server, calls = _drift_server({"getConfig": {
+        "APIKEY": "sk-ccr-map-key",
+        "APIKEYS": [{"id": "local-gateway", "key": "sk-ccr-map-key", "name": "Local Gateway"}],
+        "Providers": [{"name": "opus", "api_key": "KEY-B",
+                       "models": ["Claude-Opus-4.8-joybuilder", "EXTRA-MODEL"]}],
+    }})
+    with _drift_env(f"http://127.0.0.1:{server.server_address[1]}"):
+        buf_err, buf_out = [], []
+        _err, _out = sys.stderr, sys.stdout
+        sys.stderr, sys.stdout = _Cap(buf_err), _Cap(buf_out)
+        try:
+            rc = ccr_v3.command_drift(drift_map)
+        finally:
+            sys.stderr, sys.stdout = _err, _out
+    check("drift: provider divergence returns 1", rc == 1)
+    joined = "".join(buf_err + buf_out)
+    check("drift: reports provider key divergence", "api_key" in joined)
+    check("drift: reports model-set divergence", "EXTRA-MODEL" in joined)
+
+    # 场景 4:CCR web RPC 不可达 → rc=2(区别于「有 drift」,doctor 据此提示先起 CCR)
+    with _drift_env("http://127.0.0.1:1"):
+        try:
+            ccr_v3.command_drift(drift_map)
+            check("drift: unreachable RPC raises", False)
+        except ccr_v3.CcrRpcError:
+            check("drift: unreachable RPC raises CcrRpcError", True)
+
+print("drift tests done")

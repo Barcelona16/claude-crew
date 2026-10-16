@@ -28,8 +28,9 @@ setup
 
 # --- Case 1: fields 命令列出 13 字段 ---
 echo "--- Case 1: fields ---"
-n=$("$BIN" fields | wc -l)
-[ "$n" = "13" ] && _ok "fields 输出 13 个" || _ng "fields 应输出 13,实际 $n" ""
+n=$("$BIN" fields | wc -l | tr -d ' ')
+want=$(sed -n 's/^readonly VALID_FIELDS="\(.*\)"$/\1/p' "$SCRIPT_DIR/../bin/crew-session" | wc -w | tr -d ' ')
+[ "$n" = "$want" ] && _ok "fields 输出与 VALID_FIELDS 一致($want 个)" || _ng "fields=$n 与 VALID_FIELDS=$want 不一致" ""
 
 # --- Case 2: set + get 往返 ---
 echo "--- Case 2: set/get 往返 ---"
@@ -91,7 +92,7 @@ setup
 "$BIN" set c1 backend Y >/dev/null
 "$BIN" set c1 pintmux 1 >/dev/null
 "$BIN" clean c1
-n=$(ls "$CREW_STATE"/c1.* 2>/dev/null | wc -l)
+n=$(ls "$CREW_STATE"/c1.* 2>/dev/null | wc -l | tr -d ' ')
 [ "$n" = "0" ] && _ok "clean 后无 c1.* 文件" || _ng "clean 后仍有 c1.* $n 个" ""
 
 # --- Case 11: clean 不影响其他 name ---
@@ -204,7 +205,7 @@ touch "$CREW_HOME/backends/testb.conf" "$CREW_HOME/backends/testc.conf"
 "$BIN" set beta backend "testc" >/dev/null
 audit="$CREW_STATE/audit.log"
 [ -f "$audit" ] && _ok "audit.log 生成" || _ng "audit.log 未生成" ""
-n=$(wc -l < "$audit" 2>/dev/null || echo 0)
+n=$(wc -l < "$audit" 2>/dev/null | tr -d ' ' || echo 0)
 [ "$n" = "2" ] && _ok "审计写 2 条(empty→testb, testb→testc;同值不记)" || _ng "audit 行数=$n(期望 2)" ""
 grep -q "\"field\":\"backend\"" "$audit" && _ok "审计含 field=backend" || _ng "field 缺" ""
 grep -q "\"name\":\"beta\"" "$audit" && _ok "审计含 name=beta" || _ng "name 缺" ""

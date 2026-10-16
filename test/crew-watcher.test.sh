@@ -49,7 +49,23 @@ export PATH="$FAKE_BIN:$PATH"
 export FAKE_TMUX_SESSIONS="bob,alice,carol,dave,eric,charles,dan,eve,gina,hilda,ivy,jasmin"
 
 # 造一个 15 分钟前的 stale 信封(from=alice 发给 bob)
-OLD_TS=$(date -u -d "-15 minutes" '+%Y-%m-%dT%H:%M:%S.000Z')
+# dts15():15 分钟前的 ISO ts(GNU date -d 优先,macOS date -v-15M 兜底;都不行用 python)
+dts15() {
+  date -u -d "-15 minutes" '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null \
+    || date -u -v-15M '+%Y-%m-%dT%H:%M:%S.000Z' 2>/dev/null \
+    || python3 -c "import datetime;print((datetime.datetime.utcnow()-datetime.timedelta(minutes=15)).strftime('%Y-%m-%dT%H:%M:%S.000Z'))"
+}
+# backdate <file> <秒前>:跨平台把 mtime 拨回(GNU touch -d / macOS touch -t / python 兜底)
+backdate() {
+  local f="$1" secs="$2"
+  if touch -d "@$(( $(date +%s) - secs ))" "$f" 2>/dev/null; then return 0; fi
+  if date -v-${secs}S +"%Y%m%d%H%M.%S" >/dev/null 2>&1; then
+    touch -t "$(date -v-${secs}S +%Y%m%d%H%M.%S)" "$f" 2>/dev/null && return 0
+  fi
+  python3 -c "import os,sys,time; os.utime(sys.argv[1], (time.time()-int(sys.argv[2]),)*2)" "$f" "$secs"
+}
+
+OLD_TS=$(dts15)
 mkdir -p "$CREW_STATE/inbox/bob"
 cat > "$CREW_STATE/inbox/bob/0001-old.json" <<EOF
 { "id": "env-A-15min", "ts": "$OLD_TS",
@@ -110,7 +126,7 @@ EOF
 rm -rf "$CREW_STATE/inbox/fred"
 CREW_SESSION_NAME=fred node "$WATCHER" sweep >/dev/null 2>&1
 # 断言 fred 没收到自己的告警(短路生效);走的是 erp 分支(send.js 在测试环境不真发)
-fred_msgs=$(ls "$CREW_STATE/inbox/fred"/*.json 2>/dev/null | wc -l)
+fred_msgs=$(ls "$CREW_STATE/inbox/fred"/*.json 2>/dev/null | wc -l | tr -d ' ')
 [ "$fred_msgs" = "0" ] && _ok "fred 没收到自己的告警(短路生效)" || _ng "fred 收到 $fred_msgs 条,短路无效"
 
 # --- Case 5: 全关开关 ---
@@ -166,7 +182,7 @@ grep -q "malformed-baseline:xxx" "$CREW_STATE/watcher-state.json" && _ng "坏 ts
 # --- Case 9: watcher 扫 delivered 状态(2026-09-02 修:crew send 默认 wake 后 state 一秒 pending→delivered,不扫 delivered 就永远告警不到"送到没读") ---
 echo "--- Case 9: watcher 扫 delivered 状态 ---"
 rm -f "$CREW_STATE/watcher-state.json"
-DELIV_TS=$(date -u -d "-15 minutes" '+%Y-%m-%dT%H:%M:%S.000Z')
+DELIV_TS=$(dts15)
 mkdir -p "$CREW_STATE/inbox/jasmin"
 cat > "$CREW_STATE/inbox/jasmin/0001.json" <<EOF
 { "id": "delivered-15min", "ts": "$DELIV_TS",
@@ -239,10 +255,10 @@ CREW_WATCHER_ALERT_STALE=0 CREW_WATCHER_AUTOHEAL=0 FAKE_CREW_CALLS="$FAKE_CALLS"
 # Agent-C 复审补测试 · 造陈旧(8d)+ 新(1h)混合 · sweep 后前者删后者留
 echo "--- Case 14: sweepStaleMarkers 清 dedup + turn marker age>7d ---"
 mkdir -p "$CREW_STATE/.dedup"
-touch -d "8 days ago" "$CREW_STATE/.dedup/old-a.stamp"
-touch -d "1 hour ago" "$CREW_STATE/.dedup/new-a.stamp"
-touch -d "8 days ago" "$CREW_STATE/alice.turn-old.done"
-touch -d "1 hour ago" "$CREW_STATE/alice.turn-new.done"
+backdate "$CREW_STATE/.dedup/old-a.stamp" $((8*86400))
+backdate "$CREW_STATE/.dedup/new-a.stamp" 3600
+backdate "$CREW_STATE/alice.turn-old.done" $((8*86400))
+backdate "$CREW_STATE/alice.turn-new.done" 3600
 touch "$CREW_STATE/unrelated.file"
 # sweep
 CREW_WATCHER_ALERT_STALE=0 CREW_WATCHER_AUTOHEAL=0 node "$WATCHER" sweep >/dev/null 2>&1
@@ -257,7 +273,7 @@ CREW_WATCHER_ALERT_STALE=0 CREW_WATCHER_AUTOHEAL=0 node "$WATCHER" sweep >/dev/n
 echo "--- Case 15: private log-only 无自循环 ---"
 export FAKE_TMUX_SESSIONS="$FAKE_TMUX_SESSIONS,mia"
 mkdir -p "$CREW_STATE/inbox/mia"
-OLD_PRIV_TS=$(date -u -d "-15 minutes" '+%Y-%m-%dT%H:%M:%S.000Z')
+OLD_PRIV_TS=$(dts15)
 cat > "$CREW_STATE/inbox/mia/0001-private.json" <<EOF
 { "id": "priv-15min", "ts": "$OLD_PRIV_TS",
   "from": { "kind": "private", "id": "wangqiwang1" },

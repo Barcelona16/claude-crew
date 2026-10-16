@@ -33,8 +33,10 @@ const url = require('url');
 
 const CREW_STATE = process.env.CREW_STATE ||
   path.join(process.env.HOME || '/tmp', '.local', 'share', 'claude-crew');
-const FEEDBACK_JSONL = process.env.FEEDBACK_JSONL ||
-  '/work/agent-bridge/logs/feedback.jsonl';
+const FEEDBACK_JSONL = process.env.FEEDBACK_JSONL || (
+  fs.existsSync('/work/agent-bridge/logs')
+    ? '/work/agent-bridge/logs/feedback.jsonl'
+    : path.join(CREW_STATE, 'feedback.jsonl'));  // Mac/无 /work 部署(对齐 crew-notify.js)
 const PORT = parseInt(process.env.CREW_WEB_PORT || '18060', 10);
 const SCRIPT_DIR = __dirname;
 const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');

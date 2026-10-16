@@ -108,7 +108,8 @@ rc=$(PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="" FAKE_TMUX_PANE="$IDLE_PANE" \
 # --- Case 5: tmux 二进制缺失 → exit 3 ---
 echo "--- Case 5: tmux 未装 → exit 3 ---"
 EMPTY_BIN="$T/emptybin"; mkdir -p "$EMPTY_BIN"  # 无 tmux 的 PATH → spawnSync error
-rc=$(PATH="$EMPTY_BIN" /work/node20/bin/node "$WAKE" work >/dev/null 2>&1; echo $?)
+NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"; [ -z "$NODE_BIN" ] && [ -x /work/node20/bin/node ] && NODE_BIN=/work/node20/bin/node
+rc=$(PATH="$EMPTY_BIN" "$NODE_BIN" "$WAKE" work >/dev/null 2>&1; echo $?)
 [ "$rc" = 3 ] && _ok "tmux 未装 exit 3" || _ng "exit=$rc(期望 3)"
 
 # --- Case 6: pending 去重(同 session+note 只留一条)---

@@ -180,6 +180,7 @@ function sendAlert(target, note) {
       // DRY 时不真调 send.js,避免污染 wangqiwang1 咚咚(测试跑完的告警也不该外发)
       if (dry) return true;
       // send.js 走咚咚私聊(env override 测试用)
+      // env 覆写 > box 路径 > 找不到时 spawnSync 自然失败返回 false(watcher 容错)。
       const SEND_JS = process.env.CREW_WATCHER_SEND_JS || '/work/agent-bridge/send.js';
       const r = spawnSync('node', [SEND_JS, '--erp', target.id, note], { timeout: 5000 });
       return r.status === 0;

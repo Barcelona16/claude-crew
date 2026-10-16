@@ -127,7 +127,15 @@ function resolveOne(sess, opts) {
   var model = opts.backend || "";
   if (!model && sess) model = rd(STATE + "/" + sess + ".backend").trim();
   if (model === "" || model === "-" || model === "default") model = dmodel;   // ambient plain -> concrete
-  var mprov = ""; var mi = model.indexOf("/"); if (mi >= 0) { mprov = model.slice(0, mi); model = model.slice(mi + 1); }
+  var mprov = ""; var mi = model.indexOf("/");
+  if (mi >= 0) { mprov = model.slice(0, mi); model = model.slice(mi + 1); }
+  else {
+    // 2026-10-16 兼容:历史 state 里 backend 是 CCR 2 时代的 "provider,model"(逗号)串。
+    // 只按 "/" 切会解析不出 provider → crew ls 的 MODEL 列显示逗号串、KEY 列显示 "?"。
+    // 这里兜底按逗号切(与 launcher / crew-session 写侧归一化对齐)。
+    var ci = model.indexOf(",");
+    if (ci >= 0) { mprov = model.slice(0, ci).trim(); model = model.slice(ci + 1).trim(); }
+  }
   var realmodel = model;
 
   // ---- routing mode: live ANTHROPIC_BASE_URL wins; else derive from conf; else proxy default ----

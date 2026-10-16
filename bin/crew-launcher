@@ -146,6 +146,16 @@ load_backend_conf() {
   #    MODEL 保全串,TOKEN=test,KEY_MODE=ccr)—— 让 CCR 路由
   # 2) backend 名无 selector → 报错让用户显式传 --model provider/model
   if [ ! -f "$conf" ]; then
+    # 2026-10-16 兼容:历史 state 里 backend 是 CCR 2 时代的 "provider,model"(逗号)串。
+    # 旧版本(commit 2028139 前)写的就是逗号,迁移时漏改 → launcher 按单模型名处理匹配不到 →
+    # 拒起。这里统一转成 CCR 3 的 "provider/model" 斜杠串再走下面的 selector 分支。
+    case "$backend" in
+      *,*)
+        local _bn="${backend%%,*}" _bm="${backend#*,}"
+        echo "[crew-launcher] backend '$backend' 是旧逗号串,归一化为 '$_bn/$_bm'" >&2
+        backend="$_bn/$_bm"
+        ;;
+    esac
     case "$backend" in
       */*)
         # v1 line 313-315 逻辑:合成 ccr backend

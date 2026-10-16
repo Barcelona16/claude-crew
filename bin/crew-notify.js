@@ -32,9 +32,13 @@ const CREW_STATE = process.env.CREW_STATE ||
   process.env.XDG_DATA_HOME && path.join(process.env.XDG_DATA_HOME, 'claude-crew') ||
   path.join(process.env.HOME || '/tmp', '.local', 'share', 'claude-crew');
 
-// feedback.jsonl 路径:默认 agent-bridge 的 logs/;env 覆写供测试。
-const FEEDBACK_JSONL = process.env.FEEDBACK_JSONL ||
-  '/work/agent-bridge/logs/feedback.jsonl';
+// feedback.jsonl 路径:env 覆写(测试)> /work/agent-bridge(box 部署,行为不变)>
+// 本机无 /work 时落 $CREW_STATE/feedback.jsonl(Mac/独立部署;2026-10-16 前
+// 硬编码 /work 导致 Mac 上镜像必失败,stderr 噪音 + 面板数据源死)。
+const FEEDBACK_JSONL = process.env.FEEDBACK_JSONL || (
+  fs.existsSync('/work/agent-bridge/logs')
+    ? '/work/agent-bridge/logs/feedback.jsonl'
+    : path.join(CREW_STATE, 'feedback.jsonl'));
 
 function parseArgs(argv) {
   const o = { _sub: argv[0] };

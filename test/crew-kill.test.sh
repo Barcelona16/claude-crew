@@ -102,7 +102,7 @@ fi
 # ------------------------------------------------------------------
 setup
 echo "--- Case 5: kill --unknown 拒绝 ---"
-"$CS" set target-d backend mock >/dev/null
+CREW_SESSION_SKIP_VALIDATE=1 "$CS" set target-d backend mock >/dev/null
 out=$("$CREW" kill --unknown target-d 2>&1) ; ec=$?
 if [ "$ec" != "0" ] && echo "$out" | grep -qi "unknown flag"; then
   _ok "未知 flag 拒绝"

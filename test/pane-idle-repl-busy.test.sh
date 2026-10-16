@@ -14,6 +14,9 @@ t() {
   else fail=$((fail+1)); echo "✗ FAIL $name"; fi
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CREW_WAKE_JS="$SCRIPT_DIR/../bin/crew-wake.js"
+export CREW_WAKE_JS   # node -e 的 process.env 需要(2026-10-16:未 export 时 require(undefined) 崩)
 TMP=$(mktemp -d /tmp/panetest-XXXX)
 trap 'rm -rf "$TMP"; tmux kill-session -t panetest-idle 2>/dev/null || true; tmux kill-session -t panetest-spin 2>/dev/null || true; tmux kill-session -t panetest-queue 2>/dev/null || true' EXIT
 
@@ -33,7 +36,7 @@ mk_fake_session() {
 test_case_idle_empty_prompt() {
   mk_fake_session "panetest-idle" $'some output\n❯ \n\n  session-footer'
   local r
-  r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-idle'))")
+  r=$(node -e "console.log(require(process.env.CREW_WAKE_JS).paneIdle('panetest-idle'))")
   [ "$r" = "true" ]
 }
 t "case-1 空 ❯ 框 · paneIdle=true" test_case_idle_empty_prompt
@@ -42,7 +45,7 @@ t "case-1 空 ❯ 框 · paneIdle=true" test_case_idle_empty_prompt
 test_case_busy_working_with_secs() {
   mk_fake_session "panetest-spin" $'✻ Working… (15s · ↓ 1.2k tokens)\n❯ \n\n  footer'
   local r
-  r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-spin'))")
+  r=$(node -e "console.log(require(process.env.CREW_WAKE_JS).paneIdle('panetest-spin'))")
   [ "$r" = "false" ]
 }
 t "case-2 Working…(15s) · paneIdle=false" test_case_busy_working_with_secs
@@ -51,7 +54,7 @@ t "case-2 Working…(15s) · paneIdle=false" test_case_busy_working_with_secs
 test_case_busy_frolicking() {
   mk_fake_session "panetest-spin" $'· Frolicking… (10s · ↓ 32 tokens)\n❯ \n\n  footer'
   local r
-  r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-spin'))")
+  r=$(node -e "console.log(require(process.env.CREW_WAKE_JS).paneIdle('panetest-spin'))")
   [ "$r" = "false" ]
 }
 t "case-3 Frolicking…(10s) · paneIdle=false" test_case_busy_frolicking
@@ -60,7 +63,7 @@ t "case-3 Frolicking…(10s) · paneIdle=false" test_case_busy_frolicking
 test_case_churned_done_is_idle() {
   mk_fake_session "panetest-done" $'✻ Churned for 7m 34s · done 5:23 PM\n❯ \n\n  footer'
   local r
-  r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-done'))")
+  r=$(node -e "console.log(require(process.env.CREW_WAKE_JS).paneIdle('panetest-done'))")
   [ "$r" = "true" ]
 }
 t "case-3a Churned for X · done · paneIdle=true(★关键)" test_case_churned_done_is_idle
@@ -69,23 +72,23 @@ t "case-3a Churned for X · done · paneIdle=true(★关键)" test_case_churned_
 test_case_busy_queued_msg() {
   mk_fake_session "panetest-queue" $'work done\n❯ Press up to edit queued messages\n\n  footer'
   local r
-  r=$(node -e "console.log(require('/work/claude-crew/bin/crew-wake.js').paneIdle('panetest-queue'))")
+  r=$(node -e "console.log(require(process.env.CREW_WAKE_JS).paneIdle('panetest-queue'))")
   [ "$r" = "false" ]
 }
 t "case-4 queued messages 标记 · paneIdle=false" test_case_busy_queued_msg
 
 # ---- 5. crew-heartbeat 版本同步(源码断言) ----
 test_case_heartbeat_synced() {
-  grep -q 'queued messages' /work/claude-crew/bin/crew-heartbeat.js
-  grep -q 'BUSY_RE' /work/claude-crew/bin/crew-heartbeat.js
-  grep -q 'Frolicking' /work/claude-crew/bin/crew-heartbeat.js
+  grep -q 'queued messages' $SCRIPT_DIR/../bin/crew-heartbeat.js
+  grep -q 'BUSY_RE' $SCRIPT_DIR/../bin/crew-heartbeat.js
+  grep -q 'Frolicking' $SCRIPT_DIR/../bin/crew-heartbeat.js
 }
 t "case-5 crew-heartbeat paneIdle 也含 BUSY_RE + queued 检测" test_case_heartbeat_synced
 
 # ---- 6. crew-wake.js 版本一致(不用 require · 避免子孙耦合;两份手工同步 A5) ----
 test_case_wake_syntax() {
   node -c /work/claude-crew/bin/crew-wake.js
-  node -c /work/claude-crew/bin/crew-heartbeat.js
+  node -c $SCRIPT_DIR/../bin/crew-heartbeat.js
 }
 t "case-6 crew-wake + crew-heartbeat 语法过" test_case_wake_syntax
 

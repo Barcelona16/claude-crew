@@ -167,7 +167,9 @@ cmd_ls() {
   done < <("$CS" list 2>/dev/null)
 
   # 一次批量 keyresolve:喂 name<TAB>backend,拿回 name<TAB>model<TAB>key。存进两个"并行数组"式查表。
-  local -A KR_MODEL=() KR_KEY=()
+  # 2026-10-16:去关联数组 —— macOS 自带 bash 3.2 不支持 local -A(报 "local: -A: invalid option"
+  # 导致 ls 输出空)。改用换行分隔的查表字符串(名字不含换行,validate_name 已限定)。
+  local KR_MODEL="" KR_KEY=""
   if [ -f "$kr" ] && command -v node >/dev/null 2>&1 && [ "${#NAMES[@]}" -gt 0 ]; then
     local batch_in="" i
     for i in "${!NAMES[@]}"; do batch_in+="${NAMES[$i]}"$'\t'"${BACKENDS[$i]}"$'\n'; done
@@ -176,7 +178,7 @@ cmd_ls() {
     local bn bm bk
     while IFS=$'\t' read -r bn bm bk; do
       [ -z "$bn" ] && continue
-      KR_MODEL["$bn"]="$bm"; KR_KEY["$bn"]="$bk"
+      KR_MODEL="$KR_MODEL$bn"$'\t'"$bm"$'\n'; KR_KEY="$KR_KEY$bn"$'\t'"$bk"$'\n'
     done <<< "$batch_out"
   fi
 
@@ -187,7 +189,10 @@ cmd_ls() {
   for i in "${!NAMES[@]}"; do
     name="${NAMES[$i]}"
     local sid="${SIDS[$i]}" backend="${BACKENDS[$i]}" dir="${DIRS[$i]}" tmuxname="${TMUXNS[$i]}" key=""
-    local m_kr="${KR_MODEL[$name]:-}" k_kr="${KR_KEY[$name]:-}"
+    # 查表字符串(换行分隔 name<TAB>value);awk 精确匹配 name 列取第二列
+    local m_kr k_kr
+    m_kr=$(printf '%s' "$KR_MODEL" | awk -F'\t' -v n="$name" '$1==n{print $2; exit}')
+    k_kr=$(printf '%s' "$KR_KEY" | awk -F'\t' -v n="$name" '$1==n{print $2; exit}')
     [ "$backend" = "?" ] && [ -n "$m_kr" ] && [ "$m_kr" != "?" ] && backend="$m_kr"
     [ -n "$k_kr" ] && [ "$k_kr" != "?" ] && key="$k_kr"
     [ -z "$key" ] && key=$("$CS" get "$name" key 2>/dev/null || echo "-")
@@ -941,6 +946,97 @@ cmd_doctor() {
   echo "CL bin:     $CL $([ -x "$CL" ] && echo ✓ || echo ✗)"
   echo "tmux:       $(command -v tmux || echo '(not found)')"
   echo "sessions:   $("$CS" list 2>/dev/null | wc -l)"
+
+  # 2026-10-16 401 事故防复发:proxy/CCR 联动自检(只报告,不自动改 —— 改 key 必须人工 apply)。
+  # 事故两层根因,各对应一个检查:
+  #   ① settings.json 的 ANTHROPIC_*_BASE_URL 被指到 :3456 直连 CCR(绕过 crew-proxy)+ apiKeyHelper
+  #      与 ANTHROPIC_AUTH_TOKEN 冲突 → 直连 CCR 带 "test" → 401。检查:base_url 必须 :8788、apiKeyHelper 必须不存在。
+  #   ② ccr-providers.json 的 gateway.api_key 与 CCR 3 live 配置分叉(改了没 apply)。检查:ccr_v3.py drift。
+  if [ -n "${CREW_DOCTOR_SKIP_LINK:-}" ]; then
+    :  # 测试/CI 注入跳过(不依赖真实 settings.json/CCR)
+  else
+    echo "== proxy/CCR 链路(2026-10-16 401 防复发)=="
+    local link_bad=0
+    local proxy_port="${CREW_PROXY_PORT:-8788}" ccr_port="${CREW_CCR_PORT:-3456}"
+    # ① ~/.claude/settings.json 的三个 base_url 必须指 crew-proxy(:8788),不得直连 CCR(:3456)。
+    #    用 python 精确解析(settings.json 是缩进多行 JSON,key/value 常分行,纯 grep 会把
+    #    key 行误当 bad_url → 假阳性)。检查对象:env 里 *BASE_URL + 顶层 apiKeyHelper。
+    local settings_json="$HOME/.claude/settings.json"
+    if [ -f "$settings_json" ] && command -v python3 >/dev/null 2>&1; then
+      local bad_urls
+      bad_urls=$(python3 - "$settings_json" "$proxy_port" <<'PYEOF' 2>/dev/null || true
+import json, sys
+path, port = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(open(path))
+except Exception as e:
+    print(f"parse-error: {e}"); sys.exit(0)
+env = d.get("env", {}) or {}
+for k, v in sorted(env.items()):
+    if "BASE_URL" in k and f":{port}" not in str(v):
+        print(f"{k} = {v}")
+PYEOF
+)
+      if [ -n "$bad_urls" ]; then
+        echo "  ✗ settings.json 有 BASE_URL 不指 crew-proxy :$proxy_port(直连 CCR → 带错 token → 401):"
+        printf '    %s\n' "$bad_urls"
+        echo "    修:改回 http://127.0.0.1:$proxy_port 并确认无 apiKeyHelper(见 2026-10-16 修复记录)"
+        link_bad=1
+      else
+        echo "  ✓ settings.json BASE_URL 全部指向 crew-proxy(:$proxy_port)"
+      fi
+      if command -v python3 >/dev/null 2>&1 && python3 -c "
+import json,sys
+d=json.load(open('$settings_json'))
+sys.exit(0 if 'apiKeyHelper' in d else 1)" 2>/dev/null; then
+        echo "  ✗ settings.json 有 apiKeyHelper(与 ANTHROPIC_AUTH_TOKEN 冲突 → 实发 token 错 → 401)"
+        echo "    修:删掉 apiKeyHelper 字段"
+        link_bad=1
+      fi
+    else
+      echo "  - settings.json 不存在或缺 python3(跳过 base_url 检查)"
+    fi
+    # ② crew-proxy(:8788)与 CCR(:3456)进程存活
+    if command -v nc >/dev/null 2>&1; then
+      nc -z 127.0.0.1 "$proxy_port" 2>/dev/null && echo "  ✓ crew-proxy :$proxy_port 在听" \
+        || { echo "  ✗ crew-proxy :$proxy_port 未监听(所有会话将无法路由)"; link_bad=1; }
+      nc -z 127.0.0.1 "$ccr_port" 2>/dev/null && echo "  ✓ CCR :$ccr_port 在听" \
+        || { echo "  ✗ CCR :$ccr_port 未监听"; link_bad=1; }
+    fi
+    # ③ provider map vs live CCR 分叉(改 key 没 apply 就是这个)。
+    #    token 来源:env(CREW_CCR_WEB_TOKEN)> launchd plist 的 proxy Label(com.claudecrew.proxy,
+    #    setup.sh 装机时写入)> 放弃(报 skip)。不猜 token、不写死。
+    local adapter="${CREW_CCR_V3_ADAPTER:-$CREW_HOME/ccr_v3.py}"
+    if [ -f "$adapter" ] && [ -f "$CCR_PROVIDER_MAP" ] && command -v python3 >/dev/null 2>&1; then
+      local drift_token="${CREW_CCR_WEB_TOKEN:-}"
+      if [ -z "$drift_token" ] && [ -f "$HOME/Library/LaunchAgents/com.claudecrew.proxy.plist" ]; then
+        drift_token=$(plutil -extract EnvironmentVariables.CREW_CCR_WEB_TOKEN raw \
+          "$HOME/Library/LaunchAgents/com.claudecrew.proxy.plist" 2>/dev/null || true)
+      fi
+      if [ -n "$drift_token" ]; then
+        if CREW_CCR_WEB_TOKEN="$drift_token" CREW_CCR_WEB_URL="${CREW_CCR_WEB_URL:-http://127.0.0.1:3458}" \
+             python3 "$adapter" drift --provider-map "$CCR_PROVIDER_MAP" >/tmp/crew-drift.out 2>&1; then
+          echo "  ✓ provider map 与 CCR live 配置一致(无 drift)"
+        else
+          rc_drift=$?
+          if [ "$rc_drift" = "1" ]; then
+            echo "  ✗ provider map 与 CCR live 配置分叉(gateway/provider key 不一致 → 401):"
+            sed 's/^/    /' /tmp/crew-drift.out 2>/dev/null | head -8
+            echo "    诊断:python3 $adapter drift --provider-map $CCR_PROVIDER_MAP"
+            echo "    修:python3 $adapter apply --provider-map $CCR_PROVIDER_MAP 后重启 crew-proxy"
+            link_bad=1
+          else
+            echo "  - drift 检查无法连上 CCR web RPC(rc=$rc_drift;CCR 未起或 token 未配,跳过)"
+          fi
+        fi
+      else
+        echo "  - 无 CREW_CCR_WEB_TOKEN(env/launchd plist 都没有,跳过 drift)"
+      fi
+    else
+      echo "  - ccr_v3.py / provider map 缺失(非 CCR 3 部署,跳过 drift)"
+    fi
+    [ "$link_bad" = "0" ] && echo "  链路自检通过" || echo "  链路有问题(见上;只报告不自动改,改 key 必人工 apply)"
+  fi
 
   # 2026-08-30 audit-crew A5(P0):registry 脏行自愈
   # 脏行 = registry 里有 <cwd,name> 但 state 目录里无任何 <name>.<field> 文件

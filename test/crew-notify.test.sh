@@ -78,9 +78,9 @@ tail -1 "$FEEDBACK_JSONL" | node -e "let d='';process.stdin.on('data',c=>d+=c).o
 # ---- Case 3: --peek 只看不消费 ----
 echo "--- Case 3: --peek 只看 ---"
 node "$CN" write --to bob --from "session:alice" --note "peek me" >/dev/null
-before=$(ls "$CREW_STATE/inbox/bob"/*.json 2>/dev/null | wc -l)
+before=$(ls "$CREW_STATE/inbox/bob"/*.json 2>/dev/null | wc -l | tr -d ' ')
 "$CREW" inbox bob --peek >/dev/null
-after=$(ls "$CREW_STATE/inbox/bob"/*.json 2>/dev/null | wc -l)
+after=$(ls "$CREW_STATE/inbox/bob"/*.json 2>/dev/null | wc -l | tr -d ' ')
 [ "$before" = "$after" ] && [ "$before" = "1" ] && _ok "--peek 后信封仍在(before=after=1)" || _ng "peek 消费了: before=$before after=$after"
 
 # ---- Case 4: 老 .msg 兼容 ----
@@ -120,11 +120,11 @@ node -e "const e=JSON.parse(require('fs').readFileSync('$latest'));process.exit(
 # ---- Case 6b: crew send --no-wake 保留旧行为(批量广播场景)----
 echo "--- Case 6b: crew send --no-wake 兼容 ---"
 sent6b="$T/sent6b.log"; : > "$sent6b"
-before=$(ls "$CREW_STATE/inbox/gio"/*.json 2>/dev/null | wc -l)
+before=$(ls "$CREW_STATE/inbox/gio"/*.json 2>/dev/null | wc -l | tr -d ' ')
 CREW_SESSION_NAME=eve PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="gio" \
   FAKE_TMUX_PANE="$IDLE_PANE" FAKE_TMUX_SENT="$sent6b" \
   "$CREW" send gio "silent broadcast" --no-wake >/dev/null 2>&1
-after=$(ls "$CREW_STATE/inbox/gio"/*.json 2>/dev/null | wc -l)
+after=$(ls "$CREW_STATE/inbox/gio"/*.json 2>/dev/null | wc -l | tr -d ' ')
 [ "$after" = "1" ] && _ok "--no-wake 仍写信封" || _ng "信封未写"
 [ ! -s "$sent6b" ] && _ok "--no-wake 未 send-keys(旧行为兼容)" || _ng "--no-wake 却 wake 了"
 # state 应保持 pending(未 wake)
@@ -148,11 +148,11 @@ latest=$(ls -t "$CREW_STATE/inbox/grace"/*.json 2>/dev/null | head -1)
 # ---- Case 8: --no-wake 只 send ----
 echo "--- Case 8: --no-wake ---"
 sent="$T/sent2.log"; : > "$sent"
-before=$(ls "$CREW_STATE/inbox/ivy"/*.json 2>/dev/null | wc -l)
+before=$(ls "$CREW_STATE/inbox/ivy"/*.json 2>/dev/null | wc -l | tr -d ' ')
 PATH="$FAKE_BIN:$PATH" FAKE_TMUX_SESSIONS="ivy" FAKE_TMUX_PANE="$IDLE_PANE" \
   FAKE_TMUX_SENT="$sent" CREW_SESSION_NAME=jack \
   "$CREW" notify ivy "no wake test" --no-wake >/dev/null 2>&1
-after=$(ls "$CREW_STATE/inbox/ivy"/*.json 2>/dev/null | wc -l)
+after=$(ls "$CREW_STATE/inbox/ivy"/*.json 2>/dev/null | wc -l | tr -d ' ')
 [ "$after" = "1" ] && _ok "--no-wake 写了信封" || _ng "信封未写"
 [ ! -s "$sent" ] && _ok "--no-wake 未 send-keys" || _ng "--no-wake 却 send 了: $(cat $sent)"
 
@@ -207,7 +207,11 @@ n5=$(ls "$D_STATE/.dedup"/*.stamp 2>/dev/null | wc -l | tr -d ' ')
 
 # ⑥ 25h 过期 · sid-1 stamp touch -d "25 hours ago" 后同 key 应重新写入(Agent-C 复审补)
 sid1_stamp=$(ls "$D_STATE/.dedup"/*.stamp | head -1)   # sid-1 的 stamp
-touch -d "25 hours ago" "$sid1_stamp"
+# backdate 25h:GNU touch -d(Linux)> macOS touch -t + date -v(两者都不行则跳过该 case 不误报)
+if ! touch -d "25 hours ago" "$sid1_stamp" 2>/dev/null; then
+  if touch -t "$(date -v-25H +%Y%m%d%H%M.%S)" "$sid1_stamp" 2>/dev/null; then :
+  else echo "  (skip: 本机无法 backdate,⑥ 跳过)" ; fi
+fi
 env -i PATH="$PATH" HOME="$HOME" CREW_STATE="$D_STATE" FEEDBACK_JSONL="$D_FB" \
   node "$SCRIPT_DIR/../bin/crew-notify.js" write --to hank --from session:alice --note "sid-1 25h later" --dedup-key sid-1 >/dev/null 2>&1
 n6=$(ls "$D_STATE/inbox/hank"/*.json 2>/dev/null | wc -l | tr -d ' ')

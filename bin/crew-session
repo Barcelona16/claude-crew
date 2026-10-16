@@ -122,12 +122,23 @@ cmd_set() {
     if [ "$_old" != "$value" ]; then
       local _log="$CREW_STATE/audit.log"
       local _ppid _cmd
-      _ppid=$(awk '{print $4}' /proc/$$/stat 2>/dev/null || echo "?")
-      _cmd=$(tr '\0' ' ' < /proc/$_ppid/cmdline 2>/dev/null | head -c 300)
+      # macOS 无 /proc:ps 兜底(ppid 列);整条 2>/dev/null 包住防红字噪音。
+      # (2026-10-16 前 /proc/$_ppid/cmdline 在 Mac 报 "No such file or directory" 到 stderr)
+      _ppid=$(awk '{print $4}' /proc/$$/stat 2>/dev/null || ps -o ppid= -p $$ 2>/dev/null | tr -d ' ' || echo "?")
+      _cmd=$(ps -o command= -p "$_ppid" 2>/dev/null | head -c 300)
+      [ -z "$_cmd" ] && _cmd=$(tr '\0' ' ' < "/proc/$_ppid/cmdline" 2>/dev/null | head -c 300)
       printf '{"ts":"%s","field":"%s","name":"%s","old":"%s","new":"%s","pid":%s,"ppid":%s,"cmd":"%s"}\n' \
         "$(date -Iseconds)" "$field" "$name" "$_old" "$value" "$$" "$_ppid" "$(printf '%s' "$_cmd" | sed 's/"/\\"/g')" \
         >> "$_log" 2>/dev/null || true
     fi
+  fi
+  # backend 归一化(2026-10-16):历史 state 里 backend 被写成 "provider,model"(逗号,CCR 2
+  # 时代遗留),而 launcher/keyresolve 只认 CCR 3 的 "provider/model"(斜杠)。写入口统一转斜杠,
+  # 杜绝再埋逗号串;读侧(launcher/keyresolve)也各自兜底兼容老逗号串。
+  if [ "$field" = backend ] && [ -n "$value" ]; then
+    case "$value" in
+      *,*) value="${value%%,*}/${value#*,}" ;;
+    esac
   fi
   # 特殊字段:pintmux 只存在与否,值恒为 "1"
   case "$field" in
@@ -181,8 +192,10 @@ cmd_clean() {
 
 # list — 输出 tsv:name<TAB>field:value<TAB>field:value...
 cmd_list() {
-  declare -A seen
-  local f base name field
+  # 2026-10-16:去关联数组 —— macOS 自带 bash 3.2 不支持 declare -A(报
+  # "declare: -A: invalid option" + "unbound variable" 导致 list 全空)。改用
+  # 去重字符串 + 换行分隔(名字不含换行,validate_name 已限定 [a-zA-Z0-9_-])。
+  local seen="" f base name field
   # 找所有 <name>.<field> 文件
   shopt -s nullglob
   for f in "$CREW_STATE"/*.*; do
@@ -193,13 +206,16 @@ cmd_list() {
     name="${base%.*}"
     validate_name "$name" 2>/dev/null || continue
     validate_field "$field" 2>/dev/null || continue
-    seen[$name]="1"
+    case "$seen" in
+      *$'\n'"$name"$'\n'*) ;;                 # 已记录
+      *) seen="$seen$name"$'\n' ;;             # 追加(首尾各带 \n 便于精确匹配)
+    esac
   done
   shopt -u nullglob
 
   # 对每个 name 输出所有字段
   local n
-  for n in "${!seen[@]}"; do
+  for n in $(printf '%s' "$seen" | sort -u); do
     printf '%s' "$n"
     for field in $VALID_FIELDS; do
       if [ -f "$CREW_STATE/$n.$field" ]; then

@@ -8,3 +8,6 @@ proxy.log
 # Python bytecode
 __pycache__/
 *.pyc
+
+# joycode CLI 本地状态(2026-10-16)
+.joycode/
