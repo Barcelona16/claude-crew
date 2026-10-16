@@ -401,6 +401,7 @@ cmd_spawn() {
     [ -x "$statusline_cmd" ] && _statusline_cmd="$statusline_cmd"
     if HOOK_CMD="$hook_cmd" MATCHER="$sendmsg_tool" \
        STOP_HOOK_CMD="$stop_hook_cmd" HAS_STOP="$_has_stop_hook" STATUSLINE_CMD="$_statusline_cmd" \
+       SETTINGS_BASE_URL="$BK_BASE_URL" \
        node -e '
         const fs=require("fs");
         const hooks={PostToolUse:[{matcher:process.env.MATCHER,
@@ -412,6 +413,16 @@ cmd_spawn() {
         const settings={hooks};
         if (process.env.STATUSLINE_CMD) {
           settings.statusLine={type:"command",command:process.env.STATUSLINE_CMD};
+        }
+        // 2026-10-16 P1:per-session settings 内注入 env base_url,优先级高于全局
+        // ~/.claude/settings.json(CCR3 原生集成会反复把全局 env 重写为 :3456 直连,
+        // 导致会话绕过 crew-proxy 直连 CCR 而 401)。--settings 文件级别更高,能覆盖全局。
+        if (process.env.SETTINGS_BASE_URL) {
+          settings.env={
+            "ANTHROPIC_BASE_URL":process.env.SETTINGS_BASE_URL,
+            "ANTHROPIC_API_BASE_URL":process.env.SETTINGS_BASE_URL,
+            "CLAUDE_AGENT_API_BASE_URL":process.env.SETTINGS_BASE_URL
+          };
         }
         process.stdout.write(JSON.stringify(settings,null,2)+"\n");
       ' > "$_stmp" 2>/dev/null; then

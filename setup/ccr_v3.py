@@ -143,6 +143,26 @@ def merge_config(current: object, provider_map: dict[str, object]) -> dict[str, 
         gateway = {}
     gateway.update({"enabled": True, "host": "127.0.0.1", "port": port})
     result["gateway"] = gateway
+    # 2026-10-16 二次 401 防复发:强制关闭 CCR 原生 Claude Code 集成。
+    # profile.claudeCode.enabled=true 时 CCR 每次 saveConfig 都会"接管"
+    # ~/.claude/settings.json(写 :3456 直连 + apiKeyHelper),把 crew 修复
+    # 一次次踩回去 → 所有非 crew 起的会话 401。crew 走 crew-proxy(:8788),
+    # 这层集成与 crew 架构冲突,apply 时三层全关(总闸/claudeCode/ profiles[])。
+    profile = result.get("profile")
+    if not isinstance(profile, dict):
+        profile = {}
+    profile["enabled"] = False
+    claude_code = profile.get("claudeCode")
+    if not isinstance(claude_code, dict):
+        claude_code = {}
+    claude_code["enabled"] = False
+    profile["claudeCode"] = claude_code
+    profiles = profile.get("profiles")
+    if isinstance(profiles, list):
+        for entry in profiles:
+            if isinstance(entry, dict) and entry.get("agent") == "claude-code":
+                entry["enabled"] = False
+    result["profile"] = profile
     return result
 
 

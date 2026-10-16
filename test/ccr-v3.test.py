@@ -46,6 +46,17 @@ with tempfile.TemporaryDirectory(prefix="crew-ccr-v3-test-") as tmp:
     check("known local gateway key is used", merged["APIKEY"] == "crew-test-key")
     check("gateway endpoint remains model port", merged["routerEndpoint"] == "http://127.0.0.1:3456")
     check("existing core gateway configuration is retained", merged["gateway"]["corePort"] == 3457)
+    # 2026-10-16 二次 401 防复发:apply 必须关掉 CCR 原生 claudeCode 集成
+    # (profile.claudeCode.enabled=true 时 saveConfig 会把 ~/.claude/settings.json 写回
+    #  :3456 直连 + apiKeyHelper → 非 crew 起的会话全 401)。三层全关:
+    #   profile.enabled / profile.claudeCode.enabled / profile.profiles[] 里 agent=claude-code
+    check("merge disables profile.enabled", merged.get("profile", {}).get("enabled") is False)
+    check("merge disables profile.claudeCode", merged.get("profile", {}).get("claudeCode", {}).get("enabled") is False)
+    check("merge disables claude-code profile entries", all(
+        e.get("enabled") is False
+        for e in merged.get("profile", {}).get("profiles", [])
+        if e.get("agent") == "claude-code"
+    ))
     if old_port is None:
         os.environ.pop("CREW_CCR_PORT", None)
     else:

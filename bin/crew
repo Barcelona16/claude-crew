@@ -26,7 +26,7 @@
 #   crew models              按 key 分组列每个 key 支持的真实模型
 #   crew models <key>        列该 key 能路由的模型(从 CCR provider 反查;joycode 系含全部)
 #   crew backends            列内部 backend conf 文件名(实现细节,选模型用 crew models)
-#   crew sync-models [--key A] 从上游发现新模型,多选加进 CCR 并重启(joycode 从 :8765 拉)
+#   crew sync-models [--key A] 手动批量同步上游模型(默认已在选模型菜单自动增量同步,此命令留作批量/兜底)
 #   crew keys                列 key 别名(值脱敏)
 #   crew addkey <key> [别名] 加一把 key 到 keys.conf(别名不给则自动派生)
 #   crew switch <会话>       交互切 key→model(都默认当前值,选完重启换)
@@ -640,6 +640,116 @@ ccr_models_for_key_full() {
   ' "$cfg" 2>/dev/null
 }
 
+# _autodisc_cache_path <alias>:自动发现的模型列表缓存(5min TTL,选模型菜单前静默拉上游用)
+_autodisc_cache_path() { printf '%s/autodisc-%s.txt' "${TMPDIR:-/tmp}" "$1"; }
+
+# auto_discover_models <alias> —— 选模型菜单的自动发现(2026-10-16,替代手动 crew sync-models):
+# 只做「发现 + 合并显示」,【绝不写 map】:
+#   返回 = CCR 静态表(provider/model 全名,可直接选)+ 上游有而 CCR 没有的新模型
+#   (纯模型名,不带前缀 —— 选中后由 ensure_model_in_ccr 落地)。
+# 数据源:该 key 上游的 /v1/models(joycode 本地 :8765,其余 provider 的 gateway origin),
+# 缓存 5min(${TMPDIR}/autodisc-<alias>.txt);上游挂/空/CREW_AUTO_SYNC=0 → 只回静态表(fail-open)。
+# 铁律:绝不因它报错/卡住选模型 —— 一切失败静默回落。
+auto_discover_models() {
+  local alias="$1"
+  local static; static=$(ccr_models_for_key_full "$alias")
+  [ "${CREW_AUTO_SYNC:-1}" = "0" ] && { printf '%s\n' "$static"; return 0; }
+  local cache hit_ts now
+  cache=$(_autodisc_cache_path "$alias")
+  now=$(date +%s 2>/dev/null || echo 0)
+  local remote=""
+  if [ -f "$cache" ]; then
+    hit_ts=$(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null || echo 0)
+    case "$hit_ts" in ''|*[!0-9]*) hit_ts=0;; esac
+    if [ "$now" != 0 ] && [ $(( now - hit_ts )) -lt 300 ]; then
+      remote=$(cat "$cache" 2>/dev/null)
+    fi
+  fi
+  if [ -z "$remote" ]; then
+    local kv is_jc=0 base
+    kv=$(lookup_key "$alias")
+    [ "$kv" = joycode ] && is_jc=1
+    if [ "$is_jc" = 1 ]; then
+      remote=$(fetch_models_url "http://127.0.0.1:${JOYCODE_PORT:-8765}/v1/models" "")
+    else
+      base=$(ccr_origin_for_key "$kv")
+      [ -n "$base" ] && remote=$(fetch_models_url "${base%/}/v1/models" "$kv")
+    fi
+    [ -n "$remote" ] && printf '%s\n' "$remote" > "$cache" 2>/dev/null || true
+  fi
+  [ -z "$remote" ] && { printf '%s\n' "$static"; return 0; }
+  # 合并:静态全名表 + 上游新模型(CCR 没有的裸名 —— 选中后 ensure_model_in_ccr 落地)
+  local have new
+  have=$(ccr_models_for_key "$alias")
+  new=$(HAVE="$have" awk -F'\t' '
+    BEGIN{ n=split(ENVIRON["HAVE"],h,"\n"); for(i=1;i<=n;i++) if(h[i]!="") seen[h[i]]=1 }
+    NF{ id=$2; if(id!="" && !(id in seen) && !(id in done)){ done[id]=1; print id } }
+  ' <<EOF
+$remote
+EOF
+)
+  printf '%s\n' "$static"
+  [ -n "$new" ] && printf '%s\n' "$new"
+}
+
+# ensure_model_in_ccr <alias> <model> —— 用户从菜单选中【新模型】后落地(2026-10-16):
+# 把这一个模型写进 provider map(与 sync-models 同规则)+ ccr_apply_provider_map。
+# 幂等:CCR 已有该模型(或选的是 provider/model 全名)→ 零写入零 apply。
+# 失败仅静默(会话仍按选中值起;provider 写入失败时 launcher 会拒绝并提示,不会带病起)。
+ensure_model_in_ccr() {
+  local alias="$1" model="$2"
+  [ -n "$alias" ] && [ -n "$model" ] || return 0
+  case "$model" in */*) return 0 ;; esac   # 带 provider/ 前缀 = CCR 已有
+  local have; have=$(ccr_models_for_key "$alias")
+  printf '%s\n' "$have" | grep -qxF "$model" && return 0   # 已在(幂等)
+  local kv is_jc=0 base ccrcfg="$CCR_PROVIDER_MAP" added
+  kv=$(lookup_key "$alias")
+  [ "$kv" = joycode ] && is_jc=1
+  [ "$is_jc" = 1 ] || base=$(ccr_origin_for_key "$kv")
+  [ -f "$ccrcfg" ] || return 0
+  added=$(CCR_CFG="$ccrcfg" ALIAS="$alias" KV="$kv" ISJC="$is_jc" BASE="$base" \
+    PICK="$model" node -e '
+    const fs=require("fs");
+    const cfg=JSON.parse(fs.readFileSync(process.env.CCR_CFG,"utf8"));
+    cfg.Providers=cfg.Providers||[];
+    const pick=(process.env.PICK||"").split("\n").map(s=>s.trim()).filter(Boolean);
+    const isjc=process.env.ISJC==="1", alias=process.env.ALIAS, kv=process.env.KV,
+          base=(process.env.BASE||"").replace(/\/$/,"");
+    // 无 owner 信息(REMOTE 空):claude 系名判 anthropic,其余 openai(与上游 owned_by 对齐的经验规则)
+    const isAnthropic=m=> isjc ? /claude/i.test(m) : /claude/i.test(m);
+    let added=0;
+    if(isjc){
+      const pj=cfg.Providers.find(p=>p.name==="joycode"), po=cfg.Providers.find(p=>p.name==="joycode-oai");
+      for(const m of pick){
+        if(m.indexOf(" ")>=0) continue;
+        const tgt=isAnthropic(m)?pj:po;
+        if(!tgt) continue;
+        tgt.models=tgt.models||[]; if(!tgt.models.includes(m)){ tgt.models.push(m); added++; }
+      }
+    } else {
+      for(const m of pick){
+        if(m.indexOf(" ")>=0) continue;
+        const anth=isAnthropic(m); const pname=m+"-"+alias;
+        if(cfg.Providers.some(p=>p.name===pname)) continue;
+        cfg.Providers.push({ name:pname,
+          api_base_url: base + (anth?"/anthropic/v1/messages":"/v1/chat/completions"),
+          api_key: kv, models:[m], transformer:{ use:[anth?"Anthropic":"OpenAI"] } });
+        added++;
+      }
+    }
+    if(added===0) process.exit(1);   // 全 skip → 调用方不 apply
+    const tmp=process.env.CCR_CFG+".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(cfg,null,2)); fs.renameSync(tmp, process.env.CCR_CFG);
+    process.stdout.write(String(added));
+  ' 2>/dev/null) || added=0
+  if [ "${added:-0}" -gt 0 ] 2>/dev/null; then
+    ccr_apply_provider_map >/dev/null 2>&1 || true
+    log "auto-sync: '$model' 已写进 CCR(provider $model-$alias)并 apply"
+  fi
+  return 0
+}
+
+
 # 别名 → 真值(keys.conf: alias=token)。查不到回显别名本身。sync-models / 反查共用。
 lookup_key() {
   local alias="$1"
@@ -1208,9 +1318,16 @@ cmd_switch() {
   # model 菜单:列【该 key 支持的模型】(ccr_models_for_key_full,provider/model 全名,直接可用)。
   # 拿不到(该 key 无 CCR provider)→ 提示补 key,不再暴露 backend 文件名。
   local model_opts
-  model_opts=$(ccr_models_for_key_full "$picked_key")
+  # 2026-10-16:菜单数据源换 auto_discover_models(拉上游 /v1/models 增量同步,失败回落静态表)
+  model_opts=$(auto_discover_models "$picked_key")
   [ -z "$model_opts" ] && { log "key '$picked_key' 没有可路由模型(crew sync-models --key $picked_key 补充);保持原模型"; picked_be="$cur_be"; }
   [ -n "$model_opts" ] && picked_be=$(printf '%s\n' "$model_opts" | _pick_one "选模型 ($name,当前: ${cur_be:-无})" "$cur_be")
+  # 选中裸名新模型(无 provider/ 前缀)→ 写进 CCR 再拼全名(2026-10-16 选中即同步)
+  case "$picked_be" in
+    */*) ;;
+    *) ensure_model_in_ccr "$picked_key" "$picked_be"
+       [ -n "$picked_be" ] && picked_be="$picked_be-$picked_key/$picked_be" ;;
+  esac
   # 设全局 BACKEND/KEY,走 cmd_spawn 的 live 换模型逻辑(它会判与现值不同才重启)
   [ -n "$picked_key" ] && KEY="$picked_key"
   [ -n "$picked_be" ] && BACKEND="$picked_be"
@@ -1415,11 +1532,17 @@ cmd_spawn() {
     local _picked_key; _picked_key=$(_list_keys | _pick_one "选 key ($name)" "$_def_key")
     [ -n "$_picked_key" ] && KEY="$_picked_key"
     local _def_be; _def_be=$("$CS" get "$name" backend 2>/dev/null || echo "")
-    local _mo; [ -n "$KEY" ] && _mo=$(ccr_models_for_key_full "$KEY")
+    local _mo; [ -n "$KEY" ] && _mo=$(auto_discover_models "$KEY")  # 拉上游增量,回落静态
     if [ -z "$_mo" ]; then
       [ -n "$KEY" ] && log "key '$KEY' 没有可路由模型(crew sync-models --key $KEY 补充);可 --model 直接指定"
     else
       local _picked_be; _picked_be=$(printf '%s\n' "$_mo" | _pick_one "选模型 ($name${KEY:+, key=$KEY})" "$_def_be")
+      # 选中裸名新模型 → 写进 CCR 再拼全名(2026-10-16 选中即同步)
+      case "$_picked_be" in
+        */*) ;;
+        *) ensure_model_in_ccr "$KEY" "$_picked_be"
+           [ -n "$_picked_be" ] && _picked_be="$_picked_be-$KEY/$_picked_be" ;;
+      esac
       [ -n "$_picked_be" ] && BACKEND="$_picked_be"
     fi
   fi
@@ -1500,11 +1623,17 @@ cmd_spawn() {
     fi
     # 2) 再选该 key 支持的模型(provider/model 全名,可直接用);拿不到 → 提示补 key,不暴露文件名
     local _mopts=""
-    [ -n "$KEY" ] && _mopts=$(ccr_models_for_key_full "$KEY")
+    [ -n "$KEY" ] && _mopts=$(auto_discover_models "$KEY")  # 拉上游增量,回落静态
     if [ -z "$_mopts" ]; then
       [ -n "$KEY" ] && log "key '$KEY' 没有可路由模型(crew sync-models --key $KEY 补充);可 --model 直接指定"
     else
       local _pm; _pm=$(printf '%s\n' "$_mopts" | _pick_one "选模型 ($name${KEY:+, key=$KEY})" "")
+      # 选中裸名新模型 → 写进 CCR 再拼全名(2026-10-16 选中即同步)
+      case "$_pm" in
+        */*) ;;
+        *) ensure_model_in_ccr "$KEY" "$_pm"
+           [ -n "$_pm" ] && _pm="$_pm-$KEY/$_pm" ;;
+      esac
       [ -n "$_pm" ] && BACKEND="$_pm"
     fi
   fi
