@@ -1,0 +1,19 @@
+CHANGELOG.md
+  s_0c677a4ddf216d::t_d8ee4c5184c680 10-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "34b6b09db928d04dcfe018b933f44d8773c5455c",
+  "prompts": {},
+  "sessions": {
+    "s_0c677a4ddf216d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "59444e61-8851-4442-9b02-f314404c57c4",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
