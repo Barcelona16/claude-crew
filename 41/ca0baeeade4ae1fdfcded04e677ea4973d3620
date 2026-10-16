@@ -1,0 +1,27 @@
+CHANGELOG.md
+  s_0c677a4ddf216d::t_83e896b10c9bed 1-61
+test/crew-help-version.test.sh
+  s_0c677a4ddf216d::t_2fb4bba13cb40b 1-61
+bin/crew
+  s_0c677a4ddf216d::t_be9d886531325a 38,1779
+  s_0c677a4ddf216d::t_f6f120ef882e64 1215-1216
+  s_0c677a4ddf216d::t_cd979e2ada240d 1224,1226-1228
+  s_0c677a4ddf216d::t_08b78cebba02d0 1193-1214
+  s_0c677a4ddf216d::t_ac945c789c3237 1219-1223,1225,1229-1254,1784
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "41ca0baeeade4ae1fdfcded04e677ea4973d3620",
+  "prompts": {},
+  "sessions": {
+    "s_0c677a4ddf216d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "59444e61-8851-4442-9b02-f314404c57c4",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
