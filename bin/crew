@@ -322,9 +322,14 @@ cmd_attach() {
         done
         [ "$ok" = "1" ] || die "唤醒超时:容器里手动排查 docker exec … crew $rsn"
       fi
-      # iTerm2 集成:-CC 把远程窗格映射成本地原生窗口(检测同 dsh)。
+      # iTerm2 集成:tmux -CC attach(控制模式;⚠️ -CC 是【tmux 主命令】的选项,必须放 attach
+      # 之前——放 attach 后 tmux 3.0a 报 "unknown option -- C")。空变量别展开成空参(会成 attach "" )。
       local cc=""; [ "$TERM_PROGRAM" = "iTerm.app" ] && [ -z "${TMUX:-}" ] && cc="-CC"
-      _rex_tty "$rn" "tmux attach $cc -t crew-$rsn 2>/dev/null || tmux attach $cc -t $rsn"
+      if [ -n "$cc" ]; then
+        _rex_tty "$rn" "tmux -CC attach -t crew-$rsn 2>/dev/null || tmux -CC attach -t $rsn"
+      else
+        _rex_tty "$rn" "tmux attach -t crew-$rsn 2>/dev/null || tmux attach -t $rsn"
+      fi
     fi
   fi
   "$CT" attach "$name"
