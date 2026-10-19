@@ -1,0 +1,19 @@
+acp/crew-acpd.mjs
+  s_0eccb9b6a99249::t_eec8fe65a4de30 1-64,68-70,74-92,97-119,124,127,129-132,135-147,155-161,166,171,173,175-178,182,186-187,189,192-202,205-206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "83e6c06debd2a9b2ef44b69e9ef0cdf2ff500749",
+  "prompts": {},
+  "sessions": {
+    "s_0eccb9b6a99249": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "76e3ba39-e487-4240-97fd-d3d22883a636",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
