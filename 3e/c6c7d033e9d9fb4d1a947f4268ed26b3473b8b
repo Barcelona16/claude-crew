@@ -1,0 +1,19 @@
+acp/crew-mcp.mjs
+  s_0eccb9b6a99249::t_a68f86ac7438cd 1-89,95-98,100-156
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "3ec6c7d033e9d9fb4d1a947f4268ed26b3473b8b",
+  "prompts": {},
+  "sessions": {
+    "s_0eccb9b6a99249": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "76e3ba39-e487-4240-97fd-d3d22883a636",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
