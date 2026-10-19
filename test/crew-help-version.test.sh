@@ -2,7 +2,7 @@
 # test/crew-help-version.test.sh — crew help 分层 + version release note 单元测试(2026-10-16)
 # 覆盖:
 #   [help]
-#   ① 无参:分层帮助(日常 9 + 进阶),不含全量明细的 "crew adopt" 行
+#   ① 无参:分层帮助(日常 10 + 进阶),不含全量明细的 "crew adopt" 行
 #   ② --all:全量命令明细(含 adopt/register 等进阶命令逐条列出)
 #   ③ help <cmd>:单命令搜索(传 switch 命中 switch 行)
 #   ④ help 不 crash、exit 0
@@ -24,7 +24,7 @@ echo "=== help 分层测试 ==="
 
 out=$(bash "$CREW" help 2>&1); rc=$?
 [ "$rc" = 0 ] && _ok "④ help exit 0" || _ng "④ help rc=$rc" "$out"
-echo "$out" | grep -q "日常 9 命令" && _ok "① 无参显示分层帮助(日常 9)" || _ng "① 无分层" "$(echo "$out" | head -3)"
+echo "$out" | grep -q "日常 10 命令" && _ok "① 无参显示分层帮助(日常 10)" || _ng "① 无分层" "$(echo "$out" | head -3)"
 echo "$out" | grep -q "进阶" && _ok "① 含进阶层" || _ng "① 缺进阶层" ""
 echo "$out" | grep -qE "crew <名字>|crew ls" && _ok "① 日常层含起会话/ls" || _ng "① 日常层缺核心命令" ""
 echo "$out" | grep -q "crew adopt" && _ng "① 分层帮助不应有 adopt 明细" "应只有分组" || _ok "① 分层帮助不含 adopt 明细"

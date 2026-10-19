@@ -1353,11 +1353,12 @@ cmd_help() {
   cat <<'HEOF'
 crew —— Claude Code 常驻会话管理器
 
-日常 9 命令(新手从这里开始):
+日常 10 命令(新手从这里开始):
   crew <名字>              起/进入会话(不带 --model 会弹选模型菜单,菜单自动含上游最新模型)
   crew ls                  列出所有会话(状态/模型/key/目录)
   crew switch <名字>        交互换 key/model(选中即生效)
   crew send <名字> "消息"    给会话发消息(它忙则排队,闲则唤醒)
+  crew chat [角色前缀]      终端连远程 dsh 角色子代理(--list 列角色;ACP 协议 REPL)
   crew status <名字>        看会话健康(心跳/未读/挂起)
   crew doctor              自检(含 401 防复发链路检查)
   crew kill <名字>          删会话
@@ -1365,9 +1366,10 @@ crew —— Claude Code 常驻会话管理器
   crew version             版本(--notes 看 release note)
 
 进阶(用到再看):
+  acp                               ACP 三件套:stdio server(Zed 用)/ list / prompt 单发
   keys/addkey/models/sync-models   key 与模型管理(选模型菜单已自动发现,sync-models 仅批量兜底)
   notify/wake/inbox                消息底层(send 的拆解形态;排查送达问题时用)
-  attach/pin/stop                  tmux 细节控制
+  attach/pin/stop                  tmux 细节控制(attach 兼远程透传:crew attach <远程会话前缀>)
   adopt/register/heartbeat/web     会话接管/注册/心跳/前端面板
   log/resume-prev/prune            历史/找回被覆盖的历史/清理陈旧会话
   backends/install-hooks           内部实现/hooks 安装
@@ -1896,6 +1898,17 @@ cmd_spawn() {
 #   crew acp list             列平台角色子代理会话(dsh 进程内;ACP session/list 的人读版)
 #   crew acp prompt <role>-pipe-<pid> "文本"   单发一条给该子代理,轮询回复打到 stdout
 ACPD="${ACPD:-$SCRIPT_DIR/../acp/crew-acpd.mjs}"
+# crew chat —— ACP 终端客户端(REPL;2026-10-19,替代 2427b7f 删掉的裸 HTTP 版)。
+#   crew chat [角色前缀]       交互连远程 dsh 角色子代理(designer-/coder-/…;不带参弹菜单)
+#   crew chat --list          只列角色不进 REPL
+# 底层 acp/crew-chat.mjs:spawn crew-acpd → ACP 协议(session/list→new→prompt),流式打印。
+CHATMJS="${CHATMJS:-$SCRIPT_DIR/../acp/crew-chat.mjs}"
+cmd_chat() {
+  [ -x "$(command -v node)" ] || die "crew chat 需要 node"
+  [ -f "$CHATMJS" ] || die "缺 $CHATMJS"
+  exec node "$CHATMJS" "$@"
+}
+
 cmd_acp() {
   case "${1:-}" in
     "")
@@ -1963,6 +1976,7 @@ case "$CMD" in
   resume-prev)  cmd_resume_prev "$@" ;;
   find)         cmd_find "$@" ;;
   acp)          cmd_acp "$@" ;;
+  chat)         cmd_chat "$@" ;;
   prune)        cmd_prune "$@" ;;
   help|--help|-h) cmd_help "$@" ;;
   *)            cmd_spawn "$CMD" "$@" ;;

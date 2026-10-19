@@ -160,9 +160,13 @@ async function handlePrompt(params, ctx) {
   const r = await api('POST', '/api/send', { session: rec.member, text })
   if (r.ok !== true) throw new Error(`投递失败:${r.err ?? 'unknown'}`)
   // ② 客户端自显输入,不 echo;直接进轮询。
+  // ACP wire 格式(2026-10-19 修复):session/update 的 params 是嵌套形态
+  //   {sessionId, update: {sessionUpdate: 'agent_message_chunk', content: {type:'text', text}}}
+  // 原实现误用扁平形态 {sessionId, sessionUpdate:{type,...}} —— SDK 客户端 zod 校验直接拒收
+  // (Invalid params),角色回复永远流不回客户端。集成测试 ⑯ 拦截此缺陷。
   const push = async text => ctx.notify('session/update', {
     sessionId: params.sessionId,
-    sessionUpdate: { type: 'agent_message_chunk', content: { type: 'text', text } },
+    update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
   })
   // ③ 轮询增量:deadline 10 分钟;首轮回复可能要几十秒(角色跑一轮),耐心等;
   //    收到回复后进入 settle 检测(连续 20s 无新 assistant 消息 → end_turn)。

@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-10-19
+
+### 新增
+- **`crew chat`——ACP 终端客户端(REPL)**:iTerm 里交互式连远程 dsh 进程内角色子代理。stdio 拉起 crew-acpd → 标准协议,替代 2427b7f 删掉的裸 HTTP 版。三形态:`crew chat`(菜单挑角色)/ `crew chat <前缀>`(直连,如 `designer-`)/ `crew chat --list`;REPL 内 `/list` `/switch <前缀>` `/quit`。agent_message_chunk 流式打印。(17 用例)
+- **CLAUDE.md 重写为框架导览**:v3 宪法 → 仓库全景图(目录职责/三层连接体系/数据流/测试地形/维护约束),新会话不用读代码即可上手。
+
+### 修复
+- **crew-acpd `session/update` wire 格式**:原扁平形态 `{sessionId, sessionUpdate:{type,…}}` 被 SDK 客户端 zod 校验拒收(Invalid params)——角色回复从未真正流回任何标准 ACP 客户端;修正为嵌套形态 `{sessionId, update:{sessionUpdate:'agent_message_chunk', content:{…}}}`。集成测试 ⑯(SDK client ↔ crew-acpd 端到端往返)拦截并守护。
+- **crew chat 非交互路径挂死**:`--list`/错误提前退出后 acpd 子进程 stdio 未关,node 永不退出(实测 timeout 124);所有提前退出路径显式 `acpd.kill() + process.exit`。
+
 ## [3.3.0] - 2026-10-16
 
 ### 新增
