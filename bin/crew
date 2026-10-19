@@ -283,18 +283,6 @@ cmd_ls() {
       printf '  %-20s %-9s %-56s %-10s %-30s\n' "$name" "$status" "$backend" "$key" "$dir"
     fi
   done
-  # 远程会话段(2026-10-19):合并显示全部远程 registry 的会话,按远程分组。
-  # 远程不可达 → _remote_sessions 空串,静默跳过(单机体验不变)。--json 不并入(内部用)。
-  if [ "$json_out" -eq 0 ]; then
-    local rline rn sn rst prev_rn="" seen=""
-    while IFS=$'\t' read -r rn sn rst; do
-      [ -z "$sn" ] && continue
-      case "$seen" in *"|$rn:$sn|"*) continue ;; esac
-      seen="$seen|$rn:$sn|"
-      if [ "$rn" != "$prev_rn" ]; then printf '\n  ── 远程 %s ──\n' "$rn"; prev_rn="$rn"; fi
-      printf '  %-20s %-9s %-56s %-10s %-30s\n' "$sn" "${rst}📦" "-" "-" "@$rn"
-    done < <(_remote_sessions | sort -u)
-  fi
   [ "$json_out" -eq 1 ] && printf ']\n'
 }
 
@@ -1539,91 +1527,6 @@ cmd_switch() {
 # 重点是快:每会话只 tail transcript 最近片段(不读大 .jsonl 全文)grep 粗筛;按命中数+最近活跃
 # 排序;概要取首个命中行的 user 文本(疑似密钥脱敏)。纯 grep 路径,零模型依赖。
 # CREW_FIND_TAIL(默认 200000 字节)控制每会话读多少最近内容。
-# crew chat <会话名> —— 终端连 dsh 进程内子代理(2026-10-19)。
-# 与 attach(连 run_claude_code 的 CC tmux)不同:chat 走平台消息面(/api/messages + /api/send),
-# 直达角色本体(designer/coder/reviewer/tester/Lead 的 dsh 子代理)——读它的 transcript、给它发消息。
-# 平台基址:CREW_CHAT_BASE(默认 http://11.91.165.248:3100);身份:CREW_CHAT_ERP(默认 wangqiwang1)。
-# TUI:启动拉全量 → 渲染 → 3s 轮询增量(按签名 msgs.length|last.ts)→ 底部输入行发送(:q 退出)。
-CREW_CHAT_BASE="${CREW_CHAT_BASE:-http://11.91.165.248:3200}"
-CREW_CHAT_ERP="${CREW_CHAT_ERP:-wangqiwang1}"
-cmd_chat() {
-  local name="${1:?用法: crew chat <role>-pipe-<pid>(如 designer-pipe-20261019-wand3;不带 -pipe-<pid> 会拼不出来)}"
-  shift
-  local pid="" a
-  for a in "$@"; do case "$a" in --pid=*) pid="${a#--pid=}";; esac; done
-  _chat_req() {  # $1=method $2=path $3=body(json,可缺省)
-    if [ -n "${3:-}" ]; then
-      curl -sS --max-time 15 -X "$1" -H "X-ERP: $CREW_CHAT_ERP" -H 'Content-Type: application/json' \
-        -d "$3" "$CREW_CHAT_BASE$2"
-    else
-      curl -sS --max-time 15 -X "$1" -H "X-ERP: $CREW_CHAT_ERP" "$CREW_CHAT_BASE$2"
-    fi
-  }
-  command -v curl >/dev/null 2>&1 || die "crew chat 需要 curl"
-  # 会话名解析:支持 <pid> <role> 两参 / 直接给成员名。构造查询串。
-  local q="session=$(printf '%s' "$name" | sed 's/ /%20/g')"
-  [ -n "$pid" ] && q="$q&project=$pid"
-  local body sig="" prev_len=0 rendered=0
-  _chat_fetch() { _chat_req GET "/api/messages?$q&n=200"; }
-  _chat_render() {  # $1=json
-    python3 - "$1" <<'PYCH'
-import json, sys, datetime
-try:
-    d = json.loads(sys.argv[1])
-except Exception:
-    print("(消息解析失败)"); raise SystemExit
-msgs = d.get("messages") or []
-out = []
-for m in msgs:
-    ts = m.get("ts", "")
-    try:
-        t = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
-        tstr = t.strftime("%H:%M")
-    except Exception:
-        tstr = ""
-    sender = m.get("sender") or "?"
-    who = m.get("pin") if not m.get("replyOut") else sender
-    tag = "🧑 你 →" if m.get("replyOut") else f"🤖 {who}"
-    note = (m.get("note") or "").strip()
-    if len(note) > 600: note = note[:600] + " …(截断)"
-    out.append(f"[{tstr}] {tag}\n{note}")
-print("\n\n".join(out) if out else "(暂无消息)")
-PYCH
-  }
-  log "连接 $name @$CREW_CHAT_BASE(身份 $CREW_CHAT_ERP)——发消息直接输入,:q 退出,^L 刷新"
-  local first=1
-  while true; do
-    body=$(_chat_fetch)
-    local newsig; newsig=$(printf '%s' "$body" | python3 -c 'import json,sys
-try:
-  d=json.load(sys.stdin); ms=d.get("messages") or []
-  print(f"{len(ms)}|{(ms[-1].get(chr(116)+chr(115)) if ms else chr(48))}")
-except Exception: print("err")' 2>/dev/null)
-    if [ "$newsig" != "$sig" ]; then
-      sig="$newsig"
-      clear
-      echo "════════ crew chat · $name ════════"
-      _chat_render "$body"
-      echo "──────────────────────────────"
-      if [ "$first" = "1" ]; then first=0
-      else echo "(有新消息 $(date +%H:%M:%S))"; fi
-    fi
-    # 输入(非阻塞读 3s 窗口):read -t 在 macOS/bash 3.2 可用;超时继续轮询。
-    local line=""
-    if read -t 3 -r -p "💬 > " line; then
-      case "$line" in
-        :q|:quit|:exit) log "退出 chat"; return 0 ;;
-        "") continue ;;
-        ^L*) clear; sig=""; continue ;;
-      esac
-      local resp; resp=$(_chat_req POST /api/send "{\"session\": \"$name\", \"text\": $(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$line")}")
-      case "$resp" in
-        *'"ok":true'*) echo "✅ 已送达(角色将在下轮消费)" ;;
-        *) echo "❌ 发送失败: $resp" ;;
-      esac
-    fi
-  done
-}
 
 cmd_find() {
   [ $# -eq 0 ] && die "usage: crew find <描述...>"
@@ -1987,6 +1890,47 @@ cmd_spawn() {
 
 # 2026-09-01:机会式自动清理陈旧会话(节流每天一次,后台跑)。排除 prune 自身避免递归;
 # 排除纯读命令无妨(它也只是后台触发一次)。live/pinned 绝不删,见 cmd_prune。
+
+# crew acp —— ACP 透传/列表(2026-10-19 集成;底层 acp/crew-acpd.mjs)。
+#   crew acp                  stdio 拉起 ACP server(给 Zed 等 ACP 客户端当 command 用)
+#   crew acp list             列平台角色子代理会话(dsh 进程内;ACP session/list 的人读版)
+#   crew acp prompt <role>-pipe-<pid> "文本"   单发一条给该子代理,轮询回复打到 stdout
+ACPD="${ACPD:-$SCRIPT_DIR/../acp/crew-acpd.mjs}"
+cmd_acp() {
+  case "${1:-}" in
+    "")
+      # stdio 透传:ACP 客户端的 command 配 crew acp 即可。
+      exec node "$ACPD" ;;
+    list)
+      local base="${JIMDB_BASE:-http://11.91.165.248:3200}" erp="${JIMDB_ERP:-wangqiwang1}"
+      curl -sS --max-time 10 -H "X-ERP: $erp" "$base/api/projects" \
+        | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+rows=[]
+for p in d.get("projects") or []:
+    if not p["name"].startswith("PIPE-"): continue
+    for s in p.get("sessions") or []:
+        role=s["name"].split("-pipe-")[0]
+        rows.append((s["name"], "pipe://%s/%s"%(p["name"],role)))
+for n,c in rows: print("  %-46s %s"%(n,c))
+print("(%d 个角色会话;crew acp prompt <名> 发消息)"%len(rows))
+' ;;
+    prompt)
+      shift
+      local target="${1:?用法: crew acp prompt <role>-pipe-<pid> "文本"}"
+      local text="${2:?缺文本}"
+      local base="${JIMDB_BASE:-http://11.91.165.248:3200}" erp="${JIMDB_ERP:-wangqiwang1}"
+      curl -sS --max-time 10 -X POST -H "X-ERP: $erp" -H "Content-Type: application/json" \
+        -d "{\"session\": \"$target\", \"text\": $(python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$text")}" \
+        "$base/api/send" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("✅ 已投递" if d.get("ok") else f"❌ {d.get(chr(101)+chr(114)+chr(114))}")' ;;
+    *)
+      echo "用法: crew acp            # stdio ACP server(客户端 command)
+      crew acp list          # 列平台角色子代理
+      crew acp prompt <会话> "文本"   # 单发一条" >&2; return 1 ;;
+  esac
+}
+
 case "$CMD" in prune) : ;; *) crew_autoprune ;; esac
 
 case "$CMD" in
@@ -2018,7 +1962,7 @@ case "$CMD" in
   switch)       cmd_switch "$@" ;;
   resume-prev)  cmd_resume_prev "$@" ;;
   find)         cmd_find "$@" ;;
-  chat)         cmd_chat "$@" ;;
+  acp)          cmd_acp "$@" ;;
   prune)        cmd_prune "$@" ;;
   help|--help|-h) cmd_help "$@" ;;
   *)            cmd_spawn "$CMD" "$@" ;;
