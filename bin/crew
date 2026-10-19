@@ -70,6 +70,75 @@ CWEB="$SCRIPT_DIR/crew-web.js"
 log() { echo "[crew] $*" >&2; }
 die() { log "$*"; exit 1; }
 
+# ── 远程会话层(2026-10-19 三档合一:发现 / 路由 / 配置)────────────────────────
+# 配置文件 ~/.config/claude-crew/remotes(每行: <名> ssh://<host>/<容器> [#注释]),
+# 例:jimdb ssh://11.91.165.248/jimdb
+# 语义:crew 在本机 registry 找不到会话时,按远程 registry 透明路由——attach/send/status/peek
+#       走 ssh 透传(live 优先,tmux 死了先 crew 唤醒)。远程不可达时静默降级,行为与单机一致。
+CREW_REMOTES_FILE="${CREW_REMOTES_FILE:-$CREW_HOME/remotes}"
+_remote_names() { [ -f "$CREW_REMOTES_FILE" ] && awk '/^[a-zA-Z0-9._-]+[[:space:]]+ssh:\/\//{print $1}' "$CREW_REMOTES_FILE"; }
+# _remote_conf <名> → "host container"(无配置返 1)
+_remote_conf() {
+  [ -f "$CREW_REMOTES_FILE" ] || return 1
+  local line
+  line=$(awk -v n="$1" '$1==n && $2 ~ /^ssh:\/\//{print $2; exit}' "$CREW_REMOTES_FILE")
+  [ -z "$line" ] && return 1
+  local spec="${line#ssh://}"
+  echo "${spec%%/*} ${spec#*/}"
+}
+# _rex <远程名> <命令…> → ssh 透传进容器 bash(2s 连接超时;失败静默,由调用方降级)
+_rex() {
+  local rn="$1"; shift
+  local conf; conf=$(_remote_conf "$rn") || return 1
+  local host="${conf%% *}" cont="${conf#* }"
+  ssh -o BatchMode=yes -o ConnectTimeout=3 "$host" "docker exec $cont bash -c $(printf '%q' "$*")" 2>/dev/null
+}
+# _rex_tty <远程名> <命令…> → 同上但分配 tty(attach 专用)
+_rex_tty() {
+  local rn="$1"; shift
+  local conf; conf=$(_remote_conf "$rn") || return 1
+  local host="${conf%% *}" cont="${conf#* }"
+  exec ssh -t -o BatchMode=yes "$host" "docker exec -it $cont bash -c $(printf '%q' "$*")"
+}
+# _remote_sessions → 全部远程会话清单 "远程名<TAB>会话名<TAB>状态(live|resumable)"。
+# 远程全挂 → 空串(不报错:单机用户体验不变)。
+_remote_sessions() {
+  # 输出 "远程<TAB>会话名<TAB>状态"。registry 名单为底(resumable 全量);
+  # live tmux 只把同名条目升级为 live + 补充 registry 之外的裸 tmux 会话(adopted 之类)。
+  # 同名不产双行(下游 find/ls 的唯一性判定依赖它)。
+  local rn sess live merged
+  while IFS= read -r rn; do
+    [ -z "$rn" ] && continue
+    merged=$(
+      { _rex "$rn" "cat ~/.local/share/claude-crew/registry 2>/dev/null" | awk '{print $2}'
+        _rex "$rn" "tmux list-sessions -F '#{session_name}' 2>/dev/null" | sed 's/^crew-//'
+      } | awk 'NR==FNR{ names[$0]=1; next } { tmon[$0]=1 } END{ for(n in names) print n"\t"(tmon[n]?"live":"resumable"); for(t in tmon) if(!(t in names)) print t"\tlive" }' - <(
+          _rex "$rn" "tmux list-sessions -F '#{session_name}' 2>/dev/null" | sed 's/^crew-//')
+    )
+    while IFS=$'\t' read -r sess live; do
+      [ -z "$sess" ] && continue
+      printf '%s\t%s\t%s\n' "$rn" "$sess" "$live"
+    done < <(printf '%s\n' "$merged")
+  done < <(_remote_names)
+}
+# _find_remote_session <会话名或前缀> → "远程名<TAB>会话名"(唯一匹配;0 或多个都返 1,多个时提示到 stderr)
+_find_remote_session() {
+  # pat 支持两种匹配:首字符 @ 强制子串匹配(find 用);默认前缀匹配(attach/send 用,防误路由)。
+  local pat="$1" hits rn sn mode="prefix"
+  case "$pat" in @*) pat="${pat#@}"; mode="substr";; esac
+  # 匹配:子串即可(远程流水线会话名是 cc-PIPE-<date>-<pid>-<role> 长名,用户记尾段)。
+  # 去重:同远程同名会话 registry(resumable)与 tmux(live)各产一行 → 只留一行(live 优先)。
+  hits=$(_remote_sessions | awk -F'\t' -v p="$pat" 'index($2, p)>0')
+  [ -z "$hits" ] && return 1
+  local n; n=$(printf '%s\n' "$hits" | wc -l | tr -d ' ')
+  if [ "$n" -gt 1 ]; then
+    log "会话 '$pat' 在远程匹配到 $n 个,请用更长的前缀:"
+    printf '%s\n' "$hits" | awk -F'\t' '{ printf "  [remote:%s] %s\n", $1, $2 }' >&2
+    return 1
+  fi
+  printf '%s' "$hits"
+}
+
 # 全局 flags 解析
 BACKEND=""
 KEY=""
@@ -214,12 +283,50 @@ cmd_ls() {
       printf '  %-20s %-9s %-56s %-10s %-30s\n' "$name" "$status" "$backend" "$key" "$dir"
     fi
   done
+  # 远程会话段(2026-10-19):合并显示全部远程 registry 的会话,按远程分组。
+  # 远程不可达 → _remote_sessions 空串,静默跳过(单机体验不变)。--json 不并入(内部用)。
+  if [ "$json_out" -eq 0 ]; then
+    local rline rn sn rst prev_rn="" seen=""
+    while IFS=$'\t' read -r rn sn rst; do
+      [ -z "$sn" ] && continue
+      case "$seen" in *"|$rn:$sn|"*) continue ;; esac
+      seen="$seen|$rn:$sn|"
+      if [ "$rn" != "$prev_rn" ]; then printf '\n  ── 远程 %s ──\n' "$rn"; prev_rn="$rn"; fi
+      printf '  %-20s %-9s %-56s %-10s %-30s\n' "$sn" "${rst}📦" "-" "-" "@$rn"
+    done < <(_remote_sessions | sort -u)
+  fi
   [ "$json_out" -eq 1 ] && printf ']\n'
 }
 
 cmd_attach() {
   local name="$1"
   [ -z "$name" ] && die "usage: crew attach <name>"
+  # 远程路由(2026-10-19):本地 registry/state 没有这个会话 → 查远程;命中则透传 attach
+  # (live 直连;resumable 先 crew 唤醒重建 tmux 再 attach)。远程无匹配回落本地原逻辑(会报不存在)。
+  if ! "$CS" has "$name" sid 2>/dev/null && ! "$CS" list 2>/dev/null | cut -f1 | grep -qFx "$name"; then
+    local rhit; rhit=$(_find_remote_session "$name" 2>/dev/null) || rhit=""
+    if [ -n "$rhit" ]; then
+      local rn="${rhit%%$'\t'*}" rsn=$(printf '%s' "$rhit" | cut -f2)
+      log "远程会话 [remote:$rn] $rsn —— 透传 attach"
+      # tmux 活着 → 直 attach;死着(resumable)→ 先 crew 唤醒(重建 tmux 恢复历史),轮询至 20s。
+      if ! _rex "$rn" "tmux has-session -t crew-$rsn 2>/dev/null" >/dev/null 2>&1 \
+         && ! _rex "$rn" "tmux has-session -t $rsn 2>/dev/null" >/dev/null 2>&1; then
+        log "tmux 未运行,先唤醒 resumable 会话…"
+        _rex_tty "$rn" "/work/claude-crew-v2/bin/crew $rsn true" </dev/tty >/dev/null 2>&1 \
+          || _rex "$rn" "/work/claude-crew-v2/bin/crew-session set $rsn notmux 0" >/dev/null 2>&1
+        local ok=0 i
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          if _rex "$rn" "tmux has-session -t crew-$rsn 2>/dev/null" >/dev/null 2>&1 \
+             || _rex "$rn" "tmux has-session -t $rsn 2>/dev/null" >/dev/null 2>&1; then ok=1; break; fi
+          sleep 2
+        done
+        [ "$ok" = "1" ] || die "唤醒超时:容器里手动排查 docker exec … crew $rsn"
+      fi
+      # iTerm2 集成:-CC 把远程窗格映射成本地原生窗口(检测同 dsh)。
+      local cc=""; [ "$TERM_PROGRAM" = "iTerm.app" ] && [ -z "${TMUX:-}" ] && cc="-CC"
+      _rex_tty "$rn" "tmux attach $cc -t crew-$rsn 2>/dev/null || tmux attach $cc -t $rsn"
+    fi
+  fi
   "$CT" attach "$name"
 }
 
@@ -402,6 +509,18 @@ cmd_send() {
   done
   [ -z "$name" ] && die "usage: crew send <name> \"msg\" [--no-wake]"
   [ "${#msg_parts[@]}" -eq 0 ] && die "crew send: 消息不能为空"
+  # 远程路由(2026-10-19):本地无此会话 → 远程 send-keys 直接打字进远程 tmux(不经 inbox:
+  # 远程会话的 inbox/唤醒机制跑在容器里,本地碰不到;send-keys 语义最接近"给会话发消息")。
+  if ! "$CS" has "$name" sid 2>/dev/null && ! "$CS" list 2>/dev/null | cut -f1 | grep -qFx "$name"; then
+    local rhit; rhit=$(_find_remote_session "$name" 2>/dev/null) || rhit=""
+    if [ -n "$rhit" ]; then
+      local rn="${rhit%%$'\t'*}" rsn=$(printf '%s' "$rhit" | cut -f2) rmsg="${msg_parts[*]}"
+      _rex "$rn" "tmux send-keys -t crew-$rsn $(printf '%q' "$rmsg") Enter 2>/dev/null || tmux send-keys -t $rsn $(printf '%q' "$rmsg") Enter" >/dev/null 2>&1 \
+        && log "✅ 已发送给远程会话 [remote:$rn] $rsn(send-keys;tmux 未运行时先 crew attach 唤醒)" && return 0
+      log "远程发送失败(tmux 未运行?)——先 crew attach $rsn 唤醒再 send"
+      return 1
+    fi
+  fi
   local msg="${msg_parts[*]}"
   local sender="${CREW_SESSION_NAME:-crew-send}"
   command -v node >/dev/null 2>&1 || die "crew send 需要 node"
@@ -426,6 +545,16 @@ cmd_send() {
 }
 
 cmd_status() {
+  # 远程路由(2026-10-19):本地无此会话 → 远程 registry/tmux 命中 → capture-pane 出健康摘要。
+  if [ $# -ge 1 ] && ! "$CS" has "$1" sid 2>/dev/null && ! "$CS" list 2>/dev/null | cut -f1 | grep -qFx "$1"; then
+    local rhit; rhit=$(_find_remote_session "$1" 2>/dev/null) || rhit=""
+    if [ -n "$rhit" ]; then
+      local rn="${rhit%%$'\t'*}" rsn=$(printf '%s' "$rhit" | cut -f2)
+      echo "[remote:$rn] $rsn(tmux capture 尾部 12 行;空 = 未运行)"
+      _rex "$rn" "tmux capture-pane -p -t crew-$rsn -S -12 2>/dev/null || tmux capture-pane -p -t $rsn -S -12 2>/dev/null" | tail -12
+      return 0
+    fi
+  fi
   # crew status <name> [--json]  → 单会话健康摘要(心跳/inbox/pending)
   # exit 契约:0=返健康态 / 4=未注册
   local name="" args=()
@@ -1406,6 +1535,12 @@ cmd_switch() {
 # CREW_FIND_TAIL(默认 200000 字节)控制每会话读多少最近内容。
 cmd_find() {
   [ $# -eq 0 ] && die "usage: crew find <描述...>"
+  # 远程按会话名匹配(2026-10-19):远程 transcript 在容器里,本机 grep 不到,只匹配名字。
+  local _rf; _rf=$(_find_remote_session "@$*" 2>/dev/null) || _rf=""
+  if [ -n "$_rf" ]; then
+    log "远程匹配(按名字;内容搜索请在远程跑 crew find):"
+    printf '%s\n' "$_rf" | awk -F'\t' '{ printf "  [remote:%s] %s\n", $1, $2 }'
+  fi
   local q="$*" tailb="${CREW_FIND_TAIL:-200000}"
   local live_sessions; live_sessions=$("$CT" list 2>/dev/null || echo "")
   # 收集 name→sid→transcript,grep 粗筛计分。结果行:"命中数<TAB>mtime<TAB>name<TAB>transcript"
@@ -1580,6 +1715,17 @@ resolve_session_dir() {
 }
 
 cmd_spawn() {
+  # 远程路由(2026-10-19):本机无此会话但远程有 → 交给 cmd_attach 走远程(唤醒+attach),
+  # 防止"想接手远程 agent 却在本地建了同名空会话"。显式 --fresh/--model 时仍按本地新建(用户明确要新起)。
+  if [ $# -ge 1 ] && [ -z "$BACKEND" ] && [ "$FRESH" -eq 0 ]; then
+    local _sp="$1"
+    if ! "$CS" list 2>/dev/null | cut -f1 | grep -qFx "$_sp"; then
+      local _rhit; _rhit=$(_find_remote_session "$_sp" 2>/dev/null) || _rhit=""
+      if [ -n "$_rhit" ]; then
+        cmd_attach "$_sp"; exit $?
+      fi
+    fi
+  fi
   local name="$1"; shift
   local task="$*"
   [ -z "$name" ] && die "no name"
