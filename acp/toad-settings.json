@@ -9,5 +9,8 @@
   },
   "agent": {
     "thoughts": false
+  },
+  "sidebar": {
+    "hide": false
   }
 }
