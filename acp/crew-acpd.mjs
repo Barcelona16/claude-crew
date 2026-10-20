@@ -92,15 +92,22 @@ app.onRequest('initialize', async () => ({
 }))
 
 // session/new:params.cwd = pipe://<pid>/<role>(客户端按 list 的 cwd 字段构造)。
+// 普通 cwd(Martty 等通用客户端 /new 的默认行为)→ 自动绑定最新流水线的 lead(2026-10-20):
+// 绑定规则与 crew dsh 第一级一致——pid 取成员列表最大值(pid 含日期,最新流水线),角色 lead。
 app.onRequest('session/new', async (cx) => {
   const { params, client } = cx   // SDK handler 收 context{params,requestId,signal,client},非裸 params
   log('session/new cwd =', params?.cwd ?? '(未绑定)')
-  const target = cwdToMember(params?.cwd)
+  let target = cwdToMember(params?.cwd)
   if (!target) {
-    // 未指定目标:开一个"未绑定"会话,客户端应先 list 再 resume 指定角色
-    const id = `acp-${++sessionSeq}`
-    active.set(id, { member: null, pid: null, role: null, known: new Set() })
-    return { sessionId: id }
+    // 未指定 pipe://:自动绑最新流水线 lead(通用 ACP 客户端开箱即用;绑定后同普通会话)
+    const members = await listMembers()
+    if (members.length === 0) throw new Error('平台无角色会话(JIMDB_BASE 可达?session/list 查看)')
+    const latest = members
+      .filter(m => m.role === 'lead')
+      .sort((a, b) => b.pid.localeCompare(a.pid))[0]
+      ?? members.sort((a, b) => b.pid.localeCompare(a.pid))[0]
+    target = { member: latest.member, pid: latest.pid, role: latest.role }
+    log(`未绑定 cwd → 自动绑定最新 lead:${target.member}`)
   }
   // 校验成员存在
   const members = await listMembers()

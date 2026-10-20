@@ -248,6 +248,55 @@ else
   _ng "⑰ crew dispatch 缺 dsh 分支"
 fi
 
+
+echo "--- Martty 适配(acpd 未绑定会话自动绑 lead)---"
+# ⑱ 未绑定 session/new(普通 cwd)→ prompt 自动绑定最新流水线 lead 并正常往返
+#    场景:Martty 等通用 ACP 客户端 /new 传普通 cwd,不认识 pipe:// 协议
+node "$FAKE_HTTP" 2>"$T/port.log" & FAKE2_PID=$!
+for i in $(seq 1 30); do [ -s "$T/port.log" ] && break; sleep 0.2; done
+FAKE_PORT=$(cat "$T/port.log" 2>/dev/null)
+if [ -n "${FAKE_PORT:-}" ] && [ "$FAKE_PORT" -gt 0 ] 2>/dev/null; then
+  cat > "$T/e2e-martty.mjs" <<EOF
+import { client, methods, PROTOCOL_VERSION, ndJsonStream } from 'file:///Users/wangqiwang1/Desktop/claude-crew/acp/node_modules/@agentclientprotocol/sdk/dist/acp.js'
+import { spawn } from 'node:child_process'
+import { Readable, Writable } from 'node:stream'
+
+const acpd = spawn('node', ['/Users/wangqiwang1/Desktop/claude-crew/acp/crew-acpd.mjs'], {
+  env: {...process.env, JIMDB_BASE: 'http://127.0.0.1:${FAKE_PORT}', JIMDB_ERP: 'tester'},
+})
+const stream = ndJsonStream(Writable.toWeb(acpd.stdin), Readable.toWeb(acpd.stdout))
+let got = ''
+await client({name:'martty-sim', version:'0.0.1'}).connectWith(stream, async (cx) => {
+  await cx.request(methods.agent.initialize, {
+    protocolVersion: PROTOCOL_VERSION,
+    clientCapabilities: {fs:{readTextFile:false, writeTextFile:false}},
+  })
+  // Martty 风格:普通 cwd 开会话(不传 pipe://)
+  const session = await cx.buildSession('/Users/tester/project').start()
+  const p = session.prompt('你好')
+  for (;;) {
+    const msg = await session.nextUpdate()
+    if (msg.kind === 'stop') break
+    const u = msg.notification?.update ?? msg.notification
+    if (u?.sessionUpdate === 'agent_message_chunk') got += u.content?.text ?? ''
+  }
+  await p
+})
+if (!got.includes('回复:你好')) { acpd.kill(); throw new Error('未收到回复: ' + JSON.stringify(got)) }
+acpd.kill()
+console.log('MARTTY-E2E-OK')
+process.exit(0)
+EOF
+  if out=$(node "$T/e2e-martty.mjs" 2>&1); then
+    _ok "⑱ 通用客户端普通 cwd 会话 → 自动绑 lead 并往返"
+  else
+    _ng "⑱ Martty 适配失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
+  fi
+  kill $FAKE2_PID 2>/dev/null
+else
+  _ng "⑱ fake HTTP 未起"
+fi
+
 echo
 echo "=== crew-dsh.test.sh: $pass / $total pass, $fail fail ==="
 [ "$fail" -eq 0 ]

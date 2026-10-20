@@ -16,7 +16,8 @@
 - acp/crew-chat.mjs → acp/crew-dsh.mjs;新增 groupPipelines(lead 排首 + 角色字母序)、renderTurn。
 
 ### 修复
-- 角色回合前缀 `` 覆写在管道/TTY 下不一致 → 改 `
+- 角色回合前缀 `
+` 覆写在管道/TTY 下不一致 → 改 `
 ` 换行。
 - crew-acpd 支持 `CREW_ACPD_QUIET=1` 静音常规 stderr 日志(crew dsh 拉起时默认设,`CREW_DSH_DEBUG=1` 可开)——
   修日志泄漏进对话框。
