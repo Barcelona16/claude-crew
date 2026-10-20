@@ -1,0 +1,69 @@
+bin/crew
+  s_2aade3025ecf14::t_0197779f03c536 1348-1349
+  s_2aade3025ecf14::t_7be55e571ce18d 1914
+  s_2aade3025ecf14::t_0aae93a230583b 234,239-244,246-250
+  s_2aade3025ecf14::t_b9f4ba62bdb3b7 1203-1208
+  s_2aade3025ecf14::t_057f0bd8ca432f 1267,1269-1314
+  s_2aade3025ecf14::t_b82065be1ebc1a 1389-1435
+  s_2aade3025ecf14::t_094cf72955fb9d 73-88
+  s_2aade3025ecf14::t_731a8d1baafd05 232
+  s_2aade3025ecf14::t_d3b7184ad94ddb 235-238,245
+setup/test_crew_proxy_fixes.py
+  s_2aade3025ecf14::t_594fac39583305 1-97
+test/crew-statusline.test.sh
+  s_2aade3025ecf14::t_2acf967bcf9316 29
+  s_2aade3025ecf14::t_889e90c8f7954e 38,42-43
+  s_2aade3025ecf14::t_a002d9a0c1769a 48-49
+  s_2aade3025ecf14::t_d299d483c64b9d 40
+  s_2aade3025ecf14::t_bd230db2822735 36
+  s_2aade3025ecf14::t_414db5bf8cb077 24-25,27
+  s_2aade3025ecf14::t_1442aa4000f29a 39,68,71-72,75,78,87-92,94,96-97
+  s_2aade3025ecf14::t_da90378a1f7f5b 21-23,26,28
+  s_2aade3025ecf14::t_fb8afdf1ba92e9 54-55
+  s_2aade3025ecf14::t_830793407e278f 82-86,93,95,98
+CHANGELOG.md
+  s_2aade3025ecf14::t_41695e37ebb7cf 10-49
+test/claude-pid.test.sh
+  s_2aade3025ecf14::t_3531fa780ef1c1 27
+  s_2aade3025ecf14::t_75aabd4c6e8d17 93-104,106,111-112
+  s_2aade3025ecf14::t_479b022eb66468 1-26,28-39,42-51,55-92,105,107-110,113-118
+  s_2aade3025ecf14::t_e1e4f47ca1ba54 40-41,52-54
+bin/crew-launcher
+  s_2aade3025ecf14::t_870f72cd4c7005 457-458,461-465
+  s_2aade3025ecf14::t_41c6d0b32ff13e 451-456,459-460,466-473
+backends/model-windows.conf.example
+  s_2aade3025ecf14::t_654c7ead1955e7 1-29
+bin/crew-heartbeat.js
+  s_2aade3025ecf14::t_94fa14ba5f1636 168-185
+bin/crew-statusline.sh
+  s_2aade3025ecf14::t_97bbba4fc423ec 124-126,130-143
+  s_2aade3025ecf14::t_55f6be882045be 127-129
+  s_2aade3025ecf14::t_2939edbce63c65 75
+  s_2aade3025ecf14::t_eae988f0d5e262 70-72
+setup/crew_proxy.py
+  s_2aade3025ecf14::t_e92598e351260c 1459-1461
+  s_2aade3025ecf14::t_0c6a2c82b356dd 2285-2286,2299-2300
+  s_2aade3025ecf14::t_9852a64da0bc1d 365-378,420-452
+  s_2aade3025ecf14::t_c1255a4f740c19 396-419
+  s_2aade3025ecf14::t_95c7bc03252d45 1003-1008,1012
+  s_2aade3025ecf14::t_35a05b343ff4de 2411-2412,2420-2421,2427-2428,2435-2436
+  s_2aade3025ecf14::t_f0a353310a6518 568,578-579,583-586
+  s_2aade3025ecf14::t_22fd94cb763fa3 1463-1466,1470-1472
+  s_2aade3025ecf14::t_351c12e2653974 2526-2532,2538-2563
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "b11f3a6885177116db83e6764dad5cccb22b1c49",
+  "prompts": {},
+  "sessions": {
+    "s_2aade3025ecf14": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2a01ea2-3a2d-41fd-b6c7-b8dff396400e",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
