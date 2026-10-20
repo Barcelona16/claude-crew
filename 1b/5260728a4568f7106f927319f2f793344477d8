@@ -1,0 +1,24 @@
+acp/crew-dsh.mjs
+  s_8689a806c2a7a3::t_5dec93be5b1f2d 109-110,128,130,138
+  s_8689a806c2a7a3::t_761a3496b9e791 129,131-137
+bin/crew
+  s_8689a806c2a7a3::t_56bf733a0ae8a9 1944-1948,1976-1988
+CHANGELOG.md
+  s_8689a806c2a7a3::t_a8b69679b04d84 10-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "1b5260728a4568f7106f927319f2f793344477d8",
+  "prompts": {},
+  "sessions": {
+    "s_8689a806c2a7a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3a9682b3-6d69-4c69-b4b8-aa84026750db",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
