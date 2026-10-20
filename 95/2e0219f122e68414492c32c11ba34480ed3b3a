@@ -1,0 +1,21 @@
+bin/crew
+  s_8689a806c2a7a3::t_35d812c534beec 2027-2030
+CHANGELOG.md
+  s_8689a806c2a7a3::t_654f692ba0ff9d 10-19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "952e0219f122e68414492c32c11ba34480ed3b3a",
+  "prompts": {},
+  "sessions": {
+    "s_8689a806c2a7a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3a9682b3-6d69-4c69-b4b8-aa84026750db",
+        "model": "unknown"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
