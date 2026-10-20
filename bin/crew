@@ -1945,9 +1945,53 @@ cmd_dsh() {
       if [ -n "$target_member" ]; then
         target_member=$(node "$DSHMJS" --resolve "$target_member" 2>/dev/null) || target_member=""
       fi
+      # 工作区镜像:rsync 远程流水线工作目录 → 本地(~/.crew/dsh-work/<pid>/),
+      # Toad 左侧 project 树 = 远程真实文件(只读镜像;每次启动刷新,CREW_DSH_SYNC=0 跳过)
+      local proj_dir=""
+      if [ "${CREW_DSH_SYNC:-1}" = "1" ] && [ -n "$target_member" ]; then
+        local pid_raw="${target_member##*-pipe-}"   # <role>-pipe-<pid> → pid
+        local mirror="$HOME/.crew/dsh-work/$pid_raw"
+        mkdir -p "$mirror"
+        if rsync -az --quiet -e "ssh -o BatchMode=yes -o ConnectTimeout=5" \
+             --exclude node_modules --exclude .git --exclude '*.log' --exclude target \
+             --max-size=2m \
+             "${CREW_DSH_RSYNC_SRC:-11.91.165.248:/root/claude-work/jimdb/.dsh/jimdb-work/PIPE-$pid_raw/}" "$mirror/" 2>/dev/null; then
+          proj_dir="$mirror"
+          log "工作区镜像 ← 远程 PIPE-$pid_raw → $mirror"
+        else
+          log "warn: 工作区镜像 rsync 失败(左树将指向当前目录)"
+        fi
+      fi
+      [ -n "$proj_dir" ] || proj_dir="$PWD"
+      # Claude Code 观感预置(gruvbox 暖底/极简/紧凑;仅补缺省键,不覆盖用户自定义)
+      TOADCFG="${TOAD_CONFIG:-$HOME/.config/toad/toad.json}" TOADPRESET="$SCRIPT_DIR/../acp/toad-settings.json" python3 - <<'PYCFG' 2>/dev/null || true
+import json, os
+cfg_path, preset_path = os.environ['TOADCFG'], os.environ['TOADPRESET']
+try:
+    cfg = json.load(open(cfg_path))
+except Exception:
+    cfg = {}
+preset = json.load(open(preset_path))
+preset.pop('_comment', None)
+changed = False
+for k, v in preset.items():
+    if k not in cfg:
+        cfg[k] = v; changed = True
+    elif isinstance(v, dict) and isinstance(cfg.get(k), dict):
+        for k2, v2 in v.items():
+            if k2 not in cfg[k]:
+                cfg[k][k2] = v2; changed = True
+if changed:
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    tmp = cfg_path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False)
+    os.replace(tmp, cfg_path)
+PYCFG
       export CREW_DSH_TARGET="$target_member" CREW_DSH_BIND_REPLAY=1
+      # 标题 = 状态栏常驻显示:JIMDB Agent + 作者署名(角色/流水线由 acpd session_info_update 补充)
       log "dsh → Toad 富 UI(绑定即显历史;--repl 回内置)"
-      exec "$toad_bin" acp -t "${CREW_DSH_TITLE:-JIMDB dsh}" "node $ACPD"
+      exec "$toad_bin" acp -t "${CREW_DSH_TITLE:-JIMDB Agent · by wangqiwang1}" -d "$proj_dir" "node $ACPD"
     fi
     [ "$ui" = "toad" ] && [ -z "$toad_bin" ] && die "toad 未安装(uv tool install -U batrachian-toad)"
   fi

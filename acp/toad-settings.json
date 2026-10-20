@@ -1,0 +1,13 @@
+{
+  "_comment": "crew dsh → Toad 的默认观感(Claude Code 风格:gruvbox 暖底 + 极简 + 紧凑)。仅补缺省键,不覆盖用户自定义",
+  "ui": {
+    "theme": "gruvbox",
+    "prompt_message": "给 dsh 角色发消息…",
+    "compact-input": true,
+    "sessions-bar": "multiple",
+    "footer": true
+  },
+  "agent": {
+    "thoughts": false
+  }
+}

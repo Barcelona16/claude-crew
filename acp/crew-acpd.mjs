@@ -94,7 +94,7 @@ function replayOnBind(cx, id, rec, hist) {
   try {
     cx.client.notify('session/update', {
       sessionId: id,
-      update: { sessionUpdate: 'session_info_update', title: `${rec.role} · ${rec.pid}` },
+      update: { sessionUpdate: 'session_info_update', title: `JIMDB Agent · ${rec.role} · ${rec.pid}` },
     })
   } catch (e) { log('session_info_update 推送失败:', e?.message ?? e) }
   // 绑定时主动回放历史(CREW_DSH_BIND_REPLAY=1 开):Toad/Zed 等客户端绑定即见历史;
@@ -112,7 +112,7 @@ function replayOnBind(cx, id, rec, hist) {
           sessionId: id,
           update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
         }))
-        await push(`〔${rec.role} · ${rec.pid} 最近历史〕\n`)
+        await push(`〔JIMDB Agent · ${rec.role} · ${rec.pid}(作者 wangqiwang1)最近历史〕\n`)
         for (const m of hist.slice(-REPLAY_N)) {
           const who = m.replyOut === true ? rec.role : 'user'
           const note = (m.note ?? '').replace(/\n$/, '')
@@ -272,7 +272,7 @@ async function handlePrompt(params, ctx) {
   if (!rec.replayedOnce) {
     rec.replayedOnce = true
     if (REPLAY_N > 0 && rec.lastHist?.length) {
-      await push(`── 历史上下文(${rec.role} · ${rec.pid})──\n`)
+      await push(`── JIMDB Agent 历史上下文(${rec.role} · ${rec.pid} · by wangqiwang1)──\n`)
       for (const m of rec.lastHist.slice(-REPLAY_N)) {
         const who = m.replyOut === true ? rec.role : 'user'
         const note = (m.note ?? '').replace(/\n$/, '')

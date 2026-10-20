@@ -7,6 +7,19 @@
 
 ## [Unreleased]
 
+## [3.11.0] - 2026-10-20
+
+### 新增
+- **Toad UI 优化(Claude Code 观感 + JIMDB Agent 品牌)**:
+  - 标题/状态栏:JIMDB Agent · by wangqiwang1;acpd 会话名与横幅同署名。
+  - 观感预置(acp/toad-settings.json,crew dsh 自动应用,仅补缺省键):
+    gruvbox 暖底暗色 + 紧凑输入 + 中文 placeholder(「给 dsh 角色发消息…」);
+    footer 键位栏保留(新手友好);thoughts 折叠。
+  - **工作区镜像**:crew dsh 启动时 rsync 远程流水线工作目录(容器
+    /work/jimdb/.dsh/jimdb-work/PIPE-<pid>/ = 宿主 /root/claude-work/…)
+    → 本地 ~/.crew/dsh-work/<pid>/,Toad 左侧 project 树即远程真实文件
+    (排除 node_modules/.git/target,≤2M;CREW_DSH_SYNC=0 跳过;2.6s/wand3)。
+
 ## [3.10.0] - 2026-10-20
 
 ### 变更

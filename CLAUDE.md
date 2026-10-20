@@ -42,7 +42,7 @@ docs/specs/           方案存档(改架构先写 spec)
 
 | 场景 | 命令 | 通道 |
 |---|---|---|
-| iTerm 富 UI 聊角色 | `crew dsh wand3`(默认 Toad,绑定即显历史;`--repl` 回内置) | 本地 stdio ACP(crew-acpd ↔ :3200 HTTP) |
+| iTerm 富 UI 聊角色 | `crew dsh wand3`(默认 Toad:绑定即显历史+JIMDB Agent 品牌+工作区镜像;`--repl` 回内置) | 本地 stdio ACP(crew-acpd ↔ :3200 HTTP;rsync 镜像远程工作区) |
 | 单发一条指令 | `crew acp prompt <成员名> "文本"` | HTTP 直连 |
 | 本地 CC 会话里调用 | jimdb-remote MCP 工具(ask/send_role_agent) | MCP |
 | 看远程 CC 干活现场 | `crew attach <前缀>` | ssh → docker exec → tmux |
