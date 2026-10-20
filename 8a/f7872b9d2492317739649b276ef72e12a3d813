@@ -1,0 +1,30 @@
+bin/crew
+  s_8689a806c2a7a3::t_0780479935c19f 1948-1965,1994
+  s_8689a806c2a7a3::t_bc07f780041d2e 1966-1990
+  s_8689a806c2a7a3::t_f35efb21b2f1e2 1992
+CLAUDE.md
+  s_8689a806c2a7a3::t_feccf43087a86a 45
+acp/toad-settings.json
+  s_8689a806c2a7a3::t_35e617eca77728 8,10-13
+  s_8689a806c2a7a3::t_bc07f780041d2e 1-7,9
+acp/crew-acpd.mjs
+  s_8689a806c2a7a3::t_9fc5fc7c1acbdb 97,115,275
+CHANGELOG.md
+  s_8689a806c2a7a3::t_feccf43087a86a 10-22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "8af7872b9d2492317739649b276ef72e12a3d813",
+  "prompts": {},
+  "sessions": {
+    "s_8689a806c2a7a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3a9682b3-6d69-4c69-b4b8-aa84026750db",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
