@@ -7,6 +7,19 @@
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-10-20
+
+### 变更
+- **`crew dsh` 默认 Martty 富 UI**(用户拍板):TTY 且装了 martty → 直接 exec Martty
+  (DeepSeek Harness 官方 TUI,Rust/ratatui:主题/vim/消息队列/插件)包 crew-acpd;
+  `--repl` 或 `CREW_DSH_UI=repl` 回退内置轻量 REPL;martty 未装/非 TTY 自动回退。
+  目标选择经 `CREW_DSH_TARGET` 环境变量传 acpd(Martty 传不了 pipe:// cwd):
+  `crew dsh wand3 designer` → 先 `--resolve` 解析 member 名再进 Martty。
+
+### 新增
+- `crew dsh --resolve <流水线> [角色]`:仅解析目标 member 名(内部通道,可独立用于脚本)。
+- acpd `CREW_DSH_TARGET`:未绑定 cwd 会话按环境变量绑指定成员(优先于自动 lead)。
+
 ## [3.5.0] - 2026-10-20
 
 ### 变更

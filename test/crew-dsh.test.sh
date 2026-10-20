@@ -252,6 +252,7 @@ fi
 echo "--- Martty 适配(acpd 未绑定会话自动绑 lead)---"
 # ⑱ 未绑定 session/new(普通 cwd)→ prompt 自动绑定最新流水线 lead 并正常往返
 #    场景:Martty 等通用 ACP 客户端 /new 传普通 cwd,不认识 pipe:// 协议
+#    双通道:① 无 CREW_DSH_TARGET → 自动绑最新 lead;② CREW_DSH_TARGET=<member> → 绑指定成员
 node "$FAKE_HTTP" 2>"$T/port.log" & FAKE2_PID=$!
 for i in $(seq 1 30); do [ -s "$T/port.log" ] && break; sleep 0.2; done
 FAKE_PORT=$(cat "$T/port.log" 2>/dev/null)
@@ -261,8 +262,10 @@ import { client, methods, PROTOCOL_VERSION, ndJsonStream } from 'file:///Users/w
 import { spawn } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 
+const target = process.env.E2E_TARGET || ''
 const acpd = spawn('node', ['/Users/wangqiwang1/Desktop/claude-crew/acp/crew-acpd.mjs'], {
-  env: {...process.env, JIMDB_BASE: 'http://127.0.0.1:${FAKE_PORT}', JIMDB_ERP: 'tester'},
+  env: {...process.env, JIMDB_BASE: 'http://127.0.0.1:${FAKE_PORT}', JIMDB_ERP: 'tester',
+        CREW_DSH_TARGET: target},
 })
 const stream = ndJsonStream(Writable.toWeb(acpd.stdin), Readable.toWeb(acpd.stdout))
 let got = ''
@@ -284,7 +287,7 @@ await client({name:'martty-sim', version:'0.0.1'}).connectWith(stream, async (cx
 })
 if (!got.includes('回复:你好')) { acpd.kill(); throw new Error('未收到回复: ' + JSON.stringify(got)) }
 acpd.kill()
-console.log('MARTTY-E2E-OK')
+console.log('MARTTY-E2E-OK target=' + (target || '(auto-lead)'))
 process.exit(0)
 EOF
   if out=$(node "$T/e2e-martty.mjs" 2>&1); then
@@ -292,9 +295,37 @@ EOF
   else
     _ng "⑱ Martty 适配失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
   fi
+  # ⑱b:CREW_DSH_TARGET=designer-… → Martty 普通会话绑指定角色(crew dsh wand3 designer 的富 UI 通道)
+  if out=$(E2E_TARGET=designer-pipe-20261019-wand3 node "$T/e2e-martty.mjs" 2>&1); then
+    _ok "⑱b CREW_DSH_TARGET 指定成员 → Martty 会话绑该角色"
+  else
+    _ng "⑱b CREW_DSH_TARGET 失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
+  fi
   kill $FAKE2_PID 2>/dev/null
 else
   _ng "⑱ fake HTTP 未起"
+fi
+
+echo "--- crew dsh 默认 Martty 富 UI ---"
+# ⑲ cmd_dsh 默认路由:TTY+martty 可执行 → exec martty(检查 bin/crew 源码结构,不起真 TUI)
+if grep -q 'martty' "$CREW" && grep -q 'CREW_DSH_TARGET' "$CREW" && grep -q '\-\-repl' "$CREW"; then
+  _ok "⑲ cmd_dsh 含 martty 默认路由 + CREW_DSH_TARGET 通道 + --repl 回退"
+else
+  _ng "⑲ cmd_dsh 缺 martty 路由"
+fi
+# ⑳ CREW_DSH_UI=repl 强制轻量 REPL(不依赖 martty 安装)
+out=$("$CREW" dsh --list 2>/dev/null >/dev/null; CREW_DSH_UI=repl timeout 15 "$CREW" dsh zzz-nope 2>&1)
+if echo "$out" | grep -q "无此流水线"; then
+  _ok "⑳ CREW_DSH_UI=repl 走内置 REPL 逻辑(错误路径可控)"
+else
+  _ng "⑳ repl 模式异常: $(echo "$out" | head -1 | cut -c1-60)"
+fi
+# ㉑ --repl flag 等价 CREW_DSH_UI=repl
+out=$(timeout 15 "$CREW" dsh --repl zzz-nope 2>&1)
+if echo "$out" | grep -q "无此流水线"; then
+  _ok "㉑ --repl 显式回退内置 REPL"
+else
+  _ng "㉑ --repl 异常: $(echo "$out" | head -1 | cut -c1-60)"
 fi
 
 echo

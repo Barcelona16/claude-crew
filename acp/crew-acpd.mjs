@@ -98,6 +98,14 @@ app.onRequest('session/new', async (cx) => {
   const { params, client } = cx   // SDK handler 收 context{params,requestId,signal,client},非裸 params
   log('session/new cwd =', params?.cwd ?? '(未绑定)')
   let target = cwdToMember(params?.cwd)
+  if (!target && process.env.CREW_DSH_TARGET) {
+    // Martty 通道:crew dsh <流水线> [角色] 经环境变量指定目标(客户端传不了 pipe:// cwd)
+    const members = await listMembers()
+    const hit = members.find(m => m.member === process.env.CREW_DSH_TARGET)
+    if (!hit) throw new Error(`CREW_DSH_TARGET 无此成员:${process.env.CREW_DSH_TARGET}`)
+    target = { member: hit.member, pid: hit.pid, role: hit.role }
+    log(`CREW_DSH_TARGET → ${target.member}`)
+  }
   if (!target) {
     // 未指定 pipe://:自动绑最新流水线 lead(通用 ACP 客户端开箱即用;绑定后同普通会话)
     const members = await listMembers()

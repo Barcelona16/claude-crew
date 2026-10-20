@@ -106,8 +106,52 @@ export function parseLine(line) {
 
 const log = (...a) => process.stderr.write(`[crew-dsh] ${a.join(' ')}\n`)
 
+// --resolve:解析「流水线 [角色]」→ member 名打 stdout(Martty 通道;失败 exit 1 不误绑)
+async function resolveOnly(pidArg, roleArg) {
+  if (!pidArg) process.exit(1)
+  const acpd = spawn('node', [ACPD], { env: process.env, stdio: ['pipe', 'pipe', 'inherit'] })
+  const stream = ndJsonStream(Writable.toWeb(acpd.stdin), Readable.toWeb(acpd.stdout))
+  await client({ name: 'crew-dsh-resolve', version: '0.1.0' })
+    .connectWith(stream, async (cx) => {
+      await cx.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+      })
+      const list = await cx.request(methods.agent.session.list, {})
+      const members = (list.sessions ?? []).map(s => ({
+        member: s.sessionId,
+        pid: (s.cwd?.match(/^pipe:\/\/(.+)\/[^/]+$/)?.[1] ?? '').replace(/^PIPE-/i, '').toLowerCase(),
+        role: s.title?.split(' · ')[0] ?? s.sessionId.split('-pipe-')[0],
+      }))
+      const groups = groupPipelines(members)
+      const q = pidArg.toLowerCase()
+      const ghits = groups.filter(g => g.pid.includes(q))
+      if (ghits.length !== 1) process.exit(1)
+      const group = ghits[0]
+      if (!roleArg) {
+        const lead = group.roles.find(r => r.role === 'lead') ?? group.roles[0]
+        console.log(lead.member)
+      } else {
+        const hits = group.roles.filter(r => r.role === roleArg || r.role.startsWith(roleArg))
+        if (hits.length !== 1) process.exit(1)
+        console.log(hits[0].member)
+      }
+    })
+    .catch(() => process.exit(1))
+  acpd.kill()
+  process.exit(0)
+}
+
 export async function main() {
   const argv = process.argv.slice(2)
+  // --resolve "<流水线> [角色]":仅解析目标 member 名打到 stdout(crew dsh Martty 通道用,不进 REPL)
+  const resolveIdx = argv.indexOf('--resolve')
+  if (resolveIdx !== -1) {
+    const spec = argv.slice(resolveIdx + 1).filter(a => !a.startsWith('--'))
+    const [pidArg, roleArg] = spec
+    await resolveOnly(pidArg, roleArg)
+    return
+  }
   const listOnly = argv.includes('--list')
   const posArgs = argv.filter(a => !a.startsWith('--'))
   const [pidArg, roleArg] = posArgs

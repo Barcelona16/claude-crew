@@ -12,7 +12,7 @@
 |---|---|---|
 | 本地会话管理 | `crew <名字>` | 具名 tmux 会话起/attach/收发/换模型,CCR 3 路由 |
 | 远程 CC 现场 | `crew attach <远程会话前缀>` | ssh → docker exec → tmux attach,接管远程容器里跑着的 CC |
-| 远程角色 agent | `crew dsh [流水线 [角色]]` / `crew acp` | 终端 REPL 直连远程 dsh:两级(选流水线→默认 lead),/switch 切子代理;对话框渲染 |
+| 远程角色 agent | `crew dsh [流水线 [角色]]` | 终端连 dsh:默认 Martty 富 UI(官方 TUI,主题/插件);`--repl` 回退内置两级 REPL;/switch 切子代理 |
 
 ## 2. 仓库地形(改哪里看哪里)
 
@@ -23,8 +23,8 @@ bin/crew-tmux         tmux 集成(attach/pin/空壳检测)
 bin/crew-launcher     claude 启动(sid 自愈 --resume fallback)
 bin/crew-notify.js    inbox 信封 + wake(native messaging)
 acp/
-  crew-acpd.mjs       ACP server:把远程 dsh 角色(平台 HTTP 面)桥成标准 ACP(stdio)
-  crew-dsh.mjs        ACP 终端客户端(crew dsh;两级:流水线→角色,spawn acpd → session/list → prompt 流式)
+  crew-acpd.mjs       ACP server:把远程 dsh 角色(平台 HTTP 面)桥成标准 ACP(stdio);CREW_DSH_TARGET 定向
+  crew-dsh.mjs        内置轻量 REPL(--repl/--list/--resolve);crew dsh 默认路由 Martty(bin/crew cmd_dsh)
   crew-mcp.mjs        MCP server:本地 CC 会话经 MCP 工具连远程角色
 lib/                  registry 等只读加载器
 setup/ccr_v3.py       CCR 3 配置管理(apply/drift;401 防复发核心)
@@ -42,7 +42,7 @@ docs/specs/           方案存档(改架构先写 spec)
 
 | 场景 | 命令 | 通道 |
 |---|---|---|
-| iTerm 交互式聊角色 | `crew dsh wand3` → `/switch designer` | 本地 stdio ACP(crew-dsh ↔ crew-acpd ↔ :3200 HTTP) |
+| iTerm 富 UI 聊角色 | `crew dsh wand3`(默认 Martty)→ `/agent` 切换;`--repl` 回内置 | 本地 stdio ACP(crew-acpd ↔ :3200 HTTP;Martty 经 --agent 包 acpd) |
 | 单发一条指令 | `crew acp prompt <成员名> "文本"` | HTTP 直连 |
 | 本地 CC 会话里调用 | jimdb-remote MCP 工具(ask/send_role_agent) | MCP |
 | 看远程 CC 干活现场 | `crew attach <前缀>` | ssh → docker exec → tmux |
