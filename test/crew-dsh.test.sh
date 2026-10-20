@@ -457,11 +457,11 @@ else
 fi
 
 echo "--- crew dsh 默认 Martty 富 UI ---"
-# ⑲ cmd_dsh 默认路由:TTY+martty 可执行 → exec martty(检查 bin/crew 源码结构,不起真 TUI)
-if grep -q 'martty' "$CREW" && grep -q 'CREW_DSH_TARGET' "$CREW" && grep -q '\-\-repl' "$CREW"; then
-  _ok "⑲ cmd_dsh 含 martty 默认路由 + CREW_DSH_TARGET 通道 + --repl 回退"
+# ⑲ cmd_dsh 默认路由(2026-10-20 v3.10 起):Martty 移除;TTY 默认 Toad,--repl 回退内置
+if ! grep -q 'martty' "$CREW" && grep -q 'toad' "$CREW" && grep -q 'CREW_DSH_TARGET' "$CREW" && grep -q '\-\-repl' "$CREW"; then
+  _ok "⑲ cmd_dsh 默认 Toad 路由 + CREW_DSH_TARGET 通道 + --repl 回退(Martty 已移除)"
 else
-  _ng "⑲ cmd_dsh 缺 martty 路由"
+  _ng "⑲ cmd_dsh 路由异常(应 toad 默认且无 martty 残留)"
 fi
 # ⑳ CREW_DSH_UI=repl 强制轻量 REPL(不依赖 martty 安装)
 out=$("$CREW" dsh --list 2>/dev/null >/dev/null; CREW_DSH_UI=repl timeout 15 "$CREW" dsh zzz-nope 2>&1)

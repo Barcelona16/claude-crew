@@ -24,8 +24,7 @@ bin/crew-launcher     claude 启动(sid 自愈 --resume fallback)
 bin/crew-notify.js    inbox 信封 + wake(native messaging)
 acp/
   crew-acpd.mjs       ACP server:把远程 dsh 角色(平台 HTTP 面)桥成标准 ACP(stdio);CREW_DSH_TARGET 定向
-  crew-dsh.mjs        内置轻量 REPL(--repl/--list/--resolve);crew dsh 默认路由 Martty(bin/crew cmd_dsh)
-  martty-plugins/     Martty 插件分发(claude-code-theme 主题;install.sh 装 ~/.oma/plugins)
+  crew-dsh.mjs        内置轻量 REPL(--repl/--list/--resolve);crew dsh TTY 默认路由 Toad(bin/crew cmd_dsh)
   crew-mcp.mjs        MCP server:本地 CC 会话经 MCP 工具连远程角色
 lib/                  registry 等只读加载器
 setup/ccr_v3.py       CCR 3 配置管理(apply/drift;401 防复发核心)
@@ -43,7 +42,7 @@ docs/specs/           方案存档(改架构先写 spec)
 
 | 场景 | 命令 | 通道 |
 |---|---|---|
-| iTerm 富 UI 聊角色 | `crew dsh wand3`(默认 Martty)/ `crew dsh --toad wand3`(绑定即显历史) | 本地 stdio ACP(crew-acpd ↔ :3200 HTTP) |
+| iTerm 富 UI 聊角色 | `crew dsh wand3`(默认 Toad,绑定即显历史;`--repl` 回内置) | 本地 stdio ACP(crew-acpd ↔ :3200 HTTP) |
 | 单发一条指令 | `crew acp prompt <成员名> "文本"` | HTTP 直连 |
 | 本地 CC 会话里调用 | jimdb-remote MCP 工具(ask/send_role_agent) | MCP |
 | 看远程 CC 干活现场 | `crew attach <前缀>` | ssh → docker exec → tmux |
