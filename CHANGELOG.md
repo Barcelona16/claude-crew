@@ -17,6 +17,8 @@
   部署:`bash acp/martty-plugins/install.sh`(幂等,支持任意机器)。
   踩坑记录:code.client 须经 applyClientHalf(Function 体普通 JS)——不支持 ESM export,
   须 `return {name, inject, apply}` 对象字面量;离线全链路验证(发现→挂载→注册→激活)通过。
+  默认激活:插件只注册不激活,开机主题由 `~/.oma/settings.json` 的 `theme` 键决定——
+  install.sh 现同步写入该键(theme → claude-code),新装机器开箱即 Claude Code 配色。
 
 ## [3.6.0] - 2026-10-20
 
