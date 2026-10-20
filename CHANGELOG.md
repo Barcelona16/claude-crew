@@ -7,6 +7,18 @@
 
 ## [Unreleased]
 
+## [3.9.0] - 2026-10-20
+
+### 新增
+- **Toad 客户端集成(`crew dsh --toad`)**:Toad(batrachianai/toad,Will McGugan/Textual 作者)
+  富 UI——Markdown 流式渲染、语法高亮 diff、ctrl+r 会话恢复、集成 shell。
+  **绑定即显历史**(首屏直接看到会话名+最近对话,无需发消息;Martty 做不到)。
+  依赖:`uv tool install -U batrachian-toad`;`CREW_DSH_UI=toad` 同效。
+- acpd `session/load` + `loadSession:true`(Toad ctrl+r resume 通道);绑定回放
+  `CREW_DSH_BIND_REPLAY`(默认关,Martty 兼容;Toad 通道自动开)+ 延迟/原始推送诊断开关。
+- 重大踩坑记录:`toad acp` 的 COMMAND 是**完整命令字符串**(引号包 `node /path/acpd.mjs`),
+  PATH 是项目目录——此前误传两个参数导致 toad 起了裸 node,所有「Toad 不渲染」结论作废。
+
 ## [3.8.0] - 2026-10-20
 
 ### 新增

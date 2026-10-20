@@ -1905,6 +1905,7 @@ ACPD="${ACPD:-$SCRIPT_DIR/../acp/crew-acpd.mjs}"
 #   crew dsh <流水线> <角色>    直连指定角色(如 wand3 designer)
 #   crew dsh --list             列流水线×角色
 #   crew dsh --repl             强制内置轻量 REPL(默认 TTY+martty 装了走 Martty 富 UI)
+#   crew dsh --toad             Toad 富 UI(Textual;绑定即显历史,会话名+横幅)
 # UI 路由:v3.6 起 TTY 且 martty 可执行 → exec martty 包 crew-acpd(--agent 通道),
 #   流水线/角色经 CREW_DSH_TARGET=<member> 传 acpd(Martty 传不了 pipe:// cwd)。
 #   CREW_DSH_UI=repl 环境变量同 --repl;martty 未装/非 TTY 自动回退内置 REPL。
@@ -1919,6 +1920,7 @@ cmd_dsh() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --repl) ui="repl" ;;
+      --toad) ui="toad" ;;
       --list|--) args+=("$1") ;;
       --resolve) ui="resolve"; shift; while [ $# -gt 0 ]; do args+=("$1"); shift; done; break ;;
       *)  [ -z "$target_member" ] && target_member="$1" || target_member="$target_member $1" ;;
@@ -1932,6 +1934,19 @@ cmd_dsh() {
   # --list 或 repl 模式 → 内置 crew-dsh.mjs
   if [ "$ui" = "repl" ] || [ -n "$(printf '%s' "${args[*]:-}" | grep -F -- --list)" ]; then
     exec node "$DSHMJS" ${target_member:+"$target_member"} ${args[@]+"${args[@]}"}
+  fi
+  # CREW_DSH_UI=toad 显式走 Toad(Textual 富 UI;绑定即显历史,优于 martty)
+  if [ "$ui" = "toad" ]; then
+    local toad_bin=""
+    command -v toad >/dev/null 2>&1 && toad_bin="toad"
+    [ -z "$toad_bin" ] && [ -x "$HOME/.local/bin/toad" ] && toad_bin="$HOME/.local/bin/toad"
+    [ -n "$toad_bin" ] || die "toad 未安装(uv tool install -U batrachian-toad)"
+    if [ -n "$target_member" ]; then
+      target_member=$(node "$DSHMJS" --resolve "$target_member" 2>/dev/null) || target_member=""
+    fi
+    export CREW_DSH_TARGET="$target_member" CREW_DSH_BIND_REPLAY=1
+    log "dsh → Toad 富 UI(${toad_bin};绑定即显历史)"
+    exec "$toad_bin" acp -t "${CREW_DSH_TITLE:-JIMDB dsh}" "node $ACPD"
   fi
   # 默认:TTY + martty 可用 → 富 UI(经 CREW_DSH_TARGET 传目标)
   local martty_bin=""

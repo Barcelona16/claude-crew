@@ -417,6 +417,40 @@ EOF
   else
     _ng "㉕ 首条注入失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
   fi
+  # ㉖ session/load:Toad ctrl+r resume 通道——load 响应后推横幅+历史(load 后对话视图已就绪)
+  cat > "$T/e2e-load.mjs" <<EOF
+import { client, methods, PROTOCOL_VERSION, ndJsonStream } from 'file:///Users/wangqiwang1/Desktop/claude-crew/acp/node_modules/@agentclientprotocol/sdk/dist/acp.js'
+import { spawn } from 'node:child_process'
+import { Readable, Writable } from 'node:stream'
+const acpd = spawn('node', ['/Users/wangqiwang1/Desktop/claude-crew/acp/crew-acpd.mjs'], {
+  env: {...process.env, JIMDB_BASE: 'http://127.0.0.1:${FAKE_PORT}', JIMDB_ERP: 'tester', CREW_DSH_BIND_REPLAY: '1'},
+})
+const stream = ndJsonStream(Writable.toWeb(acpd.stdin), Readable.toWeb(acpd.stdout))
+let chunks = []
+await client({name:'load-test', version:'0.0.1'})
+  .onNotification(methods.client.session.update, (cx) => {
+    const u = cx.params?.update
+    if (u?.sessionUpdate === 'agent_message_chunk') chunks.push(u.content?.text)
+  })
+  .connectWith(stream, async (cx) => {
+    const init = await cx.request(methods.agent.initialize, {protocolVersion: PROTOCOL_VERSION, clientCapabilities:{fs:{readTextFile:false, writeTextFile:false}}})
+    if (init.agentCapabilities?.loadSession !== true) throw new Error('loadSession 能力未声明: ' + JSON.stringify(init.agentCapabilities))
+    const resp = await cx.request(methods.agent.session.load, {sessionId: 'designer-pipe-20261019-wand3', cwd: '/tmp', mcpServers: []})
+    if (!resp.sessionId) throw new Error('load 响应缺 sessionId')
+    await new Promise(r => setTimeout(r, 2000))
+  })
+acpd.kill()
+const all = chunks.join('')
+if (!all.includes('designer')) throw new Error('load 后缺横幅: ' + JSON.stringify(all))
+if (!all.includes('历史消息2')) throw new Error('load 后缺历史: ' + JSON.stringify(all))
+console.log('LOAD-REPLAY-OK')
+process.exit(0)
+EOF
+  if out=$(node "$T/e2e-load.mjs" 2>&1); then
+    _ok "㉖ session/load → 横幅+历史(Toad resume 通道)"
+  else
+    _ng "㉖ load 失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
+  fi
   kill $FAKE2_PID 2>/dev/null
 else
   _ng "⑱ fake HTTP 未起"

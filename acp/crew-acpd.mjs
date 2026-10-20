@@ -90,15 +90,37 @@ let sessionSeq = 0
 const REPLAY_N = Number(process.env.CREW_DSH_REPLAY_N ?? 12)
 function replayOnBind(cx, id, rec, hist) {
   rec.lastHist = hist   // 首条 prompt 注入历史用(handlePrompt 读)
-  // 会话名(官方语义:session_info_update.title = 客户端显示的动态会话名,状态栏常驻)。
-  // 历史回放不在此推——Martty 对未 started 会话不渲染主动 update(实测静默丢弃),
-  // 且 Zed/REPL 会与首条 prompt 注入重复;统一走「首条 prompt 注入」单一路径。
+  // 会话名(官方语义:session_info_update.title = 客户端显示的动态会话名,状态栏常驻)
   try {
     cx.client.notify('session/update', {
       sessionId: id,
       update: { sessionUpdate: 'session_info_update', title: `${rec.role} · ${rec.pid}` },
     })
   } catch (e) { log('session_info_update 推送失败:', e?.message ?? e) }
+  // 绑定时主动回放历史(CREW_DSH_BIND_REPLAY=1 开):Toad/Zed 等客户端绑定即见历史;
+  // Martty 不渲染且会与首条注入重复,故默认关。
+  if (process.env.CREW_DSH_BIND_REPLAY === '1' && REPLAY_N > 0 && hist.length) {
+    const DELAY = Number(process.env.CREW_DSH_BIND_REPLAY_DELAY_MS ?? 50)
+    setTimeout(async () => {
+      try {
+        // rawPush:绕开 SDK 直接写 stdout(诊断 SDK client 生命周期;成功则固化)
+        const rawPush = text => process.stdout.write(JSON.stringify({
+          jsonrpc: '2.0', method: 'session/update',
+          params: { sessionId: id, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } },
+        }) + '\n')
+        const push = process.env.CREW_DSH_RAW_PUSH === '1' ? rawPush : (text => cx.client.notify('session/update', {
+          sessionId: id,
+          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
+        }))
+        await push(`〔${rec.role} · ${rec.pid} 最近历史〕\n`)
+        for (const m of hist.slice(-REPLAY_N)) {
+          const who = m.replyOut === true ? rec.role : 'user'
+          const note = (m.note ?? '').replace(/\n$/, '')
+          if (note) await push(`${who} › ${note}\n`)
+        }
+      } catch (e) { log('绑定回放失败:', e?.message ?? e) }
+    }, DELAY)
+  }
 }
 
 const app = agent({ name: 'crew-acpd', version: '0.1.0' })
@@ -106,7 +128,7 @@ const app = agent({ name: 'crew-acpd', version: '0.1.0' })
 app.onRequest('initialize', async () => ({
   protocolVersion: 1,
   agentCapabilities: {
-    loadSession: false,
+    loadSession: true,   // session/load:Toad ctrl+r resume 通道(load 后推横幅+历史)
     listSessions: true,
     // prompt 流 + 会话关闭;不做 permission(平台侧已 bypass)/ elicitation
   },
@@ -173,6 +195,34 @@ app.onRequest('session/list', async () => {
 })
 
 // resume:按 sessionId(=成员名)直接接上(不回放历史 —— 客户端要历史可发一条 "总结当前进展" prompt)。
+// session/load:Toad ctrl+r resume 的通道(load 后对话视图已就绪,历史必渲染)。
+// sessionId 接受:acp-N 形态(Toad DB 记的旧会话号,查 active 表还原目标)或成员名。
+app.onRequest('session/load', async (cx) => {
+  const { params } = cx
+  const want = params.sessionId
+  let rec = active.get(want)   // 直接命中(同进程生命周期内)
+  if (!rec) {
+    // acp-N 形态:active 里没有(进程重启过)→ 查不到绑定,退回按成员名解析
+    const members = await listMembers()
+    const hit = members.find(m => m.member === want)
+    if (!hit) throw new Error(`session/load 无此会话:${want}(session/list 查看)`)
+    const role = hit.member.split('-pipe-')[0]
+    rec = { member: hit.member, pid: hit.pid, role, known: new Set(), poller: null }
+    const hist = await fetchMessages(rec.member, rec.pid)
+    for (const m of hist) rec.known.add(sig(m))
+    const id = `acp-${++sessionSeq}`
+    active.set(id, rec)
+    log(`load ${id} → ${rec.member}(历史 ${hist.length} 条)`)
+    replayOnBind(cx, id, rec, hist)
+    return { sessionId: id }
+  }
+  // active 命中:重推一次(幂等;known 已含历史,不重复计)
+  const id = want
+  const hist = rec.lastHist ?? []
+  replayOnBind(cx, id, rec, hist)
+  return { sessionId: id }
+})
+
 app.onRequest('session/resume', async (cx) => {
   const { params } = cx
   const member = params.sessionId
