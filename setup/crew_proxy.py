@@ -362,7 +362,20 @@ def provider_for(realmodel, api_key, providers):
 
 # ── crew CLI bridge (crew is the single state-mutation entry point) ───────────────
 CREW_STATE = os.environ.get("CREW_STATE") or os.path.expanduser("~/.local/share/claude-crew")
-CREW_BIN = os.environ.get("CREW_BIN") or shutil.which("crew") or "crew"
+# 2026-10-20 修:launchd 起 proxy 时 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin,shutil.which
+# 落空 → 兜底裸名 "crew" → FileNotFoundError → dashboard Sessions 表永远空
+# ("crew exec failed: No such file or directory: 'crew'")。加显式路径探测兜底:
+# which > ~/.local/bin/crew(install.sh 装的默认位)> repo bin/crew > 裸名(最终报错)。
+def _find_crew_bin():
+    found = shutil.which("crew")
+    if found:
+        return found
+    for cand in (os.path.expanduser("~/.local/bin/crew"),
+                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "crew")):
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return "crew"
+CREW_BIN = os.environ.get("CREW_BIN") or _find_crew_bin()
 # Names/aliases/models we will ever pass to a subprocess or write as a filename. Strict
 # allowlist — anything with a shell metacharacter or path separator is rejected outright.
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._,-]+$")
@@ -378,6 +391,65 @@ def run_crew(args, timeout=10):
     if p.returncode != 0:
         return None, (p.stderr or p.stdout or f"crew exited {p.returncode}").strip()
     return p.stdout, None
+
+
+def _http_err_summary(e, limit=200):
+    """Best-effort error-message summary from an urllib HTTPError for the dashboard log
+    (2026-10-20). Reads the body without consuming it for the relay path — e.read() on an
+    HTTPError can only be done once, so we peek via a copy; on any failure falls back to
+    the exception string. Used ONLY for display, never for control flow."""
+    try:
+        raw = e.read()
+        e.read = lambda: raw  # put it back for the later _relay(e)
+        txt = raw.decode("utf-8", "replace")
+        try:
+            j = json.loads(txt)
+            for k in ("message", "error", "error.message"):
+                v = j.get(k) if isinstance(j, dict) else None
+                if not v and isinstance(j.get("error"), dict):
+                    v = j["error"].get("message")
+                if v:
+                    return f"HTTP {e.code}: {str(v)[:limit]}"
+            return f"HTTP {e.code}: {txt[:limit]}"
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            return f"HTTP {e.code}: {txt[:limit]}"
+    except Exception:
+        return f"HTTP {getattr(e, 'code', '?')}: {str(e)[:limit]}"
+
+
+def _read_state_field(name, field):
+    """Read one <name>.<field> state file under CREW_STATE. Returns '' when absent."""
+    # SAFE_NAME 校验防路径穿越(name 来自 crew ls --json / dashboard 输入,不信任)。
+    if not SAFE_NAME.match(name or ""):
+        return ""
+    try:
+        with open(os.path.join(CREW_STATE, f"{name}.{field}"), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _api_sessions_fallback():
+    """crew CLI 不可用时,直接读 state 目录组装 sessions(降级只读视图)。
+    2026-10-20 修:dashboard Sessions 表以前 crew 一挂就整表消失;现在降级展示
+    name/backend/key/dir(state 文件在就在),tmux/status 标 unknown。"""
+    sessions = []
+    try:
+        for fn in os.listdir(CREW_STATE):
+            if not fn.endswith(".backend"):
+                continue
+            name = fn[:-len(".backend")]
+            sessions.append({
+                "name": name,
+                "backend": _read_state_field(name, "backend") or "?",
+                "key": _read_state_field(name, "key") or "?",
+                "dir": _read_state_field(name, "dir") or "-",
+                "sid": _read_state_field(name, "sid") or "",
+                "tmux": None, "status": "unknown (crew CLI 不可用,降级读 state)",
+            })
+    except OSError:
+        pass
+    return {"sessions": sessions, "degraded": True}
 
 
 
@@ -493,7 +565,7 @@ class Stats:
     def _model(self, model):
         return self.per_model.setdefault(model, {"requests": 0, "in_tokens": 0, "out_tokens": 0})
 
-    def record(self, alias, model, status, ok, forced, failover, latency=None):
+    def record(self, alias, model, status, ok, forced, failover, latency=None, err_summary=None):
         with self._lock:
             self.totals["requests"] += 1
             self.totals["ok" if ok else "fail"] += 1
@@ -503,9 +575,15 @@ class Stats:
             self._model(model)["requests"] += 1
             entry = {
                 "t": round(time.time() - self._t0, 1),
+                # 2026-10-20:相对秒看不出请求发生在几点;补墙钟 epoch,前端渲染 HH:MM:SS
+                "ts": round(time.time(), 0),
                 "model": model, "alias": alias, "status": status,
                 "ok": ok, "forced": forced, "failover": failover,
             }
+            # 2026-10-20:失败请求记录错误摘要(截断),前端 hover/展开可见 —— 以前 400/401
+            # 只显示状态码,真实上游错误信息看不到(prompt is too long 之类只能翻 proxy 日志)。
+            if not ok and err_summary:
+                entry["err"] = str(err_summary)[:200]
             if latency is not None:
                 entry["ms"] = round(latency * 1000)
             self._logs.append(entry)
@@ -922,11 +1000,16 @@ async function refresh(){
 
   try{
     const l=await jget('/api/logs?n=100');
-    tb('#logs table').innerHTML=(l.logs||[]).map(x=>`<tr><td class=dim>${x.t}s</td><td>${esc(x.model)}</td>
+    // 2026-10-20:时间列改墙钟 HH:MM:SS(相对秒看不出几点发生);失败请求追加 err 摘要
+    // (截 200 字),hover title 看全文 —— 以前 400/401 只见状态码,上游真实错误要翻日志。
+    tb('#logs table').innerHTML=(l.logs||[]).map(x=>{
+      const tm=x.ts?new Date(x.ts*1000).toLocaleTimeString([], {hour12:false}):x.t+'s';
+      const err=x.err?('<span class=err title="'+esc(x.err)+'">'+esc(x.err.slice(0,80))+'</span>'):'';
+      return `<tr><td class=dim>${tm}</td><td>${esc(x.model)}</td>
       <td>${esc(x.alias)}</td><td>${x.ok?pill('healthy'):'<span class=err>'+esc(x.status)+'</span>'}</td>
       <td class=dim>${x.ms!=null?x.ms+'ms':'-'}</td>
       <td class=dim>${(x.in_tok!=null||x.out_tok!=null)?kfmt(x.in_tok)+'/'+kfmt(x.out_tok):'-'}</td>
-      <td class=dim>${x.failover?'failover':''}${x.forced?' forced':''}</td></tr>`).join('')
+      <td class=dim>${x.failover?'failover ':''}${x.forced?'forced ':''}${err}</td></tr>`}).join('')
       ||'<tr><td class=dim colspan=7>no requests yet</td></tr>';
   }catch(e){}
   $('#tick').textContent='updated '+new Date().toLocaleTimeString();
@@ -1373,13 +1456,20 @@ class Handler(BaseHTTPRequestHandler):
                 "totals": st["totals"], "keys": keys, "models": models, "auth": auth_rows}
 
     def _api_sessions(self):
-        out, err = run_crew(["ls", "--json"])
+        # 2026-10-20:ls --json 对 20+ 会话(tmux+ps 逐个探测)实测 4-5s,系统忙时 >10s;
+        # 给 25s 余量,超时才降级读 state(_api_sessions_fallback)。
+        out, err = run_crew(["ls", "--json"], timeout=25)
         if out is None:
-            return {"sessions": [], "error": err}
+            # 2026-10-20:crew CLI 挂了不再返回空表,降级直读 state(见 _api_sessions_fallback)
+            fb = _api_sessions_fallback()
+            fb["error"] = err
+            return fb
         try:
             return json.loads(out)
         except json.JSONDecodeError:
-            return {"sessions": [], "error": "crew ls --json returned non-JSON"}
+            fb = _api_sessions_fallback()
+            fb["error"] = "crew ls --json returned non-JSON"
+            return fb
 
     def _api_logs(self):
         try:
@@ -2192,7 +2282,8 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                 # 不重试(不可重试码 / 次数或预算耗尽)→ 透传错误
                 if model:
-                    STATS.record("direct", model, e.code, ok=not _is_fail(e.code), forced=False, failover=False)
+                    STATS.record("direct", model, e.code, ok=not _is_fail(e.code), forced=False, failover=False,
+                                 err_summary=_http_err_summary(e))
                 self._relay(e, streaming=False)
                 return
             except Exception as e:
@@ -2205,7 +2296,8 @@ class Handler(BaseHTTPRequestHandler):
                         time.sleep(delay); spent += delay; attempt += 1
                         continue
                 if model:
-                    STATS.record("direct", model, "ERR", ok=False, forced=False, failover=False)
+                    STATS.record("direct", model, "ERR", ok=False, forced=False, failover=False,
+                                 err_summary=str(e)[:200])
                 self._send_err(502, f"crew-proxy: CCR unreachable: {e}")
                 return
             else:
@@ -2316,7 +2408,8 @@ class Handler(BaseHTTPRequestHandler):
                 if _is_fail(e.code) and not forced:
                     cd = cooldown_for(e.code, parse_retry_after(e.headers))
                     BREAKER.record_fail(alias, now, cd)
-                    STATS.record(alias, realmodel, e.code, ok=False, forced=forced, failover=bool(tried))
+                    STATS.record(alias, realmodel, e.code, ok=False, forced=forced, failover=bool(tried),
+                                 err_summary=_http_err_summary(e))
                     tried.append(alias)
                     log.warning("← key '%s' upstream %d; failing over", alias, e.code)
                     if len(tried) >= len(policy):
@@ -2324,20 +2417,23 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     continue
                 # forced, or a non-failover status (e.g. 400 bad request) -> relay as-is
-                STATS.record(alias, realmodel, e.code, ok=not _is_fail(e.code), forced=forced, failover=bool(tried))
+                STATS.record(alias, realmodel, e.code, ok=not _is_fail(e.code), forced=forced, failover=bool(tried),
+                             err_summary=_http_err_summary(e))
                 self._relay(e, streaming=False)
                 return
             except Exception as e:
                 if not forced:
                     BREAKER.record_fail(alias, now, cooldown_for(0, None))  # conn error -> transient tier
-                    STATS.record(alias, realmodel, "ERR", ok=False, forced=forced, failover=bool(tried))
+                    STATS.record(alias, realmodel, "ERR", ok=False, forced=forced, failover=bool(tried),
+                                 err_summary=str(e)[:200])
                     tried.append(alias)
                     log.warning("← key '%s' conn error: %s; failing over", alias, e)
                     if len(tried) >= len(policy):
                         self._send_err(502, f"crew-proxy: all keys failed for {realmodel}: {e}")
                         return
                     continue
-                STATS.record(alias, realmodel, "ERR", ok=False, forced=forced, failover=bool(tried))
+                STATS.record(alias, realmodel, "ERR", ok=False, forced=forced, failover=bool(tried),
+                             err_summary=str(e)[:200])
                 self._send_err(502, f"crew-proxy: {e}")
                 return
 
@@ -2427,16 +2523,44 @@ def main():
     USAGE.load()
     log.info("usage series loaded (%d logins)", len(USAGE._buckets))
     atexit.register(lambda: USAGE.flush(force=True))
+    # 2026-10-20:请求线程未捕获异常默认只打印 traceback(见 ConnectionResetError 日志)。
+    # 装线程级 excepthook:记录后静默 —— 线程崩不影响 accept 循环,但记一条结构化日志
+    # 方便 dashboard/doctor 归因(不是自愈,是可观测)。
+    def _thread_excepthook(args):
+        log.warning("thread %s crashed: %s: %s", args.thread.name,
+                    args.exc_type.__name__, args.exc_value)
+    threading.excepthook = _thread_excepthook
     def _usage_flusher():
         while True:
             time.sleep(UsageSeries.FLUSH_MIN_SEC)
             USAGE.flush()
     threading.Thread(target=_usage_flusher, daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        log.info("stopped")
+    # 2026-10-20 自愈:serve_forever 意外崩(非 KeyboardInterrupt)→ 关旧 socket 重建重听,
+    # 不退出进程(launchd KeepAlive 重拉有 ThrottleInterval=5s 空窗,期间所有会话请求全挂)。
+    # 重建失败(EADDRINUSE 等端口被占)才放退出 —— 那种交给 launchd/doctor 处理。
+    while True:
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+        except OSError as e:
+            log.error("bind :%d failed: %s — exiting (launchd/doctor 会接手)", PORT, e)
+            raise SystemExit(1)
+        try:
+            log.info("serve_forever on :%d", PORT)
+            server.serve_forever()
+        except KeyboardInterrupt:
+            log.info("stopped")
+            try:
+                server.server_close()
+            except OSError:
+                pass
+            return
+        except Exception as e:
+            log.error("serve_forever crashed: %s — rebuilding server", e)
+            try:
+                server.server_close()
+            except OSError:
+                pass
+            time.sleep(1)  # 防疯狂重建;正常崩溃一秒后重听
 
 
 if __name__ == "__main__":

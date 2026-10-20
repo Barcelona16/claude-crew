@@ -165,9 +165,24 @@ function sampleAll() {
           if (paneInfo.status === 0) {
             const panePid = String(paneInfo.stdout || '').trim().split('\n')[0];
             if (panePid) {
-              const ps = spawnSync('ps', ['--no-headers', '-o', 'pid,cmd', '--ppid', panePid], { timeout: 2000, encoding: 'utf8' });
-              if (ps.status === 0) {
-                const m = String(ps.stdout || '').split('\n').find((l) => /bin\/claude/.test(l));
+              // 2026-10-20 根修:`--ppid` 是 Linux-only 语法,macOS BSD ps 报 illegal option
+              // rc=1 → 所有 live 会话被记 dead-repl → watcher autoheal 连环重起(resume 混乱)。
+              // Linux 先试快路径;rc!=0(macOS/老机型)→ -axo pid,ppid 全表过滤。
+              let lines = null;
+              const psLinux = spawnSync('ps', ['--no-headers', '-o', 'pid,cmd', '--ppid', panePid], { timeout: 2000, encoding: 'utf8' });
+              if (psLinux.status === 0) {
+                lines = String(psLinux.stdout || '').split('\n');
+              } else {
+                const psBsd = spawnSync('ps', ['-axo', 'pid,ppid,command'], { timeout: 3000, encoding: 'utf8' });
+                if (psBsd.status === 0) {
+                  lines = String(psBsd.stdout || '').split('\n').filter((l) => {
+                    const m = l.trim().match(/^(\d+)\s+(\d+)\s/);
+                    return m && m[2] === panePid;
+                  });
+                }
+              }
+              if (lines) {
+                const m = lines.find((l) => /bin\/claude/.test(l));
                 if (m) claudePid = parseInt(m.trim().split(/\s+/)[0], 10);
               }
             }

@@ -70,6 +70,22 @@ CWEB="$SCRIPT_DIR/crew-web.js"
 log() { echo "[crew] $*" >&2; }
 die() { log "$*"; exit 1; }
 
+# claude_pid_of <ppid> — 找 pane shell 的 bin/claude 子进程 pid(空 = 空壳/REPL 已退)。
+# 2026-10-20 根修:原 `ps --no-headers -o pid,cmd --ppid` 是 Linux-only 语法,macOS BSD ps
+# 报 illegal option rc=1 → claude_pid 恒空 → 每次启动误判"空壳"kill 活会话 + heartbeat
+# 把 live 记成 dead-repl → watcher autoheal 连环重起(resume 混乱根因)。
+# Linux 保留 --ppid 快路径(一次 syscall);macOS(BSD ps)用 -axo pid,ppid 全表 + awk 过滤,
+# 兼容路径也兜底 Linux 老机型(探测 --ppid 是否被支持)。
+claude_pid_of() {
+  [ -n "${1:-}" ] || return 0
+  local _pids
+  if _pids=$(ps --no-headers -o pid,cmd --ppid "$1" 2>/dev/null); then
+    printf '%s\n' "$_pids" | awk '/bin\/claude/{print $1; exit}'
+    return 0
+  fi
+  ps -axo pid,ppid,command 2>/dev/null | awk -v p="$1" '$2==p && /bin\/claude/{print $1; exit}'
+}
+
 # ── 远程会话层(2026-10-19 三档合一:发现 / 路由 / 配置)────────────────────────
 # 配置文件 ~/.config/claude-crew/remotes(每行: <名> ssh://<host>/<容器> [#注释]),
 # 例:jimdb ssh://11.91.165.248/jimdb
@@ -213,13 +229,26 @@ cmd_ls() {
       local pane_pid
       pane_pid=$(tmux list-panes -t "$tmuxname" -F '#{pane_pid}' 2>/dev/null | head -1)
       if [ -n "$pane_pid" ]; then
-        claude_pid=$(ps --no-headers -o pid,cmd --ppid "$pane_pid" 2>/dev/null | awk '/bin\/claude/{print $1; exit}')
+        claude_pid=$(claude_pid_of "$pane_pid")
       fi
-      if [ -n "$claude_pid" ] && [ -r "/proc/$claude_pid/cmdline" ]; then
-        local real_model real_cwd
-        real_model=$(cat "/proc/$claude_pid/cmdline" 2>/dev/null | tr '\0' '\n' | awk '/^--model$/{getline; print; exit}')
+      if [ -n "$claude_pid" ]; then
+        # bash 3.2 + set -u 坑:local 多变量声明不赋值 = unbound(macOS 分支不赋 real_cwd
+        # → 249 行 [ -n "$real_cwd" ] 直接崩 "unbound variable",crew ls --json 全挂)。
+        # 声明即赋空。
+        local real_model="" real_cwd=""
+        # 2026-10-20:macOS 无 /proc,用 ps 抠 cmdline(空格分隔,--model 在 argv 里);
+        # Linux 保留 /proc 原路径(cmdline \0 分隔更稳,ps 也行但保旧路径不动)。
+        if [ -r "/proc/$claude_pid/cmdline" ]; then
+          real_model=$(cat "/proc/$claude_pid/cmdline" 2>/dev/null | tr '\0' '\n' | awk '/^--model$/{getline; print; exit}')
+          real_cwd=$(readlink "/proc/$claude_pid/cwd" 2>/dev/null)
+        else
+          local _clcmd=""
+          _clcmd=$(ps -o command= -p "$claude_pid" 2>/dev/null || true)
+          real_model=$(printf '%s\n' "$_clcmd" | awk '{for(i=1;i<NF;i++) if($i=="--model"){print $(i+1); exit}}')
+          # cwd:macOS 无 readlink /proc;lsof -p 太重(每次 ls 都跑),registry 兜底已够,
+          # 不再为 dir 增损。real_cwd 留空 → 走下面 registry 反查。
+        fi
         [ -n "$real_model" ] && backend="$real_model"
-        real_cwd=$(readlink "/proc/$claude_pid/cwd" 2>/dev/null)
         [ -n "$real_cwd" ] && dir="$real_cwd"
       fi
     fi
@@ -1171,6 +1200,12 @@ cmd_install_hooks() {
 cmd_doctor() {
   local fix=0
   [ "${1:-}" = "--fix" ] && fix=1
+  # 2026-10-20:doctor 修复力升级 —— 链路问题分两类:
+  #   进程类(proxy/CCR 挂了、双起抢端口):--fix 自动拉起/去重,零人工;
+  #   配置类(base_url 指错、drift):仍只报告 —— 改 key 必人工 apply 的宪法不动,
+  #     但结尾打印"绕过网关直连 oxygen"的 claude 命令,链路修好前不阻塞干活。
+  DOCTOR_FIXED=""
+  DOCTOR_LINK_BAD=0
   echo "== doctor =="
   echo "CREW_STATE: $CREW_STATE $([ -d "$CREW_STATE" ] && echo ✓ || echo ✗)"
   echo "CREW_HOME:  $CREW_HOME $([ -d "$CREW_HOME" ] && echo ✓ || echo ✗)"
@@ -1229,12 +1264,54 @@ sys.exit(0 if 'apiKeyHelper' in d else 1)" 2>/dev/null; then
     else
       echo "  - settings.json 不存在或缺 python3(跳过 base_url 检查)"
     fi
-    # ② crew-proxy(:8788)与 CCR(:3456)进程存活
+    # ② crew-proxy(:8788)与 CCR(:3456)进程存活 —— --fix 时自动拉起(2026-10-20)
     if command -v nc >/dev/null 2>&1; then
-      nc -z 127.0.0.1 "$proxy_port" 2>/dev/null && echo "  ✓ crew-proxy :$proxy_port 在听" \
-        || { echo "  ✗ crew-proxy :$proxy_port 未监听(所有会话将无法路由)"; link_bad=1; }
-      nc -z 127.0.0.1 "$ccr_port" 2>/dev/null && echo "  ✓ CCR :$ccr_port 在听" \
-        || { echo "  ✗ CCR :$ccr_port 未监听"; link_bad=1; }
+      if nc -z 127.0.0.1 "$proxy_port" 2>/dev/null; then
+        echo "  ✓ crew-proxy :$proxy_port 在听"
+      else
+        echo "  ✗ crew-proxy :$proxy_port 未监听(所有会话将无法路由)"
+        link_bad=1
+        if [ "$fix" = 1 ]; then
+          # 优先 launchd(macOS 装机方式):kickstart -k 幂等重拉;无 launchd 条目则
+          # nohup 直接起。拉起后 nc 复核。
+          if [ -f "$HOME/Library/LaunchAgents/com.claudecrew.proxy.plist" ] && command -v launchctl >/dev/null 2>&1; then
+            launchctl kickstart -k "gui/$(id -u)/com.claudecrew.proxy" 2>/dev/null && DOCTOR_FIXED="$DOCTOR_FIXED proxy(launchd kickstart)"
+          elif [ -x "$CREW_HOME/crew_proxy.py" ]; then
+            nohup python3 "$CREW_HOME/crew_proxy.py" >>"$CREW_STATE/crew-proxy.nohup.log" 2>&1 &
+            DOCTOR_FIXED="$DOCTOR_FIXED proxy(nohup)"
+          fi
+          sleep 2
+          if nc -z 127.0.0.1 "$proxy_port" 2>/dev/null; then
+            echo "  ✓ --fix:crew-proxy 已拉起"
+            link_bad=0
+          else
+            echo "  ✗ --fix:拉起失败(端口被占?跑 lsof -nP -iTCP:$proxy_port -sTCP:LISTEN 排查)"
+          fi
+        fi
+      fi
+      if nc -z 127.0.0.1 "$ccr_port" 2>/dev/null; then
+        echo "  ✓ CCR :$ccr_port 在听"
+      else
+        echo "  ✗ CCR :$ccr_port 未监听"
+        link_bad=1
+        if [ "$fix" = 1 ]; then
+          # CCR = claude-code-router daemon。有 ccr 命令就拉起,等端口,幂等。
+          if command -v ccr >/dev/null 2>&1; then
+            nohup ccr start >/dev/null 2>&1 &
+            DOCTOR_FIXED="$DOCTOR_FIXED CCR(ccr start)"
+            local _ccr_wait=0
+            while [ "$_ccr_wait" -lt 15 ]; do
+              nc -z 127.0.0.1 "$ccr_port" 2>/dev/null && break
+              sleep 1; _ccr_wait=$((_ccr_wait+1))
+            done
+          fi
+          if nc -z 127.0.0.1 "$ccr_port" 2>/dev/null; then
+            echo "  ✓ --fix:CCR 已拉起"
+          else
+            echo "  ✗ --fix:CCR 拉起失败(ccr start 后仍无 :$ccr_port;查 ccr status / CCR 日志)"
+          fi
+        fi
+      fi
     fi
     # ③ provider map vs live CCR 分叉(改 key 没 apply 就是这个)。
     #    token 来源:env(CREW_CCR_WEB_TOKEN)> launchd plist 的 proxy Label(com.claudecrew.proxy,
@@ -1268,7 +1345,8 @@ sys.exit(0 if 'apiKeyHelper' in d else 1)" 2>/dev/null; then
     else
       echo "  - ccr_v3.py / provider map 缺失(非 CCR 3 部署,跳过 drift)"
     fi
-    [ "$link_bad" = "0" ] && echo "  链路自检通过" || echo "  链路有问题(见上;只报告不自动改,改 key 必人工 apply)"
+    [ "$link_bad" = "0" ] && echo "  链路自检通过" || echo "  链路有问题(见上;进程类可 --fix 自动修,配置类需人工)"
+    DOCTOR_LINK_BAD=$link_bad
   fi
 
   # 2026-08-30 audit-crew A5(P0):registry 脏行自愈
@@ -1308,6 +1386,53 @@ sys.exit(0 if 'apiKeyHelper' in d else 1)" 2>/dev/null; then
       echo "  ✓ registry 干净"
     fi
   fi
+
+  # ── 2026-10-20:结尾汇总 + 兜底直连命令 ─────────────────────────────
+  # 用户诉求:链路修不好时,也要有"绕过 crew-proxy/CCR 直连 oxygen"的 claude 命令
+  # 立刻能干活。条件:链路有问题(含 --fix 拉起失败)时必打;链路正常也打(一行提示,
+  # 用户要求"启动 crew doctor 的时候打印在最下面")。
+  echo ""
+  echo "== 应急通道(链路故障时绕过网关,直接连 oxygen 起新会话)=="
+  # 从 keys.conf 抓 personal key(没落盘的不猜);从 CCR 默认配置抓真实 base_url。
+  local _oxy_key="" _oxy_url="http://llm-gw.jd.local" _oxy_model=""
+  if [ -f "$HOME/.config/claude-crew/keys.conf" ]; then
+    _oxy_key=$(awk -F= '/^personal=/{print $2; exit}' "$HOME/.config/claude-crew/keys.conf" 2>/dev/null)
+  fi
+  if command -v python3 >/dev/null 2>&1 && [ -f "$HOME/.claude-code-router/config.json" ]; then
+    _oxy_url=$(python3 -c "
+import json
+try:
+    d=json.load(open('$HOME/.claude-code-router/config.json'))
+    for p in d.get('Providers', []):
+        u=p.get('api_base_url','')
+        if 'llm-gw' in u:
+            print(u.split('/anthropic')[0].split('/v1')[0]); break
+except Exception: pass
+" 2>/dev/null)
+    _oxy_model=$(python3 -c "
+import json
+try:
+    d=json.load(open('$HOME/.claude-code-router/config.json'))
+    m=d.get('Router',{}).get('default','')
+    print(m.split(',')[-1] if ',' in m else '')
+except Exception: pass
+" 2>/dev/null)
+  fi
+  [ -n "$_oxy_url" ] || _oxy_url="http://llm-gw.jd.local"
+  if [ -n "$_oxy_key" ]; then
+    echo "  # 绕过 crew-proxy/CCR(应急,不经 key 池 failover/限额统计):"
+    echo "  ANTHROPIC_BASE_URL=$_oxy_url/anthropic ANTHROPIC_AUTH_TOKEN=$_oxy_key \\"
+    echo "    claude${_oxy_model:+ --model $_oxy_model}"
+  else
+    echo "  (keys.conf 无 personal key;手动执行前先 export:)"
+    echo "  ANTHROPIC_BASE_URL=$_oxy_url/anthropic ANTHROPIC_AUTH_TOKEN=<你的 oxygen key> claude"
+  fi
+  if [ "$DOCTOR_LINK_BAD" = "0" ]; then
+    echo "  (当前链路正常,此通道仅备用)"
+  else
+    echo "  (当前链路有问题 —— 上面命令可直接用;修好前不阻塞干活)"
+  fi
+  [ -n "$DOCTOR_FIXED" ] && echo "本次 --fix 已自动修复: $DOCTOR_FIXED"
 }
 
 cmd_version() {
@@ -1786,7 +1911,7 @@ cmd_spawn() {
       local _pane_pid _claude_pid=""
       _pane_pid=$(tmux list-panes -t "$existing" -F '#{pane_pid}' 2>/dev/null | head -1)
       if [ -n "$_pane_pid" ]; then
-        _claude_pid=$(ps --no-headers -o pid,cmd --ppid "$_pane_pid" 2>/dev/null | awk '/bin\/claude/{print $1; exit}')
+        _claude_pid=$(claude_pid_of "$_pane_pid")
       fi
       if [ -z "$_claude_pid" ]; then
         log "'$name' 的 tmux ($existing) 是空壳(无 claude 进程)→ kill 后重起(--resume 保历史)"

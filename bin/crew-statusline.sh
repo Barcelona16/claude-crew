@@ -67,10 +67,12 @@ fi
 # 交给共享解析器 crew-keyresolve.js(与 `crew ls` 同一份逻辑,单一真源):它读 CCR config /
 # keys.conf / key-policy.conf,按本会话 live env(ANTHROPIC_BASE_URL / CREW_MODEL / CREW_KEY,
 # 子进程自动继承)+ base_url 分路由解析。node 实测 ~70ms,可接受;缺 node/脚本则走下方纯 env 降级。
-model=""; key=""
+# CREW_STATUSLINE_MODEL/KEY:测试注入通道(2026-10-20)—— keyresolve 读真机 CCR config,
+# 测试隔离环境无法控制其输出;显式 env 跳过解析,专测渲染逻辑本身。
+model="${CREW_STATUSLINE_MODEL:-}"; key="${CREW_STATUSLINE_KEY:-}"
 _kr_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 _kr="$_kr_dir/crew-keyresolve.js"
-if command -v node >/dev/null 2>&1 && [ -f "$_kr" ]; then
+if [ -z "$model" ] && command -v node >/dev/null 2>&1 && [ -f "$_kr" ]; then
   res="$(CREW_STATE="$STATE" SESS="$sess" node "$_kr" "$sess" 2>/dev/null)"
   if [ -n "$res" ]; then
     IFS=$'\t' read -r model key <<<"$res"
@@ -119,13 +121,26 @@ in_tok="$(json_num '.context_window.total_input_tokens' 'total_input_tokens')"
 if [ -n "$used" ] && [ "$used" != "null" ] 2>/dev/null && { [ -z "$in_tok" ] || [ "$in_tok" != "null" ] && [ "$in_tok" -gt 0 ] 2>/dev/null; }; then
   # 剩余 token 绝对值(千位简写,如 116k)——比纯百分比更有行动价值(还够聊几个回合)。
   win_tok="$(json_num '.context_window.context_window_size' 'context_window_size')"
-  # 按模型覆盖真实 window（Claude Code 默认传 200k，GLM-5.3 实际 500k）
-  case "$lc" in
-    glm-5.3*|glm5.3*) win_tok=1000000 ;;
-    glm-5.2*|glm5.2*) win_tok=200000 ;;
-    kimi*) win_tok=200000 ;;
-    claude*|opus*) win_tok=200000 ;;
-  esac
+  # 2026-10-20:按模型覆盖真实 window 改读配置 ~/.config/claude-crew/model-windows.conf
+  # (与 crew-launcher 注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS 同源,改一处两边一致)。
+  # CC 传的 200k 是未知模型假定值,不是上游真实窗口。conf 缺失时回落旧硬编码表。
+  # (顶层脚本无函数,不能用 local — bash 顶层 local 会静默失败连赋值一起丢)
+  _mw="${CREW_HOME:-$HOME/.config/claude-crew}/model-windows.conf"
+  _mw_win=""
+  if [ -f "$_mw" ]; then
+    _mw_win=$(awk -F= -v m="$lc" '$1!="" && index(m, tolower($1)) {print $2; exit}' "$_mw" 2>/dev/null)
+  fi
+  if [ -n "${_mw_win:-}" ]; then
+    win_tok="$_mw_win"
+  else
+    # 旧硬编码兜底(conf 被删/未装)
+    case "$lc" in
+      glm-5.3*|glm5.3*) win_tok=1000000 ;;
+      glm-5.2*|glm5.2*) win_tok=200000 ;;
+      kimi*) win_tok=200000 ;;
+      claude*|opus*) win_tok=200000 ;;
+    esac
+  fi
   left_k=""
   if [ -n "$in_tok" ] && [ -n "$win_tok" ] && [ "$in_tok" -ge 0 ] && [ "$win_tok" -gt 0 ] 2>/dev/null; then
     left_val=$(( win_tok - in_tok ))

@@ -448,6 +448,29 @@ cmd_spawn() {
   envp+=" CREW_SESSION=$(printf %q "$name") CREW_HOME=$(printf %q "$CREW_HOME") CREW_STATE=$(printf %q "$CREW_STATE")"
   [ -n "$_sess_backend" ] && envp+=" CREW_MODEL=$(printf %q "$_sess_backend")"
   [ -n "$_sess_key" ] && envp+=" CREW_KEY=$(printf %q "$_sess_key")"
+  # 2026-10-20 ctx 窗口对齐:oxygen(llm-gw)不提供模型上下文元数据(/v1/models 只有 id),
+  # CC 对未知模型按默认窗口(~200k)假定,与上游真实窗口(GLM-5.3 实际 1M/Flash 500k 等)不符:
+  #   - 假窗口 < 真窗口:statusline 剩余量失真、提前压缩(浪费)
+  #   - 假窗口 > 真窗口:自动压缩该触发时不触发 → compact 请求超真窗口被 400
+  #     "prompt is too long" 拒掉 → 会话卡死只能重开(用户实测)
+  # 解法:按模型查 ~/.config/claude-crew/model-windows.conf(每行 <模式>=<token数>),
+  # 注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS(真实窗口) + AUTO_COMPACT_WINDOW(90%,压缩留
+  # 余量别贴上限跑)。BK_MODEL(本次要跑的)> state backend(旧值)。无匹配不注入(CC 默认)。
+  local _mw_file="$CREW_HOME/model-windows.conf" _mw_win=""
+  if [ -f "$_mw_file" ]; then
+    local _mw_model="${BK_MODEL:-}"
+    [ -z "$_mw_model" ] && _mw_model="$_sess_backend"
+    # 小写包含匹配:conf 写短名 glm-5.3 / kimi,模型全名 GLM-5.3-Local-joybuilder 也命中
+    _mw_win=$(awk -F= -v m="$(printf %s "$_mw_model" | tr 'A-Z' 'a-z')" '
+      $1!="" && index(m, tolower($1)) {print $2; exit}' "$_mw_file" 2>/dev/null)
+    case "$_mw_win" in
+      ''|*[!0-9]*) ;;  # 空/非数字:不注入
+      *)
+        envp+=" CLAUDE_CODE_MAX_CONTEXT_TOKENS=$_mw_win"
+        envp+=" CLAUDE_CODE_AUTO_COMPACT_WINDOW=$(( _mw_win * 90 / 100 ))"
+        ;;
+    esac
+  fi
 
   # 拼完整命令(每次生成 launcher 脚本文件传 tmux/fg,避 quoting)
   # 2026-08-30 audit-crew C4(P0):

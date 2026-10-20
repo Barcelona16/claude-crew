@@ -7,6 +7,46 @@
 
 ## [Unreleased]
 
+### 修复
+- **每次启动误判"空壳"kill 活会话 + resume 混乱(macOS 根因)**:空壳检测/`crew ls`/
+  heartbeat 用的 `ps --no-headers --ppid` 是 Linux-only 语法,macOS BSD ps 直接
+  illegal option → claude_pid 恒空 → 每次 `crew <name>` 都把活会话当空壳 kill 重起,
+  heartbeat 把所有 live 会话记 dead-repl → watcher autoheal 连环重起(resume 分叉)。
+  新增 `claude_pid_of()`:Linux 保留 --ppid 快路径,macOS 走 `ps -axo pid,ppid` 全表
+  过滤;heartbeat.js 同步加 BSD 回退。实测 crew_up pane(95199)→ claude(95366)
+  正确识别,空壳场景(子进程退出)正确返回空。
+- **`crew ls --json` macOS 崩溃(unbound variable)**:cmd_ls 的 /proc 增强在 macOS
+  分支不赋 real_cwd,而 `local real_model real_cwd` 不带值声明在 bash 3.2 + set -u
+  下是 unbound → 249 行直接崩。声明即赋空值修掉(这也是 dashboard Sessions 表
+  空的一环:proxy 调 ls --json 拿到的是崩溃输出)。
+- **dashboard Sessions 表永远空(crew exec failed: 'crew')**:launchd 起 proxy 时
+  PATH 只有 /usr/bin:/bin,shutil.which("crew") 落空 → 裸名 "crew" → FileNotFoundError。
+  CREW_BIN 解析加显式兜底链:which > ~/.local/bin/crew > repo bin/crew > 裸名;
+  crew CLI 不可用时 _api_sessions 降级直读 state 文件(24 会话照常显示,标 degraded)。
+- **dashboard Recent requests 表看不到错误信息和时间**:失败请求记 err 摘要
+  (上游 400 body 里的 message,如 "prompt is too long",hover 看全文);时间列从
+  相对秒(1029.5s)改墙钟 HH:MM:SS。
+- **ctx 窗口失真 / 自动压缩失效(会话只能重开)**:oxygen(llm-gw)的 /v1/models
+  不提供 context window 元数据,CC 对未知模型按 ~200k 假定,与上游真实窗口不符
+  (假窗口 > 真窗口 → 压缩不触发 → compact 请求被 400 "prompt is too long" 拒 →
+  会话卡死)。新增 `model-windows.conf`(backends/model-windows.conf.example 模板):
+  launcher 起会话按模型注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS(真实窗口)+
+  AUTO_COMPACT_WINDOW(90% 提前压缩);statusline 同源读 conf 算剩余量
+  (原硬编码表迁出,conf 缺失回落硬编码)。
+- **proxy 偶发崩不自愈**:serve_forever 意外崩(非 KeyboardInterrupt)原样退出,
+  launchd KeepAlive 重拉有 5s 空窗(期间所有会话请求全挂)。改为崩后关旧 socket
+  重建重听(1s 退避防疯狂重建),端口被占才放退出交 launchd/doctor;请求线程异常
+  装 threading.excepthook 结构化记录(此前 ConnectionResetError 只打裸 traceback)。
+
+### 新增
+- **crew doctor --fix 进程自愈**:crew-proxy 未监听 → launchd kickstart(或 nohup)
+  自动拉起并复核;CCR 未监听 → ccr start + 等端口。配置类问题(base_url 指错/drift)
+  仍只报告不自动改(改 key 必人工 apply 的宪法不动)。
+- **doctor 结尾打印应急直连命令**:链路修不好时,直接给出绕过 crew-proxy/CCR 连
+  oxygen 的 claude 命令(ANTHROPIC_BASE_URL=llm-gw/anthropic + AUTH_TOKEN + 模型),
+  链路正常时也打(标"仅备用")。
+
+
 ## [3.13.2] - 2026-10-20
 
 ### 修复

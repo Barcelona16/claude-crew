@@ -1,0 +1,29 @@
+# model-windows.conf — 各模型真实上下文窗口(2026-10-20)
+#
+# 为什么存在:oxygen(llm-gw)的 /v1/models 只返回 id/owned_by,不提供 context window
+# 元数据;Claude Code 对未知模型按 ~200k 假定。假窗口与真实窗口不符时:
+#   假窗口 > 真窗口 → 自动压缩不触发 → compact 请求被上游 400 "prompt is too long"
+#   → 会话卡死只能重开;假窗口 < 真窗口 → 提前压缩浪费 + statusline 剩余量失真。
+# crew-launcher 起会话时按此表注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS(真实窗口)
+# 和 CLAUDE_CODE_AUTO_COMPACT_WINDOW(90%,留压缩余量)。crew-statusline.sh 也读它算剩余。
+#
+# 格式:每行 <小写模式>=<token 数>;匹配规则 = 模型名小写化后包含该模式,首条命中生效。
+# 维护:上游调窗口 / 新模型接入时改这里,crew 侧零代码变更。
+
+# GLM-5.3 全系(含 Local/Flash/joybuilder 变体)= 1M(2026-10-19 实测)
+glm-5.3=1000000
+# GLM-5.2 及更老 = 200k(上游未声明,按保守)
+glm-5.2=200000
+glm-5.1=200000
+glm-5=200000
+# kimi = 200k
+kimi=200000
+# Claude 系(经 llm-gw)= 200k
+claude=200000
+opus=200000
+sonnet=200000
+fable=200000
+# DeepSeek V4 = 128k
+deepseek=128000
+# Doubao Seed = 128k
+doubao=128000
