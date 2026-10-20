@@ -119,9 +119,21 @@ in_tok="$(json_num '.context_window.total_input_tokens' 'total_input_tokens')"
 if [ -n "$used" ] && [ "$used" != "null" ] 2>/dev/null && { [ -z "$in_tok" ] || [ "$in_tok" != "null" ] && [ "$in_tok" -gt 0 ] 2>/dev/null; }; then
   # 剩余 token 绝对值(千位简写,如 116k)——比纯百分比更有行动价值(还够聊几个回合)。
   win_tok="$(json_num '.context_window.context_window_size' 'context_window_size')"
+  # 按模型覆盖真实 window（Claude Code 默认传 200k，GLM-5.3 实际 500k）
+  case "$lc" in
+    glm-5.3*|glm5.3*) win_tok=1000000 ;;
+    glm-5.2*|glm5.2*) win_tok=200000 ;;
+    kimi*) win_tok=200000 ;;
+    claude*|opus*) win_tok=200000 ;;
+  esac
   left_k=""
   if [ -n "$in_tok" ] && [ -n "$win_tok" ] && [ "$in_tok" -ge 0 ] && [ "$win_tok" -gt 0 ] 2>/dev/null; then
-    left_k="$(( (win_tok - in_tok) / 1000 ))k"
+    left_val=$(( win_tok - in_tok ))
+    if [ "$left_val" -lt 0 ]; then
+      left_k="超了"
+    else
+      left_k="$(( left_val / 1000 ))k"
+    fi
   fi
   used="${used%.*}"  # 42.0 -> 42(有小数时)
   case "$used" in
