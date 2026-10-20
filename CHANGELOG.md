@@ -8,6 +8,26 @@
 ## [Unreleased]
 
 ### 修复
+- **上下文窗口自动校准(报错即修)**:用户洞察 —— 报错那一刻上游就告诉我们真实窗口。
+  实测 llm-gw 溢出错误自带数字(GLM-5.3-Local:`context length (1048576 tokens)`;
+  kimi-k3:`exceeded model token limit: 1048576`);GLM-5.2(code 1261 "Prompt 超长")
+  不带 → 统计兜底:被拒请求估算 tokens(下界)+ 该模型历史最大成功 input(新增
+  `max_in` 追踪,上界)夹逼,取保守下界(向下取 10k)。校准器在 translate
+  prompt-too-long 命中时同步写 model-windows.conf(幂等/线程安全/异常静默),
+  launcher 下次起会话即用真实窗口。端到端实测:conf 错值 200000 → 一次报错后
+  自动纠正 1048576。
+- **两种溢出措辞漏匹配致 CC 压缩恢复不触发**:实测 `longer than the model's context
+  length`(GLM-5.3-Local)和 `exceeded model token limit`(kimi)都不在原
+  _PTL_SOURCE_PATTERNS 里 → 这些模型的溢出错误不翻译 → CC 当普通 400 重试到死。
+  补两种模式 + 中文 "Prompt 超长"(上游中英文措辞会切换,全收);hay 构造改多层
+  展开(CCR 的 cause 字段是字符串化 JSON,中文以 \uXXXX 转义藏在内层,单层
+  dumps 匹配不到 —— GLM-5.2 中文措辞漏匹配的根因)。
+- **窗口表实测值修正**:GLM-5.3 全系 = 1048576(1M,非 1000000 假设值);
+  kimi-k3 = 1048576(原表 200k 错误)。阶梯探测法:50k..800k words 多样化文本
+  逐档打,直到逼出带数字的 400。
+
+
+### 修复
 - **每次启动误判"空壳"kill 活会话 + resume 混乱(macOS 根因)**:空壳检测/`crew ls`/
   heartbeat 用的 `ps --no-headers --ppid` 是 Linux-only 语法,macOS BSD ps 直接
   illegal option → claude_pid 恒空 → 每次 `crew <name>` 都把活会话当空壳 kill 重起,
