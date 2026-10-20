@@ -1,0 +1,37 @@
+test/crew-dsh.test.sh
+  s_8689a806c2a7a3::t_869030619e5b79 362
+  s_8689a806c2a7a3::t_3f068c47b73e8d 381-400,402-403,405-406,409-410,412,415-416,418
+  s_8689a806c2a7a3::t_7aa00275356ec2 356
+  s_8689a806c2a7a3::t_6ab50ffae08d51 411
+  s_8689a806c2a7a3::t_b3bfcf31550bf2 318-343,364-366,368,372,377,379
+  s_8689a806c2a7a3::t_1fcb5f16a8e851 345-349,358,369-371,373-376,378,380
+  s_8689a806c2a7a3::t_104b04848ed18c 355,357,359-361,363
+acp/crew-acpd.mjs
+  s_8689a806c2a7a3::t_ad5448f9f63765 92-95
+  s_8689a806c2a7a3::t_0d44afdd1c986a 33-38
+  s_8689a806c2a7a3::t_3fd97aeb25b87d 182-184,187,189-190
+  s_8689a806c2a7a3::t_300994f456c768 96-101
+  s_8689a806c2a7a3::t_d1923e7878271c 87-91,102-103
+  s_8689a806c2a7a3::t_8234d54fb7d47a 225,229,231
+  s_8689a806c2a7a3::t_9c26dcddefc3b7 155-156
+  s_8689a806c2a7a3::t_80d9878c9a0324 271-282
+  s_8689a806c2a7a3::t_92e4e580345078 218-224,226-228,230,232-233
+CHANGELOG.md
+  s_8689a806c2a7a3::t_63793a3a394d79 13-17,19-25
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "d235de80c56c40cdea93a792cd9d86b5281ff1e2",
+  "prompts": {},
+  "sessions": {
+    "s_8689a806c2a7a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3a9682b3-6d69-4c69-b4b8-aa84026750db",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
