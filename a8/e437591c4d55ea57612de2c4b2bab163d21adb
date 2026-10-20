@@ -1,0 +1,25 @@
+test/crew-dsh.test.sh
+  s_8689a806c2a7a3::t_0bfbfb4f299f06 460-462,464
+CLAUDE.md
+  s_8689a806c2a7a3::t_d92c671cd5f23c 27,45
+bin/crew
+  s_8689a806c2a7a3::t_68b946c538face 1902,1907-1912,1923,1938-1939,1943-1950,1952,1954
+CHANGELOG.md
+  s_8689a806c2a7a3::t_d92c671cd5f23c 10-16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "a8e437591c4d55ea57612de2c4b2bab163d21adb",
+  "prompts": {},
+  "sessions": {
+    "s_8689a806c2a7a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3a9682b3-6d69-4c69-b4b8-aa84026750db",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
