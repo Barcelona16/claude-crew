@@ -1,0 +1,31 @@
+acp/crew-dsh.mjs
+  s_8689a806c2a7a3::t_90fcff99a83f09 109-144
+  s_8689a806c2a7a3::t_c1fe8799a3029c 147-154
+test/crew-dsh.test.sh
+  s_8689a806c2a7a3::t_cbaf35d06fd3de 255,265,267-268,290,298-303,309-328
+CHANGELOG.md
+  s_8689a806c2a7a3::t_0b8fb72d23ffc6 10-22
+acp/crew-acpd.mjs
+  s_8689a806c2a7a3::t_16a3dedc8dd370 101-108
+bin/crew
+  s_8689a806c2a7a3::t_047fc19cf38788 1902,1907-1911,1916-1922,1924-1927,1932-1950
+  s_8689a806c2a7a3::t_61dbb64319c40a 1923,1928-1931
+CLAUDE.md
+  s_8689a806c2a7a3::t_0b8fb72d23ffc6 15,26-27,45
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "3c86566debbb83b0aa35da5b3484bf802532a090",
+  "prompts": {},
+  "sessions": {
+    "s_8689a806c2a7a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3a9682b3-6d69-4c69-b4b8-aa84026750db",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
