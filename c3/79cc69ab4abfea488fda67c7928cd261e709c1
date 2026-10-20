@@ -1,0 +1,19 @@
+CHANGELOG.md
+  s_8689a806c2a7a3::t_d1bad135b367ca 20-21
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "c379cc69ab4abfea488fda67c7928cd261e709c1",
+  "prompts": {},
+  "sessions": {
+    "s_8689a806c2a7a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3a9682b3-6d69-4c69-b4b8-aa84026750db",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
