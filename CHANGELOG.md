@@ -7,6 +7,15 @@
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-10-20
+
+### 新增
+- **绑定即回放(会话名 + 历史上下文)**:acpd 在 session/new 返回后主动推「会话横幅」
+  (`〔会话:<role> · <流水线>〕`)+ 最近 N 条历史(CREW_DSH_REPLAY_N,默认 12,0 关闭)。
+  Martty/Zed/内置 REPL 打开即见在跟谁聊 + 之前聊了什么;`user ›`/`<role> ›` 对话框格式。
+- 修复语义角色:rec.role 从 member 名取(`<role>-pipe-<pid>`)——平台 sessions[].role
+  恒 'teammate' 无语义,横幅/历史回放此前会错标 'teammate'。
+
 ## [3.7.0] - 2026-10-20
 
 ### 新增

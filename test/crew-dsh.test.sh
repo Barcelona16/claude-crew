@@ -168,7 +168,11 @@ fi
 FAKE_HTTP="$T/fake-http.mjs"
 cat > "$FAKE_HTTP" <<'EOF'
 import http from 'node:http'
-const msgs = [{ts: 1, note: 'hist', replyOut: true}]
+const msgs = [
+  {ts: 1, note: '历史消息1(用户)', replyOut: false},
+  {ts: 2, note: '历史消息2(角色回复)', replyOut: true},
+  {ts: 3, note: '历史消息3(用户)', replyOut: false},
+]
 let seq = 2
 const srv = http.createServer((req, res) => {
   let body = ''
@@ -300,6 +304,49 @@ EOF
     _ok "⑱b CREW_DSH_TARGET 指定成员 → Martty 会话绑该角色"
   else
     _ng "⑱b CREW_DSH_TARGET 失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
+  fi
+  # ㉒㉓ 绑定即回放:session/new 后(任何 prompt 之前)应先收到「会话横幅」+ 最近历史回放
+  cat > "$T/e2e-banner.mjs" <<EOF
+import { client, methods, PROTOCOL_VERSION, ndJsonStream } from 'file:///Users/wangqiwang1/Desktop/claude-crew/acp/node_modules/@agentclientprotocol/sdk/dist/acp.js'
+import { spawn } from 'node:child_process'
+import { Readable, Writable } from 'node:stream'
+
+const acpd = spawn('node', ['/Users/wangqiwang1/Desktop/claude-crew/acp/crew-acpd.mjs'], {
+  env: {...process.env, JIMDB_BASE: 'http://127.0.0.1:${FAKE_PORT}', JIMDB_ERP: 'tester'},
+})
+const stream = ndJsonStream(Writable.toWeb(acpd.stdin), Readable.toWeb(acpd.stdout))
+let got = []
+// 只开会话 + 消费 update 流(prompt 之前收到的即"绑定即回放"内容)
+const acpClient = client({name:'banner-test', version:'0.0.1'})
+await acpClient.connectWith(stream, async (cx) => {
+  await cx.request(methods.agent.initialize, {
+    protocolVersion: PROTOCOL_VERSION,
+    clientCapabilities: {fs:{readTextFile:false, writeTextFile:false}},
+  })
+  const session = await cx.buildSession('pipe://PIPE-20261019-wand3/designer').start()
+  // 收 3 秒绑定时主动推的 update(不发任何 prompt)
+  const timeout = new Promise(r => setTimeout(r, 3000))
+  const reading = (async () => {
+    for (;;) {
+      const msg = await Promise.race([session.nextUpdate(), timeout.then(() => ({kind:'timeout'}))])
+      if (msg.kind === 'timeout' || msg.kind === 'stop') break
+      const u = msg.update
+      if (u?.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'text') got.push(u.content.text)
+    }
+  })()
+  await reading
+})
+acpd.kill()
+const all = got.join('')
+if (!all.includes('〔') || !all.includes('designer')) throw new Error('缺会话横幅: ' + JSON.stringify(all))
+if (!all.includes('历史消息2')) throw new Error('缺历史回放: ' + JSON.stringify(all))
+console.log('BANNER-OK ' + JSON.stringify(all))
+process.exit(0)
+EOF
+  if out=$(node "$T/e2e-banner.mjs" 2>&1); then
+    _ok "㉒㉓ 绑定即回放:会话横幅 + 历史上下文(prompt 前主动推送)"
+  else
+    _ng "㉒㉓ 绑定回放失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
   fi
   kill $FAKE2_PID 2>/dev/null
 else

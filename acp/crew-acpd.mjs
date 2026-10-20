@@ -122,12 +122,41 @@ app.onRequest('session/new', async (cx) => {
   const hit = members.find(m => m.member === target.member)
   if (!hit) throw new Error(`无此角色会话:${target.member}(session/list 查看可用)`)
   const id = `acp-${++sessionSeq}`
-  const rec = { member: hit.member, pid: hit.pid, role: hit.role, known: new Set(), poller: null }
+  // 语义角色从 member 名取(<role>-pipe-<pid>;平台 sessions[].role 恒 'teammate' 无语义)
+  const role = hit.member.split('-pipe-')[0]
+  const rec = { member: hit.member, pid: hit.pid, role, known: new Set(), poller: null }
   active.set(id, rec)
-  // 首次连接:把既有历史里【最近一条 assistant 消息之前的部分】标记为已读(不回放全史,只跟新消息)。
+  // 历史:全部标记已读(轮询只跟新消息);回放(给客户端看)单独做。
   const hist = await fetchMessages(rec.member, rec.pid)
   for (const m of hist) rec.known.add(sig(m))
   log(`session ${id} → ${rec.member} (历史 ${hist.length} 条标记已读,只跟新)`)
+  // 绑定即回放(2026-10-20,用户拍板):session/new 返回后主动推「会话横幅 + 最近历史上下文」,
+  // 客户端(Martty/Zed/内置 REPL)打开即见在跟谁聊 + 之前聊了什么。
+  // SDK handler 返回后 client 仍可收 notification——setTimeout 异步推,不阻塞 session/new 响应。
+  const REPLAY_N = Number(process.env.CREW_DSH_REPLAY_N ?? 12)
+  if (REPLAY_N > 0) {
+    setTimeout(async () => {
+      try {
+        const push = text => cx.client.notify('session/update', {
+          sessionId: id,
+          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
+        })
+        await push(`〔会话:${rec.role} · ${rec.pid} —— JIMDB dsh 角色子代理〕\n`)
+        const recent = hist.slice(-REPLAY_N)
+        if (recent.length > 0) {
+          await push('── 最近历史上下文 ──\n')
+          for (const m of recent) {
+            const who = m.replyOut === true ? rec.role : 'user'
+            const note = (m.note ?? '').replace(/\n$/, '')
+            if (note) await push(`${who} › ${note}\n`)
+          }
+          await push('── 历史结束,继续对话 ──\n')
+        } else {
+          await push('(无历史消息,直接开始对话)\n')
+        }
+      } catch (e) { log('回放推送失败:', e?.message ?? e) }
+    }, 50)
+  }
   return { sessionId: id }
 })
 
