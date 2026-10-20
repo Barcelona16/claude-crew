@@ -1,0 +1,21 @@
+bin/crew
+  s_8689a806c2a7a3::t_c85d4ce72d289c 1955-1962,1964-1968
+acp/crew-acpd.mjs
+  s_8689a806c2a7a3::t_913dd0a65b0514 106-108,110-112,114,116,272-276,278,280,282
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "ce804614205c330659a235d5436418abdf4a04f7",
+  "prompts": {},
+  "sessions": {
+    "s_8689a806c2a7a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3a9682b3-6d69-4c69-b4b8-aa84026750db",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
