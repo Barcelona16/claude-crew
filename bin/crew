@@ -2024,7 +2024,10 @@ PYCFG
       export CREW_DSH_TARGET="$target_member" CREW_DSH_BIND_REPLAY=1
       # 标题 = 状态栏常驻显示:JIMDB Agent + 作者署名(角色/流水线由 acpd session_info_update 补充)
       log "dsh → Toad 富 UI(绑定即显历史;--repl 回内置)"
-      exec "$toad_bin" acp -t "${CREW_DSH_TITLE:-JIMDB Agent · by wangqiwang1}" -d "$proj_dir" "node $ACPD"
+      # 注意:toad acp 的 PATH 位置参数与 -d option 在 click 里同名(project_dir),
+      # argument 优先 —— -d 会被未传的 PATH(default None)覆盖(实测踩坑:左树落 ~)。
+      # 正确姿势:镜像路径作为 COMMAND 之后的 PATH 位置参数传入。
+      exec "$toad_bin" acp -t "${CREW_DSH_TITLE:-JIMDB Agent · by wangqiwang1}" "node $ACPD" "$proj_dir"
     fi
     [ "$ui" = "toad" ] && [ -z "$toad_bin" ] && die "toad 未安装(uv tool install -U batrachian-toad)"
   fi

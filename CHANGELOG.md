@@ -7,6 +7,16 @@
 
 ## [Unreleased]
 
+## [3.13.2] - 2026-10-20
+
+### 修复
+- **左树仍指家目录的真正根因(toad click 缺陷)**:`toad acp` 的 PATH 位置参数与
+  `-d` option 在 click 定义里**同名 project_dir**(argument 覆盖 option)——
+  我们传 `-d <镜像>` 但 PATH 未传(default None),把 -d 顶掉 → Toad 落回 ~。
+  修:镜像路径改为 COMMAND 之后的 PATH 位置参数(click 解析实测收到正确路径;
+  真实进程命令行验证 ✓)。此前两次"修复"(latest 重试/兜底)治标未治本,
+  误判致歉——日志显示 -d 传对,但被 click 吞掉,盯 -d 当然查不出来。
+
 ## [3.13.1] - 2026-10-20
 
 ### 修复
