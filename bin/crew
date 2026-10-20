@@ -1941,8 +1941,11 @@ cmd_dsh() {
     command -v toad >/dev/null 2>&1 && toad_bin="toad"
     [ -z "$toad_bin" ] && [ -x "$HOME/.local/bin/toad" ] && toad_bin="$HOME/.local/bin/toad"
     if [ -n "$toad_bin" ] && [ -t 0 ]; then
-      # 有目标参 → 解析 member 名(轻量 node 一次调用),无则留空(acpd 自动绑最新 lead)
-      if [ -n "$target_member" ]; then
+      # 目标解析:有参 → 解析 member 名;无参 → 解析「最新流水线 lead」
+      # (与 acpd 自动绑 lead 同规则;镜像跟随,左树永不落到 $PWD —— 2026-10-20 用户实测踩坑)
+      if [ -z "$target_member" ]; then
+        target_member=$(node "$DSHMJS" --resolve latest 2>/dev/null) || target_member=""
+      else
         target_member=$(node "$DSHMJS" --resolve "$target_member" 2>/dev/null) || target_member=""
       fi
       # 工作区镜像:rsync 远程流水线工作目录 → 本地(~/.crew/dsh-work/<pid>/),
@@ -1970,7 +1973,19 @@ cmd_dsh() {
           log "warn: 工作区镜像 rsync 失败(左树将指向当前目录)"
         fi
       fi
-      [ -n "$proj_dir" ] || proj_dir="$PWD"
+      # 兜底:镜像不可用时也不用 $PWD(用户实测左树指到家目录的坑)——
+      # 用 ~/.crew/dsh-work/latest 软链指向最新流水线镜像;再不行用 crew 仓库目录
+      if [ -z "$proj_dir" ]; then
+        local latest_pid=""
+        [ -n "$target_member" ] && latest_pid="${target_member##*-pipe-}"
+        if [ -n "$latest_pid" ] && [ -d "$HOME/.crew/dsh-work/$latest_pid" ]; then
+          proj_dir="$HOME/.crew/dsh-work/$latest_pid"
+        else
+          proj_dir="$HOME/.crew/dsh-work"
+          mkdir -p "$proj_dir"
+        fi
+        log "warn: 镜像未就绪,左树指向 $proj_dir(重启 crew dsh 刷新)"
+      fi
       # Claude Code 观感预置(gruvbox 暖底/极简/紧凑;仅补缺省键,不覆盖用户自定义)
       TOADCFG="${TOAD_CONFIG:-$HOME/.config/toad/toad.json}" TOADPRESET="$SCRIPT_DIR/../acp/toad-settings.json" python3 - <<'PYCFG' 2>/dev/null || true
 import json, os

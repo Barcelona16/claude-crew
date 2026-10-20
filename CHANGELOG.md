@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+## [3.13.0] - 2026-10-20
+
+### 修复
+- **裸 `crew dsh` 左树指向家目录**(用户实测):无流水线参数时 target 为空 →
+  proj_dir 落 $PWD(用户在 ~ 跑,左树即家目录)。修复:无参自动解析「最新流水线」
+  (`--resolve latest`,与 acpd 自动绑 lead 同规则),镜像跟随;镜像不可用兜底
+  ~/.crew/dsh-work(绝不落 $PWD)。latest 支持角色参数(--resolve latest coder)。
+
 ## [3.12.0] - 2026-10-20
 
 ### 修复/优化

@@ -106,7 +106,8 @@ export function parseLine(line) {
 
 const log = (...a) => process.stderr.write(`[crew-dsh] ${a.join(' ')}\n`)
 
-// --resolve:解析「流水线 [角色]」→ member 名打 stdout(Martty 通道;失败 exit 1 不误绑)
+// --resolve:解析「流水线 [角色]」→ member 名打 stdout(Toad 通道;失败 exit 1 不误绑)
+// pidArg=latest → 最新流水线(pid 最大,含日期)+ 默认 lead —— crew dsh 无参时的目标
 async function resolveOnly(pidArg, roleArg) {
   if (!pidArg) process.exit(1)
   const acpd = spawn('node', [ACPD], { env: process.env, stdio: ['pipe', 'pipe', 'inherit'] })
@@ -124,6 +125,17 @@ async function resolveOnly(pidArg, roleArg) {
         role: s.title?.split(' · ')[0] ?? s.sessionId.split('-pipe-')[0],
       }))
       const groups = groupPipelines(members)
+      if (pidArg === 'latest') {
+        // 最新流水线(pid 最大,groupPipelines 已降序)+ lead(或指定角色)
+        if (groups.length === 0) process.exit(1)
+        const g = groups[0]
+        const hit = roleArg
+          ? g.roles.find(r => r.role === roleArg || r.role.startsWith(roleArg))
+          : (g.roles.find(r => r.role === 'lead') ?? g.roles[0])
+        if (!hit) process.exit(1)
+        console.log(hit.member)
+        acpd.kill(); process.exit(0)
+      }
       const q = pidArg.toLowerCase()
       const ghits = groups.filter(g => g.pid.includes(q))
       if (ghits.length !== 1) process.exit(1)
