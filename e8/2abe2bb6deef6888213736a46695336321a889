@@ -1,0 +1,21 @@
+bin/crew
+  s_8689a806c2a7a3::t_3afdb283f3debd 1946-1954,1956,1958,1988-1992,1997
+CHANGELOG.md
+  s_8689a806c2a7a3::t_0bf9761d3fcf81 10-18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "e82abe2bb6deef6888213736a46695336321a889",
+  "prompts": {},
+  "sessions": {
+    "s_8689a806c2a7a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3a9682b3-6d69-4c69-b4b8-aa84026750db",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
