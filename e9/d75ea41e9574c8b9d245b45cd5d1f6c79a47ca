@@ -1,0 +1,21 @@
+CLAUDE.md
+  s_8689a806c2a7a3::t_e97e605493c586 28
+CHANGELOG.md
+  s_8689a806c2a7a3::t_e97e605493c586 10-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "e9d75ea41e9574c8b9d245b45cd5d1f6c79a47ca",
+  "prompts": {},
+  "sessions": {
+    "s_8689a806c2a7a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3a9682b3-6d69-4c69-b4b8-aa84026750db",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
