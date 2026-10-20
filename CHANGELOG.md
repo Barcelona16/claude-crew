@@ -7,6 +7,20 @@
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-10-20
+
+### 变更
+- **`crew chat` → `crew dsh` 更名 + 两级结构**(用户拍板):命令语义对齐连接对象(dsh 编排器);
+  入口两级——先选流水线(默认进 lead 对话),`/switch <role>` 流水线内切子代理,`/roles` 看角色。
+  `crew dsh <流水线> [角色]` 支持直连;`chat` 保留为兼容别名。对话框标准渲染:`你 › …` / `<role> › …`。
+- acp/crew-chat.mjs → acp/crew-dsh.mjs;新增 groupPipelines(lead 排首 + 角色字母序)、renderTurn。
+
+### 修复
+- 角色回合前缀 `` 覆写在管道/TTY 下不一致 → 改 `
+` 换行。
+- crew-acpd 支持 `CREW_ACPD_QUIET=1` 静音常规 stderr 日志(crew dsh 拉起时默认设,`CREW_DSH_DEBUG=1` 可开)——
+  修日志泄漏进对话框。
+
 ## [3.4.0] - 2026-10-19
 
 ### 新增

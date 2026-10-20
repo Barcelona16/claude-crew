@@ -28,7 +28,9 @@ import { Readable, Writable } from 'node:stream'
 const BASE = process.env.JIMDB_BASE || 'http://11.91.165.248:3200'
 const ERP = process.env.JIMDB_ERP || 'wangqiwang1'
 
-const log = (...a) => process.stderr.write(`[crew-acpd] ${a.join(' ')}\n`)
+// CREW_ACPD_QUIET=1 静音常规日志(crew dsh 拉起时设;协议错误仍经 jsonrpc 层报)
+const QUIET = process.env.CREW_ACPD_QUIET === '1'
+const log = (...a) => { if (!QUIET) process.stderr.write(`[crew-acpd] ${a.join(' ')}\n`) }
 
 async function api(method, path, body) {
   const res = await fetch(`${BASE}${path}`, {
