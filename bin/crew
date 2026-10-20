@@ -1943,10 +1943,19 @@ cmd_dsh() {
     if [ -n "$toad_bin" ] && [ -t 0 ]; then
       # 目标解析:有参 → 解析 member 名;无参 → 解析「最新流水线 lead」
       # (与 acpd 自动绑 lead 同规则;镜像跟随,左树永不落到 $PWD —— 2026-10-20 用户实测踩坑)
+      # 解析(带重试:--resolve 要 ssh 拉远程成员表,偶发失败会让左树落到兜底目录)
+      _resolve_member() {
+        local spec="$1" try out
+        for try in 1 2 3; do
+          out=$(timeout 30 node "$DSHMJS" --resolve "$spec" 2>/dev/null) && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+          sleep 1
+        done
+        return 1
+      }
       if [ -z "$target_member" ]; then
-        target_member=$(node "$DSHMJS" --resolve latest 2>/dev/null) || target_member=""
+        target_member=$(_resolve_member latest) || target_member=""
       else
-        target_member=$(node "$DSHMJS" --resolve "$target_member" 2>/dev/null) || target_member=""
+        target_member=$(_resolve_member "$target_member") || target_member=""
       fi
       # 工作区镜像:rsync 远程流水线工作目录 → 本地(~/.crew/dsh-work/<pid>/),
       # Toad 左侧 project 树 = 远程真实文件(只读镜像;每次启动刷新,CREW_DSH_SYNC=0 跳过)
@@ -1976,15 +1985,16 @@ cmd_dsh() {
       # 兜底:镜像不可用时也不用 $PWD(用户实测左树指到家目录的坑)——
       # 用 ~/.crew/dsh-work/latest 软链指向最新流水线镜像;再不行用 crew 仓库目录
       if [ -z "$proj_dir" ]; then
-        local latest_pid=""
-        [ -n "$target_member" ] && latest_pid="${target_member##*-pipe-}"
-        if [ -n "$latest_pid" ] && [ -d "$HOME/.crew/dsh-work/$latest_pid" ]; then
-          proj_dir="$HOME/.crew/dsh-work/$latest_pid"
+        # 解析/同步失败 → 本地已有镜像里挑最新的(目录名含日期,离线可用)
+        local fallback
+        fallback=$(ls -1 "$HOME/.crew/dsh-work" 2>/dev/null | sort -r | head -1)
+        if [ -n "$fallback" ] && [ -d "$HOME/.crew/dsh-work/$fallback" ]; then
+          proj_dir="$HOME/.crew/dsh-work/$fallback"
         else
           proj_dir="$HOME/.crew/dsh-work"
           mkdir -p "$proj_dir"
         fi
-        log "warn: 镜像未就绪,左树指向 $proj_dir(重启 crew dsh 刷新)"
+        log "warn: 镜像未就绪,左树回退 $proj_dir(网络恢复后重启 crew dsh 刷新)"
       fi
       # Claude Code 观感预置(gruvbox 暖底/极简/紧凑;仅补缺省键,不覆盖用户自定义)
       TOADCFG="${TOAD_CONFIG:-$HOME/.config/toad/toad.json}" TOADPRESET="$SCRIPT_DIR/../acp/toad-settings.json" python3 - <<'PYCFG' 2>/dev/null || true
