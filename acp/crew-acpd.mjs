@@ -30,7 +30,12 @@ const ERP = process.env.JIMDB_ERP || 'wangqiwang1'
 
 // CREW_ACPD_QUIET=1 静音常规日志(crew dsh 拉起时设;协议错误仍经 jsonrpc 层报)
 const QUIET = process.env.CREW_ACPD_QUIET === '1'
-const log = (...a) => { if (!QUIET) process.stderr.write(`[crew-acpd] ${a.join(' ')}\n`) }
+const log = (...a) => {
+  if (!QUIET) process.stderr.write(`[crew-acpd] ${a.join(' ')}\n`)
+  if (process.env.CREW_ACPD_LOG) { try {
+    ;import('node:fs').then(fs => fs.appendFileSync(process.env.CREW_ACPD_LOG, `${Date.now()} ${a.join(' ')}\n`)).catch(() => {})
+  } catch {} }
+}
 
 async function api(method, path, body) {
   const res = await fetch(`${BASE}${path}`, {
@@ -78,6 +83,23 @@ function cwdToMember(cwd) {
 // 活跃 ACP session 表:sessionId → { member, pid, role, known: Set(已推给客户端的消息签名), poller }
 const active = new Map()
 let sessionSeq = 0
+
+// 绑定即回放(2026-10-20):session/new / session/resume 返回后主动推「会话横幅 + 最近历史」,
+// 客户端打开即见在跟谁聊 + 之前聊了什么。CREW_DSH_REPLAY_N 控制(默认 12,0 关闭)。
+// SDK handler 返回后 client 仍可收 notification——setTimeout 异步推,不阻塞握手响应。
+const REPLAY_N = Number(process.env.CREW_DSH_REPLAY_N ?? 12)
+function replayOnBind(cx, id, rec, hist) {
+  rec.lastHist = hist   // 首条 prompt 注入历史用(handlePrompt 读)
+  // 会话名(官方语义:session_info_update.title = 客户端显示的动态会话名,状态栏常驻)。
+  // 历史回放不在此推——Martty 对未 started 会话不渲染主动 update(实测静默丢弃),
+  // 且 Zed/REPL 会与首条 prompt 注入重复;统一走「首条 prompt 注入」单一路径。
+  try {
+    cx.client.notify('session/update', {
+      sessionId: id,
+      update: { sessionUpdate: 'session_info_update', title: `${rec.role} · ${rec.pid}` },
+    })
+  } catch (e) { log('session_info_update 推送失败:', e?.message ?? e) }
+}
 
 const app = agent({ name: 'crew-acpd', version: '0.1.0' })
 
@@ -130,33 +152,8 @@ app.onRequest('session/new', async (cx) => {
   const hist = await fetchMessages(rec.member, rec.pid)
   for (const m of hist) rec.known.add(sig(m))
   log(`session ${id} → ${rec.member} (历史 ${hist.length} 条标记已读,只跟新)`)
-  // 绑定即回放(2026-10-20,用户拍板):session/new 返回后主动推「会话横幅 + 最近历史上下文」,
-  // 客户端(Martty/Zed/内置 REPL)打开即见在跟谁聊 + 之前聊了什么。
-  // SDK handler 返回后 client 仍可收 notification——setTimeout 异步推,不阻塞 session/new 响应。
-  const REPLAY_N = Number(process.env.CREW_DSH_REPLAY_N ?? 12)
-  if (REPLAY_N > 0) {
-    setTimeout(async () => {
-      try {
-        const push = text => cx.client.notify('session/update', {
-          sessionId: id,
-          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
-        })
-        await push(`〔会话:${rec.role} · ${rec.pid} —— JIMDB dsh 角色子代理〕\n`)
-        const recent = hist.slice(-REPLAY_N)
-        if (recent.length > 0) {
-          await push('── 最近历史上下文 ──\n')
-          for (const m of recent) {
-            const who = m.replyOut === true ? rec.role : 'user'
-            const note = (m.note ?? '').replace(/\n$/, '')
-            if (note) await push(`${who} › ${note}\n`)
-          }
-          await push('── 历史结束,继续对话 ──\n')
-        } else {
-          await push('(无历史消息,直接开始对话)\n')
-        }
-      } catch (e) { log('回放推送失败:', e?.message ?? e) }
-    }, 50)
-  }
+  // 绑定即回放:session/new 与 session/resume 共用(2026-10-20,用户拍板)
+  replayOnBind(cx, id, rec, hist)
   return { sessionId: id }
 })
 
@@ -182,11 +179,15 @@ app.onRequest('session/resume', async (cx) => {
   const members = await listMembers()
   const hit = members.find(m => m.member === member)
   if (!hit) throw new Error(`无此角色会话:${member}`)
-  const id = `acp-${++sessionSeq}`
-  const rec = { member: hit.member, pid: hit.pid, role: hit.role, known: new Set(), poller: null }
+  // 语义角色从 member 名取(平台 sessions[].role 恒 'teammate');resume 同样绑定即回放
+  const role = hit.member.split('-pipe-')[0]
+  const rec = { member: hit.member, pid: hit.pid, role, known: new Set(), poller: null }
   const hist = await fetchMessages(rec.member, rec.pid)
   for (const m of hist) rec.known.add(sig(m))
+  const id = `acp-${++sessionSeq}`
   active.set(id, rec)
+  log(`resume ${id} → ${rec.member}(历史 ${hist.length} 条已读,回放 ${Math.min(hist.length, REPLAY_N)} 条)`)
+  replayOnBind(cx, id, rec, hist)
   return { sessionId: id }
 })
 
@@ -214,6 +215,22 @@ async function handlePrompt(params, ctx) {
     sessionId: params.sessionId,
     update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
   })
+  // ②b 首条 prompt 注入历史前缀(2026-10-20,用户拍板「进去就能看历史」):
+  // Martty 等客户端对未 started 会话(session/new 后、首条 prompt 前)不渲染主动 update,
+  // 绑定时回放会被静默丢弃;故在首条 prompt 的回复流开头注入「历史上下文」块——
+  // 此时消息流已 started,任何客户端都会渲染。rec.replayedOnce 保证只注入一次。
+  if (!rec.replayedOnce) {
+    rec.replayedOnce = true
+    if (REPLAY_N > 0 && rec.lastHist?.length) {
+      await push(`── 历史上下文(${rec.role} · ${rec.pid})──\n`)
+      for (const m of rec.lastHist.slice(-REPLAY_N)) {
+        const who = m.replyOut === true ? rec.role : 'user'
+        const note = (m.note ?? '').replace(/\n$/, '')
+        if (note) await push(`${who} › ${note}\n`)
+      }
+      await push('── 历史结束 ──\n')
+    }
+  }
   // ③ 轮询增量:deadline 10 分钟;首轮回复可能要几十秒(角色跑一轮),耐心等;
   //    收到回复后进入 settle 检测(连续 20s 无新 assistant 消息 → end_turn)。
   const deadline = Date.now() + 10 * 60_000
@@ -251,6 +268,18 @@ function sig(m) { return `${m.ts}|${(m.note ?? '').slice(0, 48)}` }
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 // stdio 接线(Node stream → WHATWG stream,SDK 的 ndJsonStream 只认 Web Stream)
+// CREW_ACPD_TRACE=<file>:逐条记录收到的 JSON-RPC 方法名+时间戳(诊断懒会话等问题用)
+let traceStream = null
+if (process.env.CREW_ACPD_TRACE) {
+  const fs = await import('node:fs')
+  const tlog = line => { try {
+    const m = JSON.parse(line)
+    fs.appendFileSync(process.env.CREW_ACPD_TRACE, `${Date.now()} ${m.method ?? 'response:' + m.id ?? '?'}\n`)
+  } catch {} }
+  const rawIn = Readable.toWeb(process.stdin)
+  // ndJsonStream 自己读流,包不了;退而求其次:监听原始 stdin data 事件(不消费)
+  process.stdin.on('data', d => { for (const l of d.toString().split('\n')) if (l.trim()) tlog(l) })
+}
 const stream = ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin))
 app.connect(stream)
 log(`ready · base=${BASE} erp=${ERP}(session/list 看角色;session/new cwd=pipe://<pid>/<role>)`)

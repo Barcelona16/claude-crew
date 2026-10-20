@@ -315,38 +315,107 @@ const acpd = spawn('node', ['/Users/wangqiwang1/Desktop/claude-crew/acp/crew-acp
   env: {...process.env, JIMDB_BASE: 'http://127.0.0.1:${FAKE_PORT}', JIMDB_ERP: 'tester'},
 })
 const stream = ndJsonStream(Writable.toWeb(acpd.stdin), Readable.toWeb(acpd.stdout))
-let got = []
-// 只开会话 + 消费 update 流(prompt 之前收到的即"绑定即回放"内容)
-const acpClient = client({name:'banner-test', version:'0.0.1'})
-await acpClient.connectWith(stream, async (cx) => {
-  await cx.request(methods.agent.initialize, {
-    protocolVersion: PROTOCOL_VERSION,
-    clientCapabilities: {fs:{readTextFile:false, writeTextFile:false}},
+let titles = []
+// 绑定即推会话名:session_info_update.title(Martty 状态栏/会话信息显示;历史走首条 prompt 注入)
+await client({name:'banner-test', version:'0.0.1'})
+  .onNotification(methods.client.session.update, (cx) => {
+    const u = cx.params?.update
+    if (u?.sessionUpdate === 'session_info_update' && u.title) titles.push(u.title)
   })
-  const session = await cx.buildSession('pipe://PIPE-20261019-wand3/designer').start()
-  // 收 3 秒绑定时主动推的 update(不发任何 prompt)
-  const timeout = new Promise(r => setTimeout(r, 3000))
-  const reading = (async () => {
-    for (;;) {
-      const msg = await Promise.race([session.nextUpdate(), timeout.then(() => ({kind:'timeout'}))])
-      if (msg.kind === 'timeout' || msg.kind === 'stop') break
-      const u = msg.update
-      if (u?.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'text') got.push(u.content.text)
-    }
-  })()
-  await reading
-})
+  .connectWith(stream, async (cx) => {
+    await cx.request(methods.agent.initialize, {
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: {fs:{readTextFile:false, writeTextFile:false}},
+    })
+    const session = await cx.buildSession('pipe://PIPE-20261019-wand3/designer').start()
+    await new Promise(r => setTimeout(r, 1500))   // 收绑定推送,不发 prompt
+  })
 acpd.kill()
-const all = got.join('')
-if (!all.includes('〔') || !all.includes('designer')) throw new Error('缺会话横幅: ' + JSON.stringify(all))
-if (!all.includes('历史消息2')) throw new Error('缺历史回放: ' + JSON.stringify(all))
-console.log('BANNER-OK ' + JSON.stringify(all))
+if (!titles.some(t => t.includes('designer') && t.includes('wand3'))) {
+  throw new Error('缺 session_info_update 会话名: ' + JSON.stringify(titles))
+}
+console.log('BANNER-OK titles=' + JSON.stringify(titles))
 process.exit(0)
 EOF
   if out=$(node "$T/e2e-banner.mjs" 2>&1); then
-    _ok "㉒㉓ 绑定即回放:会话横幅 + 历史上下文(prompt 前主动推送)"
+    _ok "㉒㉓ 绑定即推会话名(session_info_update.title,历史改走首条 prompt 注入)"
   else
-    _ng "㉒㉓ 绑定回放失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
+    _ng "㉒㉓ 会话名推送失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
+  fi
+  # ㉔ session/resume 同样绑定即回放(Martty /resume 选会话的路径)
+  cat > "$T/e2e-resume.mjs" <<EOF
+import { client, methods, PROTOCOL_VERSION, ndJsonStream } from 'file:///Users/wangqiwang1/Desktop/claude-crew/acp/node_modules/@agentclientprotocol/sdk/dist/acp.js'
+import { spawn } from 'node:child_process'
+import { Readable, Writable } from 'node:stream'
+const acpd = spawn('node', ['/Users/wangqiwang1/Desktop/claude-crew/acp/crew-acpd.mjs'], {
+  env: {...process.env, JIMDB_BASE: 'http://127.0.0.1:${FAKE_PORT}', JIMDB_ERP: 'tester'},
+})
+const stream = ndJsonStream(Writable.toWeb(acpd.stdin), Readable.toWeb(acpd.stdout))
+let got = []
+await client({name:'resume-test', version:'0.0.1'})
+  .onNotification(methods.client.session.update, (cx) => {
+    const u = cx.params?.update
+    if (u?.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'text') got.push(u.content.text)
+  })
+  .connectWith(stream, async (cx) => {
+  await cx.request(methods.agent.initialize, {protocolVersion: PROTOCOL_VERSION, clientCapabilities:{fs:{readTextFile:false, writeTextFile:false}}})
+  const resp = await cx.request(methods.agent.session.resume, {sessionId: 'designer-pipe-20261019-wand3', cwd: '/tmp'})
+  if (!resp.sessionId) throw new Error('resume 响应缺 sessionId: ' + JSON.stringify(resp))
+  // resume 后首条 prompt → 注入历史前缀(单一路径;Martty 兼容)
+  const acpResp = await cx.request(methods.agent.session.prompt, {
+    sessionId: resp.sessionId, prompt: [{type: 'text', text: '你好'}],
+  })
+  await new Promise(r => setTimeout(r, 2000))
+})
+acpd.kill()
+const all = got.join('')
+if (!all.includes('历史消息2')) throw new Error('resume 后首条 prompt 缺历史注入: ' + JSON.stringify(all))
+console.log('RESUME-REPLAY-OK')
+process.exit(0)
+EOF
+  if out=$(node "$T/e2e-resume.mjs" 2>&1); then
+    _ok "㉔ resume 后首条 prompt 注入历史(与 new 同路径)"
+  else
+    _ng "㉔ resume 注入失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
+  fi
+  # ㉕ 首条 prompt 自动注入历史前缀(Martty 语义:未 started 的会话不渲染主动 update,
+  #     首条 prompt 后消息流已 started——历史作为回复首块注入,保证任何客户端可见)
+  cat > "$T/e2e-first-prompt.mjs" <<EOF
+import { client, methods, PROTOCOL_VERSION, ndJsonStream } from 'file:///Users/wangqiwang1/Desktop/claude-crew/acp/node_modules/@agentclientprotocol/sdk/dist/acp.js'
+import { spawn } from 'node:child_process'
+import { Readable, Writable } from 'node:stream'
+const acpd = spawn('node', ['/Users/wangqiwang1/Desktop/claude-crew/acp/crew-acpd.mjs'], {
+  env: {...process.env, JIMDB_BASE: 'http://127.0.0.1:${FAKE_PORT}', JIMDB_ERP: 'tester'},
+})
+const stream = ndJsonStream(Writable.toWeb(acpd.stdin), Readable.toWeb(acpd.stdout))
+let got = []
+await client({name:'first-prompt', version:'0.0.1'})
+  .onNotification(methods.client.session.update, (cx) => {
+    const u = cx.params?.update
+    if (u?.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'text') got.push(u.content.text)
+  })
+  .connectWith(stream, async (cx) => {
+    await cx.request(methods.agent.initialize, {protocolVersion: PROTOCOL_VERSION, clientCapabilities:{fs:{readTextFile:false, writeTextFile:false}}})
+    const session = await cx.buildSession('pipe://PIPE-20261019-wand3/designer').start()
+    const p = session.prompt('你好')
+    for (;;) {
+      const msg = await session.nextUpdate()
+      if (msg.kind === 'stop') break
+    }
+    await p
+  })
+acpd.kill()
+const all = got.join('')
+if (!all.includes('历史消息2')) throw new Error('首条 prompt 未注入历史: ' + JSON.stringify(all))
+if (!all.includes('回复:你好')) throw new Error('真实回复缺失: ' + JSON.stringify(all))
+if (!(all.indexOf('历史消息2') < all.indexOf('回复:你好'))) throw new Error('顺序:历史应在回复前')
+console.log('FIRST-PROMPT-REPLAY-OK')
+process.exit(0)
+EOF
+  if out=$(node "$T/e2e-first-prompt.mjs" 2>&1); then
+    _ok "㉕ 首条 prompt 注入历史前缀(历史→回复顺序)"
+  else
+    _ng "㉕ 首条注入失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
   fi
   kill $FAKE2_PID 2>/dev/null
 else

@@ -10,11 +10,19 @@
 ## [3.8.0] - 2026-10-20
 
 ### 新增
-- **绑定即回放(会话名 + 历史上下文)**:acpd 在 session/new 返回后主动推「会话横幅」
-  (`〔会话:<role> · <流水线>〕`)+ 最近 N 条历史(CREW_DSH_REPLAY_N,默认 12,0 关闭)。
-  Martty/Zed/内置 REPL 打开即见在跟谁聊 + 之前聊了什么;`user ›`/`<role> ›` 对话框格式。
+- **会话名常驻(session_info_update.title)**:acpd 绑定(session/new / resume)即推
+  `<role> · <流水线>`——Martty 界面显示当前会话名(实测渲染 ✓)。
+- **首条 prompt 注入历史前缀**:绑定后首次 prompt 的回复流开头注入「最近 N 条历史」
+  (`user ›`/`<role> ›` 对话框格式,CREW_DSH_REPLAY_N=12 默认,0 关闭)。
+  crew dsh --repl / Zed 实测渲染 ✓;Martty 实测不渲染首块前的内容(其内部策略,见下)。
 - 修复语义角色:rec.role 从 member 名取(`<role>-pipe-<pid>`)——平台 sessions[].role
-  恒 'teammate' 无语义,横幅/历史回放此前会错标 'teammate'。
+  恒 'teammate' 无语义,此前会错标。
+- 诊断设施:CREW_ACPD_TRACE(收到的 JSON-RPC 时间线)/ CREW_ACPD_LOG(文件日志镜像)。
+
+### 已知限制(实测结论)
+- Martty 对「首条 prompt 前的主动 update」不渲染(会话未 started 即静默丢弃);
+  对「prompt 响应流中真实回复前的块」也不渲染(内部策略)。历史在 Martty 里需靠
+  角色自述(发"总结当前进展")或等上游支持 session/resume replay(RFD 在推进)。
 
 ## [3.7.0] - 2026-10-20
 
