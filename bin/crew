@@ -1952,12 +1952,20 @@ cmd_dsh() {
         local pid_raw="${target_member##*-pipe-}"   # <role>-pipe-<pid> → pid
         local mirror="$HOME/.crew/dsh-work/$pid_raw"
         mkdir -p "$mirror"
-        if rsync -az --quiet -e "ssh -o BatchMode=yes -o ConnectTimeout=5" \
-             --exclude node_modules --exclude .git --exclude '*.log' --exclude target \
-             --max-size=2m \
-             "${CREW_DSH_RSYNC_SRC:-11.91.165.248:/root/claude-work/jimdb/.dsh/jimdb-work/PIPE-$pid_raw/}" "$mirror/" 2>/dev/null; then
+        _dsh_rsync() {
+          rsync -az --quiet -e "ssh -o BatchMode=yes -o ConnectTimeout=5" \
+            --exclude node_modules --exclude .git --exclude '*.log' --exclude target --exclude dist \
+            "${CREW_DSH_RSYNC_SRC:-11.91.165.248:/root/claude-work/jimdb/.dsh/jimdb-work/PIPE-$pid_raw/}" "$mirror/"
+        }
+        if [ -d "$mirror" ] && [ -n "$(ls -A "$mirror" 2>/dev/null)" ]; then
+          # 已有镜像:后台增量刷新,不阻塞 Toad 启动
+          (_dsh_rsync >/dev/null 2>&1 &) 
           proj_dir="$mirror"
-          log "工作区镜像 ← 远程 PIPE-$pid_raw → $mirror"
+          log "工作区镜像 $mirror(后台增量刷新中)"
+        elif _dsh_rsync 2>/dev/null; then
+          # 首次:前台全量拉(约 1 分钟内;完成后即时可见完整树)
+          proj_dir="$mirror"
+          log "工作区镜像 ← 远程 PIPE-$pid_raw 全量 → $mirror"
         else
           log "warn: 工作区镜像 rsync 失败(左树将指向当前目录)"
         fi

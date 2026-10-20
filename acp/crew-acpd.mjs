@@ -103,20 +103,17 @@ function replayOnBind(cx, id, rec, hist) {
     const DELAY = Number(process.env.CREW_DSH_BIND_REPLAY_DELAY_MS ?? 50)
     setTimeout(async () => {
       try {
-        // rawPush:绕开 SDK 直接写 stdout(诊断 SDK client 生命周期;成功则固化)
-        const rawPush = text => process.stdout.write(JSON.stringify({
-          jsonrpc: '2.0', method: 'session/update',
-          params: { sessionId: id, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } },
-        }) + '\n')
-        const push = process.env.CREW_DSH_RAW_PUSH === '1' ? rawPush : (text => cx.client.notify('session/update', {
+        // 消息区分(2026-10-20 用户拍板):历史里用户行用 user_message_chunk、角色行用
+        // agent_message_chunk —— Toad 等客户端分左右两侧渲染,对话一眼可辨。
+        const pushTyped = (kind, text) => cx.client.notify('session/update', {
           sessionId: id,
-          update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } },
-        }))
-        await push(`〔JIMDB Agent · ${rec.role} · ${rec.pid}(作者 wangqiwang1)最近历史〕\n`)
+          update: { sessionUpdate: kind, content: { type: 'text', text } },
+        })
+        await pushTyped('agent_message_chunk', `〔JIMDB Agent · ${rec.role} · ${rec.pid}(作者 wangqiwang1)最近历史〕\n`)
         for (const m of hist.slice(-REPLAY_N)) {
-          const who = m.replyOut === true ? rec.role : 'user'
+          const isUser = m.replyOut !== true
           const note = (m.note ?? '').replace(/\n$/, '')
-          if (note) await push(`${who} › ${note}\n`)
+          if (note) await pushTyped(isUser ? 'user_message_chunk' : 'agent_message_chunk', `${note}\n`)
         }
       } catch (e) { log('绑定回放失败:', e?.message ?? e) }
     }, DELAY)
@@ -272,13 +269,17 @@ async function handlePrompt(params, ctx) {
   if (!rec.replayedOnce) {
     rec.replayedOnce = true
     if (REPLAY_N > 0 && rec.lastHist?.length) {
-      await push(`── JIMDB Agent 历史上下文(${rec.role} · ${rec.pid} · by wangqiwang1)──\n`)
+      const pushTyped = (kind, text) => ctx.notify('session/update', {
+        sessionId: params.sessionId,
+        update: { sessionUpdate: kind, content: { type: 'text', text } },
+      })
+      await pushTyped('agent_message_chunk', `── JIMDB Agent 历史上下文(${rec.role} · ${rec.pid} · by wangqiwang1)──\n`)
       for (const m of rec.lastHist.slice(-REPLAY_N)) {
-        const who = m.replyOut === true ? rec.role : 'user'
+        const isUser = m.replyOut !== true
         const note = (m.note ?? '').replace(/\n$/, '')
-        if (note) await push(`${who} › ${note}\n`)
+        if (note) await pushTyped(isUser ? 'user_message_chunk' : 'agent_message_chunk', `${note}\n`)
       }
-      await push('── 历史结束 ──\n')
+      await pushTyped('agent_message_chunk', '── 历史结束 ──\n')
     }
   }
   // ③ 轮询增量:deadline 10 分钟;首轮回复可能要几十秒(角色跑一轮),耐心等;
