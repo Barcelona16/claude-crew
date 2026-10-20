@@ -1,0 +1,45 @@
+setup/test_crew_proxy_fixes.py
+  s_2aade3025ecf14::t_87eecbad0470d6 96,106,109,111-127,130-145,147-154
+  s_2aade3025ecf14::t_494d857b3f72cc 146
+  s_2aade3025ecf14::t_180cf9353c70a6 128-129
+  s_2aade3025ecf14::t_38851e651f4851 97-105,107-108,110
+backends/model-windows.conf.example
+  s_2aade3025ecf14::t_1512a193049230 3-7,9-13,16
+  s_2aade3025ecf14::t_9f3c128b9fb52c 15
+setup/crew_proxy.py
+  s_2aade3025ecf14::t_d15d2c8e528002 2509
+  s_2aade3025ecf14::t_316d3e8dcf2117 282-296,299-303,309-317
+  s_2aade3025ecf14::t_9aef21ccbe01d8 188-202,206,214-216,220-221,223,225-232,239-240,243-249,254,272-273,275,277-281,298,304-307,318
+  s_2aade3025ecf14::t_464979191bfec8 297
+  s_2aade3025ecf14::t_3405ac3a3ce92e 233-238,241-242,250-253,255-271,274,276
+  s_2aade3025ecf14::t_c406f24dce0470 2676-2678,2681
+  s_2aade3025ecf14::t_6490a0ddc10410 2609,2615
+  s_2aade3025ecf14::t_01e609738c093b 2675,2679-2680,2682-2683
+  s_2aade3025ecf14::t_7c057a982f1715 217-219,222,224
+  s_2aade3025ecf14::t_35950ed250964c 112-114,118-126
+  s_2aade3025ecf14::t_18ad429875084a 129-165,175-177
+  s_2aade3025ecf14::t_ed869da2234736 203-205,207-213
+  s_2aade3025ecf14::t_9d64ff28ed9835 790-793,798-802
+  s_2aade3025ecf14::t_06f598fb7f0efb 106,115
+  s_2aade3025ecf14::t_7489534996d42d 308
+  s_2aade3025ecf14::t_6293c6dc78bf65 2653
+  s_2aade3025ecf14::t_28a9c08cdd010e 2480
+CHANGELOG.md
+  s_2aade3025ecf14::t_0b7a1a37948146 11-29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "53754b955f9e3fa6dd294f566cfec64f6fdd17a2",
+  "prompts": {},
+  "sessions": {
+    "s_2aade3025ecf14": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a2a01ea2-3a2d-41fd-b6c7-b8dff396400e",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
