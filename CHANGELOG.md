@@ -7,6 +7,17 @@
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-10-20
+
+### 新增
+- **Martty 主题插件「Claude Code」**(JIMDB Agent 专用,作者 wangqiwang1):把 crew dsh
+  默认 Martty 富 UI 调成 Claude Code 观感——橙棕 brand #D97757 + 暖底深色 + 琥珀高亮,
+  含 light 模式。`acp/martty-plugins/claude-code-theme/plugin.json`(kind: theme),
+  装进 `~/.oma/plugins` 后 Martty 内 `/theme` → Claude Code 切换。
+  部署:`bash acp/martty-plugins/install.sh`(幂等,支持任意机器)。
+  踩坑记录:code.client 须经 applyClientHalf(Function 体普通 JS)——不支持 ESM export,
+  须 `return {name, inject, apply}` 对象字面量;离线全链路验证(发现→挂载→注册→激活)通过。
+
 ## [3.6.0] - 2026-10-20
 
 ### 变更

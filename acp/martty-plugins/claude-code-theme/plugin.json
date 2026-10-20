@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 0,
+  "id": "claude-code-theme",
+  "kind": "theme",
+  "name": "Claude Code",
+  "purpose": "JIMDB Agent 专用(作者 wangqiwang1):crew dsh 连远程 dsh 角色子代理的 Claude Code 风格调色——橙棕 brand #D97757 + 暖底深色 + 琥珀高亮",
+  "source": {
+    "pluginId": "tui-theme-claude-code",
+    "packageId": "claude-code-theme@local"
+  },
+  "code": {
+    "client": "// Claude Code 风格主题 —— JIMDB Agent 专用(claude-crew 生态)\n// 作者:wangqiwang1(2026-10-20)\n// 用途:crew dsh 默认 Martty 富 UI 连远程 dsh 角色子代理(lead/designer/coder/reviewer/tester)\n//       时,把界面调成 Claude Code 观感:橙棕 brand(#D97757)+ 暖底深色 + 琥珀高亮。\n// 激活:TUI 内 /theme → Claude Code;或 settings.json 的 tuiTheme 指定。\nconst palette = {\n  \"id\": \"claude-code\",\n  \"label\": \"Claude Code\",\n  \"dark\": {\n    \"bg\": \"#1a1816\",\n    \"surface\": \"#201d1a\",\n    \"panel\": \"#26221e\",\n    \"fg\": \"#e8e2d9\",\n    \"fg_secondary\": \"#a89f92\",\n    \"fg_tertiary\": \"#8a8175\",\n    \"caption\": \"#7d7468\",\n    \"brand\": \"#d97757\",\n    \"brand_soft\": \"#c9a26d\",\n    \"bubble_bg\": \"#e8e2d9\",\n    \"bubble_fg\": \"#1a1816\",\n    \"border\": \"#3d362f\",\n    \"code_bg\": \"#141210\",\n    \"ok\": \"#7fb069\",\n    \"warn\": \"#d9a353\",\n    \"err\": \"#e06c60\",\n    \"hint\": \"#8ab4c9\",\n    \"chip_bg\": \"#2b2723\"\n  },\n  \"light\": {\n    \"bg\": \"#faf9f7\",\n    \"surface\": \"#f1efeb\",\n    \"panel\": \"#e8e5e0\",\n    \"fg\": \"#2d2a26\",\n    \"fg_secondary\": \"#6b645c\",\n    \"fg_tertiary\": \"#8a8175\",\n    \"caption\": \"#948b7f\",\n    \"brand\": \"#c96342\",\n    \"brand_soft\": \"#b08957\",\n    \"bubble_bg\": \"#2d2a26\",\n    \"bubble_fg\": \"#faf9f7\",\n    \"border\": \"#d6d1c9\",\n    \"code_bg\": \"#f1efeb\",\n    \"ok\": \"#4d8f47\",\n    \"warn\": \"#b58a2a\",\n    \"err\": \"#cc4b40\",\n    \"hint\": \"#3d7ea6\",\n    \"chip_bg\": \"#e8e5e0\"\n  }\n}\n\nreturn {\n  name: 'tui-theme-claude-code',\n  inject: ['tuiTheme'],\n  apply(ctx) {\n    ctx.effect(() => ctx.tuiTheme.register(palette, { activate: false }))\n  },\n}\n"
+  }
+}

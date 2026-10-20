@@ -25,6 +25,7 @@ bin/crew-notify.js    inbox 信封 + wake(native messaging)
 acp/
   crew-acpd.mjs       ACP server:把远程 dsh 角色(平台 HTTP 面)桥成标准 ACP(stdio);CREW_DSH_TARGET 定向
   crew-dsh.mjs        内置轻量 REPL(--repl/--list/--resolve);crew dsh 默认路由 Martty(bin/crew cmd_dsh)
+  martty-plugins/     Martty 插件分发(claude-code-theme 主题;install.sh 装 ~/.oma/plugins)
   crew-mcp.mjs        MCP server:本地 CC 会话经 MCP 工具连远程角色
 lib/                  registry 等只读加载器
 setup/ccr_v3.py       CCR 3 配置管理(apply/drift;401 防复发核心)
