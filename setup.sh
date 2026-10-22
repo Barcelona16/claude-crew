@@ -131,7 +131,9 @@ EOF
   info "wrote key-policy.conf (empty — single-key passthrough by default)"; fi
 # BASE_URL points at crew-proxy (:8788), which routes to CCR (:3456). With no policy line
 # for a model, crew-proxy is a transparent passthrough, so single-key users are unaffected.
-mkpreset(){ cat > "$CFG/backends/$1.conf" <<EOF
+mkpreset(){
+  [ -e "$CFG/backends/$1.conf" ] && { info "preset $1 exists — leaving as is"; return; }
+  cat > "$CFG/backends/$1.conf" <<EOF
 BASE_URL=http://127.0.0.1:8788
 MODEL=$2
 TOKEN=test
@@ -148,8 +150,155 @@ PROXY_SCRIPT="$CFG/crew_proxy.py"
 CCR_ADAPTER="$CFG/ccr_v3.py"
 cp "$HERE/setup/crew_proxy.py" "$PROXY_SCRIPT" && info "installed crew-proxy -> $PROXY_SCRIPT"
 cp "$HERE/setup/ccr_v3.py" "$CCR_ADAPTER" && info "installed CCR 3 adapter -> $CCR_ADAPTER"
-SVCS="ccr"; have python3 && SVCS="ccr proxy"
-fill(){ sed -e "s|__NODE__|$NODE_BIN|g" -e "s|__NODE_DIR__|$NODE_DIR|g" -e "s|__CCR_CLI__|$CCR_CLI|g" -e "s|__PY__|$PY|g" -e "s|__PROXY_SCRIPT__|$PROXY_SCRIPT|g" -e "s|__HOME__|$HOME|g" -e "s|__CREW_CONFIG_DIR__|$CFG|g" -e "s|__CCR_PROVIDER_MAP__|$CCRCFG|g" -e "s|__CCR_ADAPTER__|$CCR_ADAPTER|g" -e "s|__CCR_WEB_TOKEN__|$CCR_WEB_TOKEN|g" -e "s|__CCR_WEB_PORT__|$CCR_WEB_PORT|g" -e "s|__CCR_GATEWAY_PORT__|$CCR_GATEWAY_PORT|g" "$1"; }
+# Never import/execute an installed proxy to discover its signing secret.
+JOYCODE_SCRIPT="$CFG/joycode_proxy.py"
+JOYCODE_SECRET_FILE="${JOYCODE_HMAC_SECRET_FILE:-$CFG/joycode-hmac-secret}"
+JOYCODE_TIMEOUT="${JOYCODE_UPSTREAM_TIMEOUT:-300}"
+JOYCODE_PORT="${JOYCODE_PORT:-8765}"
+JOYCODE_READY=0
+if JOYCODE_INSTALL_DIR="$CFG" JOYCODE_SOURCE_DIR="$HERE/setup" \
+   JOYCODE_UPSTREAM_TIMEOUT="$JOYCODE_TIMEOUT" JOYCODE_PORT="$JOYCODE_PORT" \
+   JOYCODE_HMAC_SECRET_FILE="$JOYCODE_SECRET_FILE" python3 - <<'PY'
+import ast, os, stat, tempfile
+from pathlib import Path
+
+cfg = Path(os.environ['JOYCODE_INSTALL_DIR'])
+src = Path(os.environ['JOYCODE_SOURCE_DIR'])
+dst = cfg / 'joycode_proxy.py'
+keyfile = Path(os.environ['JOYCODE_HMAC_SECRET_FILE'])
+
+def stop(message):
+    print('   JoyCode: ' + message)
+    raise SystemExit(1)
+
+def literal_secret(path):
+    tree = ast.parse(path.read_text())
+    writes = [n for n in ast.walk(tree) if isinstance(n, ast.Name)
+              and n.id == 'HMAC_SECRET' and isinstance(n.ctx, ast.Store)]
+    assignments = [n for n in tree.body if isinstance(n, (ast.Assign, ast.AnnAssign))
+                   and any(isinstance(t, ast.Name) and t.id == 'HMAC_SECRET'
+                           for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+    if len(writes) != 1 or len(assignments) != 1:
+        raise ValueError()
+    value = assignments[0].value
+    if isinstance(value, ast.Constant) and isinstance(value.value, str) and value.value.strip():
+        return value.value
+    # Known environment/file-based installs need no source-secret migration.
+    strings = {n.value for n in ast.walk(value) if isinstance(n, ast.Constant)
+               and isinstance(n.value, str)}
+    if path.read_bytes() == (src / 'joycode_proxy.py').read_bytes():
+        return None
+    # Recognize our file-loader format across future source upgrades without executing it.
+    if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id == '_load_hmac_secret' and not value.args and not value.keywords
+            and any(isinstance(n, ast.FunctionDef) and n.name == '_load_hmac_secret'
+                    for n in tree.body)):
+        return None
+    if (isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+            and value.func.attr == 'get' and isinstance(value.func.value, ast.Attribute)
+            and value.func.value.attr == 'environ'
+            and isinstance(value.func.value.value, ast.Name)
+            and value.func.value.value.id == 'os'
+            and not value.keywords and 1 <= len(value.args) <= 2
+            and isinstance(value.args[0], ast.Constant)
+            and value.args[0].value == 'JOYCODE_HMAC_SECRET'):
+        if len(value.args) == 1:
+            return None
+        default = value.args[1]
+        if isinstance(default, ast.Constant) and isinstance(default.value, str):
+            return default.value or None
+    raise ValueError()
+
+try:
+    timeout = int(os.environ['JOYCODE_UPSTREAM_TIMEOUT'])
+    port = int(os.environ['JOYCODE_PORT'])
+    if timeout <= 0 or not 1 <= port <= 65535:
+        stop('invalid timeout/port; kept installed proxy/service unchanged.')
+    old_secret = literal_secret(dst) if dst.exists() else None
+    supplied = os.environ.get('JOYCODE_HMAC_SECRET') or None
+    stored = None
+    if keyfile.exists() or keyfile.is_symlink():
+        st = keyfile.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            raise ValueError()
+        stored = keyfile.read_text().strip() or None
+        os.chmod(keyfile, 0o600)
+    if old_secret and any(v and v != old_secret for v in (supplied, stored)):
+        raise ValueError()
+    secret = supplied or stored or old_secret
+    if secret and (not secret.strip() or secret != secret.strip()):
+        raise ValueError()
+    if secret and (supplied or not stored):
+        # Persist environment-only credentials so service managers need no secret in templates.
+        fd, tmp = tempfile.mkstemp(prefix='.joycode-secret-', dir=keyfile.parent)
+        with os.fdopen(fd, 'w') as f:
+            os.fchmod(f.fileno(), 0o600)
+            f.write(secret + '\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, keyfile)
+    if dst.exists() and not secret:
+        stop('no usable secret; kept installed proxy and service unchanged. Configure JOYCODE_HMAC_SECRET_FILE and rerun.')
+    tree = ast.parse((src / 'joycode_proxy.py').read_text())
+    strings = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
+               and isinstance(n.value, str)}
+    if secret and not {'JOYCODE_HMAC_SECRET_FILE', 'JOYCODE_UPSTREAM_TIMEOUT'} <= strings:
+        stop('repository proxy lacks secret-file/timeout support; kept installed proxy/service. Upgrade the repository proxy, then rerun.')
+    # Copy only after migration checks; keep the existing helper on any failed check.
+    for name in ('_responses_compat.py', 'joycode_proxy.py'):
+        content = (src / name).read_bytes()
+        fd, tmp = tempfile.mkstemp(prefix='.joycode-install-', dir=cfg)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(content)
+        os.replace(tmp, cfg / name)
+    if not secret:
+        stop('proxy installed but service skipped: provide JOYCODE_HMAC_SECRET or a nonempty 0600 JOYCODE_HMAC_SECRET_FILE, then rerun.')
+    print('   JoyCode: proxy/helper installed; signing secret stored separately (0600).')
+except (OSError, ValueError, SyntaxError):
+    stop('migration unsafe or failed; kept existing proxy/service. Manually move the existing signing secret to a user-owned 0600 file, set JOYCODE_HMAC_SECRET_FILE, and rerun; do not overwrite the installed proxy first.')
+PY
+then
+  JOYCODE_READY=1
+fi
+SVCS="ccr proxy"
+[ "$JOYCODE_READY" = 1 ] && SVCS="$SVCS joycode"
+fill(){
+  case "$1" in *joycode*)
+    JOYCODE_TEMPLATE="$1" JOYCODE_PY="$PY" JOYCODE_SCRIPT="$JOYCODE_SCRIPT" \
+    CREW_HOME="$CFG" JOYCODE_HMAC_SECRET_FILE="$JOYCODE_SECRET_FILE" \
+    JOYCODE_UPSTREAM_TIMEOUT="$JOYCODE_TIMEOUT" JOYCODE_PORT="$JOYCODE_PORT" python3 - <<'PY'
+import os, plistlib
+from pathlib import Path
+p = Path(os.environ['JOYCODE_TEMPLATE'])
+values = {'__PY__': os.environ['JOYCODE_PY'], '__HOME__': os.environ['HOME'],
+          '__JOYCODE_SCRIPT__': os.environ['JOYCODE_SCRIPT'],
+          '__CREW_CONFIG_DIR__': os.environ['CREW_HOME'],
+          '__JOYCODE_SECRET_FILE__': os.environ['JOYCODE_HMAC_SECRET_FILE'],
+          '__JOYCODE_TIMEOUT__': os.environ['JOYCODE_UPSTREAM_TIMEOUT'],
+          '__JOYCODE_PORT__': os.environ['JOYCODE_PORT']}
+if '.plist.' in p.name:
+    def fill(v):
+        if isinstance(v, str):
+            for key, value in values.items():
+                v = v.replace(key, value)
+        elif isinstance(v, list):
+            v = [fill(x) for x in v]
+        elif isinstance(v, dict):
+            v = {k: fill(x) for k, x in v.items()}
+        return v
+    print(plistlib.dumps(fill(plistlib.loads(p.read_bytes()))).decode(), end='')
+else:
+    text = p.read_text()
+    for key, value in values.items():
+        # systemd quotes do not suppress specifiers; escape percent and control chars too.
+        value = value.replace('%', '%%').replace('\\', '\\\\').replace('"', '\\"')
+        value = value.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+        text = text.replace(key, value)
+    print(text, end='')
+PY
+    return $?;;
+  esac
+  sed -e "s|__NODE__|$NODE_BIN|g" -e "s|__NODE_DIR__|$NODE_DIR|g" -e "s|__CCR_CLI__|$CCR_CLI|g" -e "s|__PY__|$PY|g" -e "s|__PROXY_SCRIPT__|$PROXY_SCRIPT|g" -e "s|__HOME__|$HOME|g" -e "s|__CREW_CONFIG_DIR__|$CFG|g" -e "s|__CCR_PROVIDER_MAP__|$CCRCFG|g" -e "s|__CCR_ADAPTER__|$CCR_ADAPTER|g" -e "s|__CCR_WEB_TOKEN__|$CCR_WEB_TOKEN|g" -e "s|__CCR_WEB_PORT__|$CCR_WEB_PORT|g" -e "s|__CCR_GATEWAY_PORT__|$CCR_GATEWAY_PORT|g" "$1"; }
 port_up(){ (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&- 3<&-; return 0; }; return 1; }
 if [ "$OS" = Darwin ] && command -v launchctl >/dev/null 2>&1; then
   LA="$HOME/Library/LaunchAgents"; mkdir -p "$LA"; uid="$(id -u)"
@@ -163,7 +312,10 @@ if [ "$OS" = Darwin ] && command -v launchctl >/dev/null 2>&1; then
   info "launchd agents up ($SVCS)"
 elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   UD="$HOME/.config/systemd/user"; mkdir -p "$UD"; UNITS=""
-  for svc in $SVCS; do fill "$HERE/setup/systemd/claudecrew-$svc.service.tmpl" > "$UD/claudecrew-$svc.service"; UNITS="$UNITS claudecrew-$svc.service"; done
+  for svc in $SVCS; do
+    fill "$HERE/setup/systemd/claudecrew-$svc.service.tmpl" > "$UD/claudecrew-$svc.service" || { info "WARN: can't render $svc unit"; continue; }
+    UNITS="$UNITS claudecrew-$svc.service"
+  done
   systemctl --user daemon-reload 2>/dev/null || true
   systemctl --user enable --now $UNITS 2>/dev/null || info "systemctl enable failed — try: loginctl enable-linger $USER, then re-run"
   info "systemd --user units up ($SVCS)"
@@ -174,6 +326,13 @@ else
   nsvc(){ local n="$1" p="$2"; shift 2; port_up "$p" && { info "  $n already up (:$p)"; return; }; nohup "$@" >>"$CCRDIR/$n.nohup.log" 2>&1 & disown 2>/dev/null || true; info "  started $n (:$p, pid $!)"; }
   nsvc ccr "$CCR_WEB_PORT" env "CCR_WEB_AUTH_TOKEN=$CCR_WEB_TOKEN" "$NODE_BIN" "$CCR_CLI" start --no-open --port "$CCR_WEB_PORT"
   have python3 && nsvc proxy 8788 "$PY" "$PROXY_SCRIPT"
+  if [ "$JOYCODE_READY" = 1 ]; then
+    nsvc joycode "$JOYCODE_PORT" env -u JOYCODE_HMAC_SECRET \
+      "CREW_HOME=$CFG" "CREW_CONFIG_DIR=$CFG" \
+      "JOYCODE_HMAC_SECRET_FILE=$JOYCODE_SECRET_FILE" \
+      "JOYCODE_UPSTREAM_TIMEOUT=$JOYCODE_TIMEOUT" "JOYCODE_PORT=$JOYCODE_PORT" \
+      "$PY" "$JOYCODE_SCRIPT"
+  fi
 fi
 
 say "8) apply provider map through CCR 3 RPC"

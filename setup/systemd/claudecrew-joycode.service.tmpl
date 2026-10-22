@@ -1,0 +1,16 @@
+[Unit]
+Description=JoyCode local proxy (claude-crew)
+After=network-online.target
+[Service]
+ExecStart="__PY__" "__JOYCODE_SCRIPT__"
+Restart=on-failure
+RestartSec=5
+UMask=0077
+Environment="HOME=__HOME__"
+Environment="CREW_HOME=__CREW_CONFIG_DIR__"
+Environment="CREW_CONFIG_DIR=__CREW_CONFIG_DIR__"
+Environment="JOYCODE_HMAC_SECRET_FILE=__JOYCODE_SECRET_FILE__"
+Environment="JOYCODE_UPSTREAM_TIMEOUT=__JOYCODE_TIMEOUT__"
+Environment="JOYCODE_PORT=__JOYCODE_PORT__"
+[Install]
+WantedBy=default.target

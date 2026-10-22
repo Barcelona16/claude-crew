@@ -39,6 +39,8 @@ import logging
 import os
 import re
 import shutil
+import socket
+import select
 import subprocess
 import sys
 import threading
@@ -2471,13 +2473,14 @@ class Handler(BaseHTTPRequestHandler):
                     if spent + delay <= PT_RETRY_BUDGET:
                         log.info("passthrough retry %d/%d after %.1fs (code=%s model=%s)",
                                  attempt + 1, PT_MAX_RETRY, delay, e.code, model)
+                        e.close()
                         time.sleep(delay); spent += delay; attempt += 1
                         continue
                 # 不重试(不可重试码 / 次数或预算耗尽)→ 透传错误
-                if model:
-                    STATS.record("direct", model, e.code, ok=not _is_fail(e.code), forced=False, failover=False,
-                                 err_summary=_http_err_summary(e))
-                self._relay(e, streaming=False, model=model, req_body=body)
+                result = self._relay(e, streaming=False, model=model, req_body=body)
+                if model and not result["cancelled"]:
+                    STATS.record("direct", model, e.code, ok=False, forced=False, failover=False,
+                                 err_summary=f"HTTP {e.code}")
                 return
             except Exception as e:
                 # 连接错(timeout/reset 等)也可重试
@@ -2495,10 +2498,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             else:
                 if model:
-                    STATS.record("direct", model, getattr(resp, "status", 200), ok=True,
-                                 forced=False, failover=False, latency=time.time() - _t)
-                    captured = self._relay(resp, streaming=stream, capture=True)
-                    if captured:
+                    result = self._relay(resp, streaming=stream, capture=True)
+                    if not result["cancelled"]:
+                        STATS.record("direct", model, getattr(resp, "status", 200) if result["ok"] else "ERR",
+                                     ok=result["ok"], forced=False, failover=False,
+                                     latency=time.time() - _t, err_summary=result["error"])
+                    captured = result["body"]
+                    if result["ok"] and captured:
                         try:
                             it, ot = parse_usage(captured)
                             STATS.record_usage("direct", model, it, ot)
@@ -2600,19 +2606,25 @@ class Handler(BaseHTTPRequestHandler):
             except urllib.error.HTTPError as e:
                 if _is_fail(e.code) and not forced:
                     cd = cooldown_for(e.code, parse_retry_after(e.headers))
+                    if len(tried) + 1 >= len(policy):
+                        result = self._relay(e, streaming=False, model=realmodel, req_body=body)
+                        if not result["cancelled"]:
+                            BREAKER.record_fail(alias, time.time(), cd)
+                            STATS.record(alias, realmodel, e.code, ok=False, forced=forced,
+                                         failover=bool(tried), err_summary=f"HTTP {e.code}")
+                        return
                     BREAKER.record_fail(alias, now, cd)
                     STATS.record(alias, realmodel, e.code, ok=False, forced=forced, failover=bool(tried),
-                                 err_summary=_http_err_summary(e))
+                                 err_summary=f"HTTP {e.code}")
                     tried.append(alias)
                     log.warning("← key '%s' upstream %d; failing over", alias, e.code)
-                    if len(tried) >= len(policy):
-                        self._relay(e, streaming=False, model=realmodel, req_body=body)  # exhausted -> surface last error
-                        return
+                    e.close()
                     continue
                 # forced, or a non-failover status (e.g. 400 bad request) -> relay as-is
-                STATS.record(alias, realmodel, e.code, ok=not _is_fail(e.code), forced=forced, failover=bool(tried),
-                             err_summary=_http_err_summary(e))
-                self._relay(e, streaming=False, model=realmodel, req_body=body)
+                result = self._relay(e, streaming=False, model=realmodel, req_body=body)
+                if not result["cancelled"]:
+                    STATS.record(alias, realmodel, e.code, ok=False, forced=forced, failover=bool(tried),
+                                 err_summary=f"HTTP {e.code}")
                 return
             except Exception as e:
                 if not forced:
@@ -2630,14 +2642,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_err(502, f"crew-proxy: {e}")
                 return
 
-            # header phase reached with a good status -> commit to this key, relay body.
-            BREAKER.record_ok(alias)
-            STATS.record(alias, realmodel, getattr(resp, "status", 200), ok=True,
-                         forced=forced, failover=bool(tried), latency=time.time() - _t_send)
-            captured = self._relay(resp, streaming=stream, capture=True)
+            # Commit to this key, but do not call it healthy until relay completes.
+            result = self._relay(resp, streaming=stream, capture=True)
+            if not result["cancelled"]:
+                if result["ok"]:
+                    BREAKER.record_ok(alias)
+                elif not forced:
+                    BREAKER.record_fail(alias, time.time(), cooldown_for(0, None))
+                STATS.record(alias, realmodel, getattr(resp, "status", 200) if result["ok"] else "ERR",
+                             ok=result["ok"], forced=forced, failover=bool(tried),
+                             latency=time.time() - _t_send, err_summary=result["error"])
+            captured = result["body"]
             # Token accounting happens HERE — after the body is fully relayed to the
             # client — so parsing never adds latency to the forward path. Best-effort.
-            if captured:
+            if result["ok"] and captured:
                 try:
                     it, ot = parse_usage(captured)
                     STATS.record_usage(alias, realmodel, it, ot)
@@ -2651,6 +2669,88 @@ class Handler(BaseHTTPRequestHandler):
     # parsing by the caller). Streaming still forwards chunk-by-chunk in real time; we only
     # retain up to USAGE_STREAM_CAP bytes for the post-hoc usage scan, then stop retaining.
     def _relay(self, resp, streaming, capture=False, model=None, req_body=None):
+        # The relay owns every response, including HTTPError objects. Never retry
+        # from here: headers/body may already have reached the downstream client.
+        result = {"ok": False, "cancelled": False, "body": b"", "error": None}
+        stop = threading.Event()
+        upstream = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
+        deadline = time.monotonic() + 300
+
+        def disconnected():
+            conn = getattr(self, "connection", None)
+            if conn is None:
+                return False
+            try:
+                readable, _, _ = select.select([conn], [], [], 0)
+                return bool(readable) and conn.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+            except BlockingIOError:
+                return False
+            except (OSError, ValueError):
+                return True
+
+        def interrupt_read():
+            # shutdown wakes a blocked urllib read; close is done by its owner,
+            # not concurrently by the watcher (BufferedReader.close can block).
+            try:
+                upstream.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        def watch():
+            while not stop.wait(0.1):
+                if disconnected():
+                    result["cancelled"] = True
+                    interrupt_read()
+                    return
+                if time.monotonic() >= deadline:
+                    result["error"] = "upstream read budget exceeded"
+                    interrupt_read()
+                    return
+
+        watcher = None
+        try:
+            conn = getattr(self, "connection", None)
+            if conn is not None:
+                conn.settimeout(300)
+            if upstream is not None:
+                upstream.settimeout(300)
+                watcher = threading.Thread(target=watch, daemon=True)
+                watcher.start()
+            if disconnected():
+                result["cancelled"] = True
+                self.close_connection = True
+                return result
+            result["body"] = self._relay_body(resp, streaming, capture, model, req_body, result)
+        except (BrokenPipeError, ConnectionResetError):
+            if disconnected():
+                result["cancelled"] = True
+            else:
+                result["error"] = "upstream connection reset during read"
+        except Exception as exc:
+            result["error"] = "upstream relay read/write failed: " + type(exc).__name__
+        finally:
+            stop.set()
+            if watcher is not None:
+                watcher.join(0.2)
+            try:
+                resp.close()
+            except Exception:
+                result["error"] = result["error"] or "upstream responseclose failed"
+        if result["cancelled"] or result["error"]:
+            result["ok"] = False
+            self.close_connection = True
+            if not result["cancelled"]:
+                try:
+                    if not result.get("started"):
+                        self._send_err(502, "crew-proxy: upstream response read failed")
+                    elif streaming and not result.get("protocol_error") and result["error"] != "upstream protocol error or missing stream terminal":
+                        self.wfile.write(b'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"upstream stream read failed"}}\n\n')
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    result["cancelled"] = True
+        return result
+
+    def _relay_body(self, resp, streaming, capture, model, req_body, result):
         code = getattr(resp, "status", None) or getattr(resp, "code", 200)
         headers = resp.headers
         ct = headers.get("Content-Type", "application/json")
@@ -2686,36 +2786,107 @@ class Handler(BaseHTTPRequestHandler):
                 fwd_headers.append(("Content-Type", "application/json"))
             # fall through: `data` now holds either the original or the translated body
 
+        if not streaming and data is None:
+            data = resp.read()
         self.send_response(code)
         for k, v in fwd_headers:
             self.send_header(k, v)
         buf = bytearray() if capture else None
+        terminal = False
+        protocol_error = False
+        pending = bytearray()
+
+        def inspect_event(event):
+            nonlocal terminal, protocol_error
+            lines = event.decode("utf-8", "replace").splitlines()
+            if any(line.strip() == "event: error" for line in lines):
+                protocol_error = True
+                result["protocol_error"] = True
+            payload = "\n".join(line[5:].lstrip() for line in lines if line.startswith("data:"))
+            if not payload:
+                return
+            if payload == chr(91) + "DONE" + chr(93):
+                terminal = True
+                return
+            try:
+                obj = json.loads(payload)
+                if not isinstance(obj, dict):
+                    protocol_error = True
+                    return
+                kind = obj.get("type", "")
+                if obj.get("error") is not None or kind in ("error", "response.failed", "response.incomplete"):
+                    protocol_error = True
+                if kind in ("message_stop", "response.completed"):
+                    terminal = True
+                if any(c.get("finish_reason") is not None for c in obj.get("choices", []) if isinstance(c, dict)):
+                    terminal = True
+            except (ValueError, TypeError):
+                protocol_error = True
+            finally:
+                result["protocol_error"] = protocol_error
+
         if streaming:
             self.send_header("Connection", "close")
             self.end_headers()
-            try:
-                while True:
-                    chunk = resp.read(4096)
-                    if not chunk:
-                        break
+            result["started"] = True
+            self.close_connection = True
+            while True:
+                chunk = resp.read1(4096)
+                if not chunk:
+                    break
+                try:
                     self.wfile.write(chunk)
                     self.wfile.flush()
-                    if buf is not None and len(buf) < USAGE_STREAM_CAP:
-                        buf.extend(chunk)  # retain (capped) for post-relay usage scan
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+                except (BrokenPipeError, ConnectionResetError):
+                    result["cancelled"] = True
+                    raise
+                pending.extend(chunk)
+                # SSE permits LF, CRLF and CR; retain partial events across reads.
+                events = re.split(b"\r?\n\r?\n|\r\r", bytes(pending))
+                for event in events[:-1]:
+                    inspect_event(event)
+                pending[:] = events[-1]
+                if len(pending) > USAGE_STREAM_CAP:
+                    raise ValueError("oversized upstream SSE event")
+                if buf is not None and len(buf) < USAGE_STREAM_CAP:
+                    buf.extend(chunk[:USAGE_STREAM_CAP - len(buf)])
+            if pending.strip():
+                # An unterminated SSE event is not dispatched by compliant clients.
+                protocol_error = True
+            result["ok"] = code < 400 and terminal and not protocol_error
+            if not result["ok"]:
+                result["error"] = result["error"] or "upstream protocol error or missing stream terminal"
+                # Keep original error events verbatim; otherwise explicitly signal
+                # failure rather than fabricating a successful stream terminator.
+                if not protocol_error and not result["cancelled"] and result["error"] == "upstream protocol error or missing stream terminal":
+                    self.wfile.write(b'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"upstream stream ended without terminal"}}\n\n')
+                    self.wfile.flush()
         else:
             if data is None:
                 data = resp.read()
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
+            result["started"] = True
             try:
                 self.wfile.write(data)
+                self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
-                pass
+                result["cancelled"] = True
+                raise
+            result["ok"] = code < 400
+            if result["ok"]:
+                try:
+                    obj = json.loads(data)
+                    if isinstance(obj, dict) and (obj.get("error") is not None or obj.get("type") == "error" or obj.get("status") in ("failed", "incomplete")):
+                        result["ok"] = False
+                        result["error"] = "upstream protocol error"
+                except (ValueError, TypeError):
+                    if "json" in ct:
+                        result["ok"] = False
+                        result["error"] = "invalid upstream JSON"
             if buf is not None:
-                buf.extend(data)
-        return bytes(buf) if buf is not None else None
+                buf.extend(data[:USAGE_STREAM_CAP])
+        return bytes(buf) if buf is not None else b""
 
 
 def main():

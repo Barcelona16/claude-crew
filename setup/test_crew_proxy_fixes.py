@@ -152,5 +152,179 @@ ok("stats fallback floors to 10k", line and line[0].startswith("glm-5.2=300000")
 import shutil as _sh
 _sh.rmtree(cal_dir, ignore_errors=True)
 
+# Relay health: fragmented events, errors after terminal, and read/write failures.
+import io
+import socket
+import threading
+import time
+from types import SimpleNamespace
+from unittest.mock import patch
+
+class RelayResponse:
+    status = 200
+    headers = {"Content-Type": "text/event-stream"}
+    def __init__(self, chunks):
+        self.chunks = iter(chunks)
+        self.closed = False
+    def read1(self, size):
+        value = next(self.chunks, b"")
+        if isinstance(value, Exception):
+            raise value
+        return value
+    def read(self):
+        return self.read1(4096)
+    def close(self):
+        self.closed = True
+
+def relay_handler(writer=None):
+    h = object.__new__(cp.Handler)
+    h.wfile = writer if writer is not None else io.BytesIO()
+    h.headers = {}
+    h.send_response = lambda *a: None
+    h.send_header = lambda *a: None
+    h.end_headers = lambda: None
+    return h
+
+terminal = b'data: {"type":"message_stop"}\n\n'
+error_event = b'event: error\ndata: {"type":"error","error":{"message":"upstream rejected"}}\n\n'
+for name, chunks, expected in [
+    ("fragmented terminal", [terminal[:9], terminal[9:]], True),
+    ("CRLF split", [terminal.replace(b"\n", b"\r\n")[:-1], b"\n"], True),
+    ("finish plus usage", [b'data: {"choices":[{"finish_reason":"stop"}]}\n\n', b'data: {"usage":{"completion_tokens":7}}\n\n'], True),
+    ("missing terminal", [b'data: {"type":"content_block_delta"}\n\n'], False),
+    ("error after terminal", [terminal, error_event], False),
+    ("malformed event", [b'data: not-json\n\n', terminal], False),
+    ("unterminated terminal", [terminal.rstrip()], False),
+    ("timeout after terminal", [terminal, TimeoutError()], False),
+    ("reset after terminal", [terminal, ConnectionResetError()], False),
+]:
+    response = RelayResponse(chunks)
+    h = relay_handler()
+    result = h._relay(response, True, capture=True)
+    ok(name, result["ok"] is expected and response.closed and not result["cancelled"])
+    if name == "error after terminal":
+        ok("original error preserved", h.wfile.getvalue() == terminal + error_event)
+
+class CancelWriter:
+    def write(self, chunk):
+        raise BrokenPipeError()
+    def flush(self):
+        pass
+response = RelayResponse([terminal])
+result = relay_handler(CancelWriter())._relay(response, True)
+ok("downstream write cancellation", result["cancelled"] and not result["ok"] and response.closed)
+
+response = RelayResponse([TimeoutError()])
+response.headers = {"Content-Type": "application/json"}
+result = relay_handler()._relay(response, False)
+ok("nonstream read timeout", not result["ok"] and response.closed)
+response = RelayResponse([b'{"error":{"message":"rejected"}}'])
+response.headers = {"Content-Type": "application/json"}
+result = relay_handler()._relay(response, False)
+ok("HTTP 200 JSON error", not result["ok"] and response.closed)
+
+# Real sockets: client cancellation must interrupt an otherwise idle upstream read.
+server_sock, client_sock = socket.socketpair()
+read_sock, peer_sock = socket.socketpair()
+class IdleResponse(RelayResponse):
+    def __init__(self):
+        super().__init__([])
+        self.fp = SimpleNamespace(raw=SimpleNamespace(_sock=read_sock))
+    def read1(self, size):
+        return read_sock.recv(size)
+    def close(self):
+        super().close()
+        read_sock.close()
+h = relay_handler()
+h.connection = server_sock
+response = IdleResponse()
+box = []
+worker = threading.Thread(target=lambda: box.append(h._relay(response, True)))
+worker.start()
+time.sleep(0.05)
+client_sock.close()
+worker.join(2)
+ok("idle upstream cancellation bounded", not worker.is_alive() and box and box[0]["cancelled"] and response.closed)
+peer_sock.close()
+server_sock.close()
+
+# Accelerated clock exercises the absolute budget without a five-minute wait.
+server_sock, client_sock = socket.socketpair()
+read_sock, peer_sock = socket.socketpair()
+h = relay_handler()
+h.connection = server_sock
+response = IdleResponse()
+with patch.object(cp.time, "monotonic", side_effect=[0, 301]):
+    result = h._relay(response, True)
+ok("absolute read deadline wakes idle upstream", not result["ok"] and not result["cancelled"] and response.closed and result["error"] == "upstream read budget exceeded")
+client_sock.close()
+server_sock.close()
+peer_sock.close()
+
+# Both successful-HTTP call sites must defer health accounting and never replay.
+for direct in (False, True):
+    for outcome in ("ok", "error", "cancelled"):
+        h = relay_handler()
+        h.path = "/v1/messages"
+        h.command = "POST"
+        h._fwd_headers = lambda: {}
+        response = RelayResponse([terminal])
+        calls = []
+        def checked_relay(*args, **kwargs):
+            ok("statistics deferred", not calls)
+            response.close()
+            return {"ok": outcome == "ok", "cancelled": outcome == "cancelled", "body": b"", "error": "read failure" if outcome == "error" else None}
+        h._relay = checked_relay
+        with patch.object(cp.urllib.request, "urlopen", return_value=response) as opening, patch.object(cp.STATS, "record", side_effect=lambda *a, **kw: calls.append(kw)), patch.object(cp.BREAKER, "record_ok") as healthy, patch.object(cp.BREAKER, "record_fail") as failing:
+            body = json.dumps({"model":"MODEL_X", "stream":True}).encode()
+            if direct:
+                h._passthrough(body, model="MODEL_X", stream=True)
+            else:
+                h._route(body)
+            ok("no post-relay replay", opening.call_count == 1)
+            ok("final accounting", (not calls) if outcome == "cancelled" else len(calls) == 1 and calls[0]["ok"] == (outcome == "ok"))
+            if not direct:
+                ok("breaker final health", healthy.call_count == (outcome == "ok") and failing.call_count == (outcome == "error"))
+
+# Final HTTP errors must also defer accounting and exclude client cancellation.
+for direct in (False, True):
+    for status in (400, 503):
+        for cancelled in (False, True):
+            h = relay_handler()
+            h.path = "/v1/messages"
+            h.command = "POST"
+            h._fwd_headers = lambda: {}
+            calls = []
+            response = cp.urllib.error.HTTPError("http://localhost/test", status, "failure", {}, io.BytesIO(b'{}'))
+            def error_relay(resp, **kwargs):
+                ok("HTTP error accounting deferred", not calls)
+                resp.close()
+                return {"ok": False, "cancelled": cancelled, "body": b"", "error": None}
+            h._relay = error_relay
+            with patch.object(cp.urllib.request, "urlopen", side_effect=response) as opening, patch.object(cp, "PT_MAX_RETRY", 0), patch.object(cp.STATS, "record", side_effect=lambda *a, **kw: calls.append(kw)), patch.object(cp.BREAKER, "record_fail") as failing:
+                body = json.dumps({"model": "MODEL_X"}).encode()
+                if direct:
+                    h._passthrough(body, model="MODEL_X")
+                else:
+                    h._route(body)
+                ok("HTTP error no replay", opening.call_count == 1)
+                ok("HTTP error cancellation accounting", len(calls) == (not cancelled))
+                if not direct:
+                    ok("HTTP error breaker accounting", failing.call_count == (status == 503 and not cancelled))
+
+# Parsing terminal events must be independent of the usage capture cap.
+with patch.object(cp, "USAGE_STREAM_CAP", 64):
+    response = RelayResponse([b': heartbeat\n\n'] * 20 + [terminal])
+    result = relay_handler()._relay(response, True, capture=True)
+    ok("terminal beyond capture cap", result["ok"] and len(result["body"]) == 64 and response.closed)
+h = relay_handler()
+response = RelayResponse([error_event, TimeoutError()])
+result = h._relay(response, True)
+ok("protocol error followed by timeout preserved", not result["ok"] and h.wfile.getvalue() == error_event and response.closed)
+response = RelayResponse([b'{"ok":true}'])
+response.headers = {"Content-Type": "application/json"}
+result = relay_handler()._relay(response, False)
+ok("nonstream success closes response", result["ok"] and response.closed)
+
 print(f"\n{passed} passed, {failed} failed")
 raise SystemExit(1 if failed else 0)
