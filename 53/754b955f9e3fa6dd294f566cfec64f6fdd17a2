@@ -1,25 +1,7 @@
-setup/test_crew_proxy_fixes.py
-  s_508321935bdf2e::t_73d8ed53b10ad1 96-154
-setup/crew_proxy.py
-  s_508321935bdf2e::t_73d8ed53b10ad1 106,112-115,118-165,175-177,188-318,790-793,798-803,2480,2509,2609,2615,2653,2675-2683
-CHANGELOG.md
-  s_508321935bdf2e::t_73d8ed53b10ad1 11-29
-backends/model-windows.conf.example
-  s_508321935bdf2e::t_73d8ed53b10ad1 3-7,9-13,15-16
 ---
 {
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "1.5.7",
   "base_commit_sha": "53754b955f9e3fa6dd294f566cfec64f6fdd17a2",
-  "prompts": {},
-  "sessions": {
-    "s_508321935bdf2e": {
-      "agent_id": {
-        "tool": "claude",
-        "id": "4769c1c6-f9dc-449f-9d30-a2c74e5621c8",
-        "model": "GLM-5.3"
-      },
-      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
-    }
-  }
+  "prompts": {}
 }
