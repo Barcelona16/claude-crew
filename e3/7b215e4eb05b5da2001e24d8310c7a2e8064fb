@@ -1,0 +1,27 @@
+test/crew-statusline.test.sh
+  s_3b35268c555a87::t_bd1bc701ea1efe 42-43,48-49,54-55,107-108,112-113,118-119
+  s_3b35268c555a87::t_36773157853622 82-102
+CHANGELOG.md
+  s_3b35268c555a87::t_4cf5baeafb7e66 10-20
+bin/crew-statusline.sh
+  s_3b35268c555a87::t_556b2bd23d696b 226,228-229
+  s_3b35268c555a87::t_2063c64fbe40bd 160
+  s_3b35268c555a87::t_6e9163879ebd2c 172-225,227,230-240
+  s_3b35268c555a87::t_a53e9d479f224e 266,271,273
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "e37b215e4eb05b5da2001e24d8310c7a2e8064fb",
+  "prompts": {},
+  "sessions": {
+    "s_3b35268c555a87": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "83486b7e-b2dc-4dac-b152-f4ea7a693e92",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
