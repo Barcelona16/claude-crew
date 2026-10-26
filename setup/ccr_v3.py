@@ -29,6 +29,17 @@ class CcrRpcError(RuntimeError):
     """CCR management RPC could not complete."""
 
 
+def _needs_responses(model: str) -> bool:
+    """GPT-6 系模型必须走 OpenAI Responses API(llm-gw 实测 2026-10-26)。
+
+    llm-gw 的 /v1/chat/completions 对这些模型拒绝 function tools 与
+    reasoning_effort 共存(400 "Function tools with reasoning_effort are not
+    supported … use /v1/responses");GPT-5.x 系不受影响。与 bin/crew
+    ensure_model_in_ccr / sync-models 的判定保持同规则(改一处必同步另一处)。
+    """
+    return model.lower().startswith("gpt-6")
+
+
 def default_provider_map() -> Path:
     crew_home = os.environ.get("CREW_HOME")
     if not crew_home:
@@ -215,6 +226,34 @@ def command_validate(path: Path) -> int:
         for model in provider.get("models", [])
         if isinstance(model, str) and model
     }
+    # 2026-10-26 防复发守卫:llm-gw 的 GPT-6 系在 /v1/chat/completions 拒绝
+    # function tools + reasoning_effort(实测 gpt-6-sol / gpt-6.1-sol;GPT-5.x 不受
+    # 影响),必须以 type=openai_responses 走 /v1/responses。手改 map 或旧版脚本
+    # 落地回 chat/completions 形态时,在 validate 就拦下,而不是等会话 400。
+    # 豁免:joycode 本地代理(:8765)的 provider 对外是 chat/completions 入口,
+    # 但其内部按上游 adapterType 自动转 Responses API(joycode_proxy.py),不受限。
+    problems = []
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        base_url = str(provider.get("api_base_url") or "")
+        if "127.0.0.1" in base_url or "localhost" in base_url:
+            continue
+        for model in provider.get("models", []) if isinstance(provider.get("models"), list) else []:
+            if not (isinstance(model, str) and model):
+                continue
+            if _needs_responses(model) and provider.get("type") != "openai_responses":
+                problems.append(
+                    f"provider '{provider.get('name')}' model '{model}' is a GPT-6 family model "
+                    f"but is not routed via /v1/responses (need type='openai_responses' and "
+                    f"api_base_url without '/chat/completions'; got type={provider.get('type')!r}, "
+                    f"api_base_url={base_url!r}). chat/completions rejects function tools with "
+                    f"reasoning_effort for these models (400, 2026-10-26 incident)."
+                )
+    if problems:
+        for problem in problems:
+            print(f"invalid provider map: {problem}", file=sys.stderr)
+        return 1
     print(f"validated {len(providers)} provider(s) and {len(models)} model(s)", file=sys.stderr)
     return 0
 

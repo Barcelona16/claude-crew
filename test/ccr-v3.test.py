@@ -166,6 +166,71 @@ def _drift_env(url):
             else:
                 os.environ[name] = value
 
+with tempfile.TemporaryDirectory(prefix="crew-ccr-v3-guard-test-") as tmp:
+    root = Path(tmp)
+    # 2026-10-26 防复发守卫:GPT-6 系模型在 llm-gw 的 /v1/chat/completions 拒绝
+    # function tools + reasoning_effort(400 事故),validate 必须拦下错误形态,
+    # 放行 type=openai_responses 的正确形态。GPT-5.x 不受影响,照常放行。
+    g6_bad = root / "g6-bad.json"
+    g6_bad.write_text(json.dumps({
+        "gateway": {"api_key": "k"},
+        "Providers": [{
+            "name": "GPT-6.1-Sol-A-joybuilder-personal",
+            "api_base_url": "http://llm-gw.jd.local/v1/chat/completions",
+            "api_key": "UP", "models": ["GPT-6.1-Sol-A-joybuilder"],
+            "transformer": {"use": ["OpenAI"]},
+        }],
+    }), encoding="utf-8")
+    buf_err, buf_out = [], []
+    _err, _out = sys.stderr, sys.stdout
+    sys.stderr, sys.stdout = _Cap(buf_err), _Cap(buf_out)
+    try:
+        rc = ccr_v3.command_validate(g6_bad)
+    finally:
+        sys.stderr, sys.stdout = _err, _out
+    check("validate: GPT-6 chat/completions form is rejected", rc == 1)
+    joined = "".join(buf_err)
+    check("validate: rejection names openai_responses fix", "openai_responses" in joined)
+
+    g6_good = root / "g6-good.json"
+    g6_good.write_text(json.dumps({
+        "gateway": {"api_key": "k"},
+        "Providers": [{
+            "name": "GPT-6.1-Sol-A-joybuilder-personal",
+            "api_base_url": "http://llm-gw.jd.local/v1",
+            "api_key": "UP", "models": ["GPT-6.1-Sol-A-joybuilder"],
+            "transformer": {"use": ["OpenAI"]},
+            "type": "openai_responses",
+        }],
+    }), encoding="utf-8")
+    check("validate: GPT-6 responses form passes", ccr_v3.command_validate(g6_good) == 0)
+
+    g5_map = root / "g5.json"
+    g5_map.write_text(json.dumps({
+        "gateway": {"api_key": "k"},
+        "Providers": [{
+            "name": "GPT-5.5-joybuilder-personal",
+            "api_base_url": "http://llm-gw.jd.local/v1/chat/completions",
+            "api_key": "UP", "models": ["GPT-5.5-joybuilder"],
+            "transformer": {"use": ["OpenAI"]},
+        }],
+    }), encoding="utf-8")
+    check("validate: GPT-5.x chat/completions still passes", ccr_v3.command_validate(g5_map) == 0)
+
+    # 豁免:本地 joycode 代理 provider(chat/completions 入口但内部转 responses)不拦
+    jc_map = root / "joycode.json"
+    jc_map.write_text(json.dumps({
+        "gateway": {"api_key": "k"},
+        "Providers": [{
+            "name": "joycode-oai",
+            "api_base_url": "http://127.0.0.1:8765/v1/chat/completions",
+            "api_key": "joycode", "models": ["GPT-6.1 Sol", "GPT-6 Sol"],
+            "transformer": {"use": ["OpenAI"]},
+        }],
+    }), encoding="utf-8")
+    check("validate: local joycode proxy GPT-6 exemption passes", ccr_v3.command_validate(jc_map) == 0)
+
+
 with tempfile.TemporaryDirectory(prefix="crew-ccr-drift-test-") as tmp:
     root = Path(tmp)
     drift_map = root / "providers.json"

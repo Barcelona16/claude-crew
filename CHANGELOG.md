@@ -8,6 +8,28 @@
 ## [Unreleased]
 
 ### 修复
+- **GPT-6 系模型切过去即 400(2026-10-26 事故)**:用户洞察 —— 从选模型菜单选中
+  `GPT-6.1-Sol-A-joybuilder` 后每次对话 400("Function tools with reasoning_effort
+  are not supported … use /v1/responses")。根因两层:
+  ① llm-gw 的 GPT-6 系(gpt-6-sol/gpt-6.1-sol 实测;GPT-5.x 不受影响)在
+  /v1/chat/completions 拒绝 function tools 与 reasoning_effort 共存,而 CCR 网关
+  在 thinking 开启时会自动注入 reasoning_effort —— Claude Code 会话必带 tools,
+  所以必撞;错误提示的两个出路也都是死路(该模型 reasoning_effort 不支持
+  'none',唯一活路 /v1/responses)。
+  ② `ensure_model_in_ccr`/sync-models 落地新模型时硬编码 `/v1/chat/completions`,
+  这就是坏 provider 的出生地。修复:GPT-6 系落地改为 `type=openai_responses` +
+  base 不带 chat/completions 后缀(CCR 3.1.3 的 Responses adapter 自动做双向
+  转换;注意显式 type 字段优先于 URL 推断,router-plugin 对 legacy provider
+  不认 /responses URL 后缀 —— 只改 URL 没用,2026-10-26 实测)。
+  防复发:`ccr_v3.py validate` 加守卫 —— GPT-6 系模型若以 chat/completions 形态
+  出现(非本地 joycode 代理豁免)直接 rc=1 拦下,手改 map 也能在 validate 阶段
+  发现,而不是等会话 400。端到端验证:CCR 直打 tools+reasoning_effort+流式
+  全通(function_call 正确返回)。
+- **statusline ctx 段加已消耗 token 数**:用户要求 —— `ctx48% (951k left)` 升级为
+  `ctx48% (951k/951k left)` 形态(累计消耗/剩余),一眼看出这个会话烧了多少;
+  M 级消耗显示一位小数(1.2M)。
+
+### 修复
 - **上下文窗口自动校准(报错即修)**:用户洞察 —— 报错那一刻上游就告诉我们真实窗口。
   实测 llm-gw 溢出错误自带数字(GLM-5.3-Local:`context length (1048576 tokens)`;
   kimi-k3:`exceeded model token limit: 1048576`);GLM-5.2(code 1261 "Prompt 超长")

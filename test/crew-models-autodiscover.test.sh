@@ -175,6 +175,29 @@ ensure_model_in_ccr personal "p-existing/model-A"
 applied3=$(grep -c "called" "$apply_calls" 2>/dev/null | tr -d ' ')
 [ "$applied3" = "1" ] && _ok "⑪ 全名 provider/model → 直接跳过" || _ng "⑪ 全名仍触发 apply=$applied3" ""
 
+# --- ⑫-⑭ GPT-6 系落地走 /v1/responses(2026-10-26 事故防复发)---
+# llm-gw 对 gpt-6 系在 /v1/chat/completions 拒绝 tools+reasoning_effort(400);
+# 落地必须:api_base_url 不带 /chat/completions + type=openai_responses。
+echo "--- GPT-6 系落地(ensure_model_in_ccr)---"
+ensure_model_in_ccr personal GPT-6.1-Sol-A-joybuilder
+g6=$(python3 -c "
+import json; c=json.load(open('$T/providers.json'))
+p=[x for x in c['Providers'] if x.get('name')=='GPT-6.1-Sol-A-joybuilder-personal']
+p=p[0] if p else {}
+print(p.get('type','')+'|'+p.get('api_base_url',''))")
+[ "${g6%%|*}" = "openai_responses" ] && _ok "⑫ GPT-6 系 provider 带 type=openai_responses" || _ng "⑫ 缺 type" "$g6"
+case "${g6#*|}" in
+  */chat/completions) _ng "⑬ GPT-6 系 URL 仍是 chat/completions" "$g6" ;;
+  *) _ok "⑬ GPT-6 系 URL 无 /chat/completions(走 responses)" ;;
+esac
+ensure_model_in_ccr personal GPT-5.5-joybuilder
+g5=$(python3 -c "
+import json; c=json.load(open('$T/providers.json'))
+p=[x for x in c['Providers'] if x.get('name')=='GPT-5.5-joybuilder-personal']
+p=p[0] if p else {}
+print((p.get('type') or '')+'|'+p.get('api_base_url',''))")
+[ "${g5%%|*}" = "" ] && case "${g5#*|}" in */chat/completions) _ok "⑭ GPT-5.x 仍走 chat/completions(无 type)";; *) _ng "⑭ GPT-5.x URL 异常" "$g5";; esac || _ng "⑭ GPT-5.x 不应有 type" "$g5"
+
 # --- ⑥ joycode:走 :8765(本测试没有 8765,fail-open 应仍返回 joycode 静态 GLM-5.3)---
 out=$(JOYCODE_PORT=19998 auto_discover_models joycode 2>/dev/null)
 echo "$out" | grep -q "GLM-5.3" && _ok "⑥ joycode 上游不可达时回落静态表(GLM-5.3 在)" || _ng "⑥ joycode 回落失败" "$out"

@@ -151,13 +151,25 @@ if [ -n "$used" ] && [ "$used" != "null" ] 2>/dev/null && { [ -z "$in_tok" ] || 
     fi
   fi
   used="${used%.*}"  # 42.0 -> 42(有小数时)
+  # 已消耗 token 千位简写(2026-10-26):用户要求 ctx 段同时显示累计消耗,与剩余并列。
+  # in_tok 此分支必为 >0(usage>0 分支),直接简写;M 级显示一位小数(951k/1.2M)。
+  used_tok_k=""
+  if [ -n "$in_tok" ] && [ "$in_tok" -gt 0 ] 2>/dev/null; then
+    if [ "$in_tok" -ge 1000000 ]; then
+      used_tok_k="$(awk -v n="$in_tok" 'BEGIN{printf "%.1fM", n/1000000}')"
+    else
+      used_tok_k="$(( in_tok / 1000 ))k"
+    fi
+  fi
   case "$used" in
     ''|*[!0-9]*) ;;                       # 非数字:整段跳过
     *) if [ "$used" -ge 90 ]; then c_ctx=$'\033[31m'    # red   >=90% 快压缩了
        elif [ "$used" -ge 75 ]; then c_ctx=$'\033[33m'  # yellow 75-89%
        else c_ctx=$'\033[32m'                           # green <75%
        fi
-       if [ -n "$left_k" ] && [ "$used" -gt 0 ]; then
+       if [ -n "$left_k" ] && [ -n "$used_tok_k" ]; then
+         ctx_seg="$(printf ' %s·%s %sctx%s%% %s(%s/%s left)%s' "$c_dim" "$c_reset" "$c_ctx" "$used" "$c_ctx" "$used_tok_k" "$left_k" "$c_reset")"
+       elif [ -n "$left_k" ]; then
          ctx_seg="$(printf ' %s·%s %sctx%s%% %s(%s left)%s' "$c_dim" "$c_reset" "$c_ctx" "$used" "$c_ctx" "$left_k" "$c_reset")"
        else
          ctx_seg="$(printf ' %s·%s %sctx%s%%%s' "$c_dim" "$c_reset" "$c_ctx" "$used" "$c_reset")"

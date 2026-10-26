@@ -869,6 +869,17 @@ ensure_model_in_ccr() {
           base=(process.env.BASE||"").replace(/\/$/,"");
     // 无 owner 信息(REMOTE 空):claude 系名判 anthropic,其余 openai(与上游 owned_by 对齐的经验规则)
     const isAnthropic=m=> isjc ? /claude/i.test(m) : /claude/i.test(m);
+    // GPT-6 系(llm-gw 2026-10-26 实测)在 /v1/chat/completions 拒绝 tools+reasoning_effort 组合
+    // (gpt-6-sol/gpt-6.1-sol 全中;gpt-5.x 不受影响),必须走 /v1/responses。
+    // CCR 判定 adapter 时显式 type 字段优先于 URL 推断(router-plugin jc()),URL 后缀它不认 —— 只改 URL 没用。
+    const needsResponses=m=>/^gpt-6/i.test(m)&&!/gpt-6\.1-sol-pro-fast/i.test(m);
+    const mkProvider=(m,anth)=>{
+      const p={ name:m+"-"+alias,
+        api_base_url: base + (anth?"/anthropic/v1/messages":needsResponses(m)?"/v1":"/v1/chat/completions"),
+        api_key: kv, models:[m], transformer:{ use:[anth?"Anthropic":"OpenAI"] } };
+      if(!anth&&needsResponses(m)) p.type="openai_responses";
+      return p;
+    };
     let added=0;
     if(isjc){
       const pj=cfg.Providers.find(p=>p.name==="joycode"), po=cfg.Providers.find(p=>p.name==="joycode-oai");
@@ -883,9 +894,7 @@ ensure_model_in_ccr() {
         if(m.indexOf(" ")>=0) continue;
         const anth=isAnthropic(m); const pname=m+"-"+alias;
         if(cfg.Providers.some(p=>p.name===pname)) continue;
-        cfg.Providers.push({ name:pname,
-          api_base_url: base + (anth?"/anthropic/v1/messages":"/v1/chat/completions"),
-          api_key: kv, models:[m], transformer:{ use:[anth?"Anthropic":"OpenAI"] } });
+        cfg.Providers.push(mkProvider(m,anth));
         added++;
       }
     }
@@ -1088,6 +1097,15 @@ EOF
     const pick=(process.env.PICK||"").split("\n").map(s=>s.trim()).filter(Boolean);
     const isjc=process.env.ISJC==="1", alias=process.env.ALIAS, kv=process.env.KV, base=(process.env.BASE||"").replace(/\/$/,"");
     const isAnthropic=m=> isjc ? /claude/i.test(m) : (owner[m]||"").toLowerCase()==="anthropic";
+    // GPT-6 系必须走 /v1/responses(同 ensure_model_in_ccr;llm-gw 拒绝 chat/completions+tools,2026-10-26)
+    const needsResponses=m=>/^gpt-6/i.test(m)&&!/gpt-6\.1-sol-pro-fast/i.test(m);
+    const mkProvider=(m,anth)=>{
+      const p={ name:m+"-"+alias,
+        api_base_url: base + (anth?"/anthropic/v1/messages":needsResponses(m)?"/v1":"/v1/chat/completions"),
+        api_key: kv, models:[m], transformer:{ use:[anth?"Anthropic":"OpenAI"] } };
+      if(!anth&&needsResponses(m)) p.type="openai_responses";
+      return p;
+    };
     let added=0, skipped=[];
     if(isjc){
       const pj=cfg.Providers.find(p=>p.name==="joycode"), po=cfg.Providers.find(p=>p.name==="joycode-oai");
@@ -1102,9 +1120,7 @@ EOF
         if(m.indexOf(" ")>=0){ skipped.push(m+"(含空格)"); continue; }
         const anth=isAnthropic(m); const pname=m+"-"+alias;
         if(cfg.Providers.some(p=>p.name===pname)){ skipped.push(m+"(已存在)"); continue; }
-        cfg.Providers.push({ name:pname,
-          api_base_url: base + (anth?"/anthropic/v1/messages":"/v1/chat/completions"),
-          api_key: kv, models:[m], transformer:{ use:[anth?"Anthropic":"OpenAI"] } });
+        cfg.Providers.push(mkProvider(m,anth));
         added++;
       }
     }
