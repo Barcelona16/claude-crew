@@ -1,0 +1,37 @@
+test/crew-statusline.test.sh
+  s_3b35268c555a87::t_04419cc2f7bd1f 82-84,86-87,89
+  s_3b35268c555a87::t_25473396f6a375 42-43,48-49,54-55,85,88,90,94-95,99-100,105-106
+bin/crew
+  s_3b35268c555a87::t_0226808450fb69 1100-1108,1123
+  s_3b35268c555a87::t_9bd34ac0fd28d3 872-882,897
+setup/ccr_v3.py
+  s_3b35268c555a87::t_953db2a1d43b4e 32-42
+  s_3b35268c555a87::t_ba9f1a7021a27d 233-234,240-241
+  s_3b35268c555a87::t_72a3384008b6fe 229-232,235-239,242-256
+test/crew-models-autodiscover.test.sh
+  s_3b35268c555a87::t_ff22a09a7f1d38 178-200
+bin/crew-statusline.sh
+  s_3b35268c555a87::t_8292b3d4a0beb8 154-163,170-172
+CHANGELOG.md
+  s_3b35268c555a87::t_539ce5d5028c83 11-31
+test/ccr-v3.test.py
+  s_3b35268c555a87::t_57cb7aca8c8496 220-232
+  s_3b35268c555a87::t_a9c9b556a8879d 194,207
+  s_3b35268c555a87::t_51590797c6e470 169-193,195-206,208-219
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "94ee70cd6b6f87f37fdea1017bc93ed5b8001652",
+  "prompts": {},
+  "sessions": {
+    "s_3b35268c555a87": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "83486b7e-b2dc-4dac-b152-f4ea7a693e92",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
