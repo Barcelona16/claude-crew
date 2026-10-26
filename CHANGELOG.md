@@ -7,6 +7,17 @@
 
 ## [Unreleased]
 
+### 新增
+- **statusline tot 段:会话累计消耗 token**(2026-10-26 用户需求:判断「会话是不是
+  跑太久、烧太多额度」;ctx 是当前窗口占用,压缩后归零,回答不了这个问题)。
+  形态:`⬡ 会话 · 模型 · 🔑key · ctx48% (98k left) · tot665k · 分支 · 目录`。
+  口径:Σ transcript 每条 assistant message.usage 的 input+output —— **cache_read/
+  cache_creation 不计入**(缓存价约 1/10,混入会虚高一个数量级,失去参考价值;
+  本会话实测:in+out 665k vs 含 cache 19.6M)。数据源:stdin transcript_path 优先,
+  缺失按 session_id + cwd 拼 projects 路径。性能:mtime+size 缓存(变更才重扫,
+  6.5MB 全扫实测 ~75ms)。分级变色:<1M 绿 / ≥1M 黄 / ≥3M 红 / ≥10M 深红。
+  M 级一位小数(1.6M);<1000 显原值;0/无 transcript 整段静默省略。
+
 ### 修复
 - **GPT-6 系模型切过去即 400(2026-10-26 事故)**:用户洞察 —— 从选模型菜单选中
   `GPT-6.1-Sol-A-joybuilder` 后每次对话 400("Function tools with reasoning_effort

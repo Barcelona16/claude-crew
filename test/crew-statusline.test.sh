@@ -39,20 +39,20 @@ J_NOWIN='{"session_id":"t","model":{"display_name":"Qwen-Test"},"workspace":{"cu
 # 模型经 CREW_STATUSLINE_MODEL 注入(keyresolve 读真机 CCR,测试环境隔离不了它)
 SLM="GLM-5.3-Local-joybuilder" SLM_KEY="personal"
 out=$(render "$J_OK")
-echo "$out" | grep -qF 'ctx22%' && echo "$out" | grep -qF '(44k/955k left)' \
-  && _ok "正常数据显 ctx22% + (44k/955k left;含已消耗,GLM-5.3=1M)" || _ng "正常数据渲染: $out"
+echo "$out" | grep -qF 'ctx22%' && echo "$out" | grep -qF '(955k left)' \
+  && _ok "正常数据显 ctx22% + (955k left;GLM-5.3=1M)" || _ng "正常数据渲染: $out"
 printf '%s' "$out" | grep -qF $'\033[32m' && _ok "22% 用绿色" || _ng "22% 未用绿色"
 
 # ② 高占用:红(31)
 out=$(render "$J_HIGH")
-echo "$out" | grep -qF 'ctx95%' && echo "$out" | grep -qF '(190k/810k left)' \
-  && _ok "95% 显 ctx95% + (190k/810k left;1M 窗口)" || _ng "95% 渲染: $out"
+echo "$out" | grep -qF 'ctx95%' && echo "$out" | grep -qF '(810k left)' \
+  && _ok "95% 显 ctx95% + (810k left;1M 窗口)" || _ng "95% 渲染: $out"
 printf '%s' "$out" | grep -qF $'\033[31m' && _ok "95% 用红色" || _ng "95% 未用红色"
 
 # ③ 黄档
 out=$(render "$J_MID")
-echo "$out" | grep -qF 'ctx80%' && echo "$out" | grep -qF '(160k/840k left)' \
-  && _ok "80% 显 ctx80% + (160k/840k left;1M 窗口)" || _ng "80% 渲染: $out"
+echo "$out" | grep -qF 'ctx80%' && echo "$out" | grep -qF '(840k left)' \
+  && _ok "80% 显 ctx80% + (840k left;1M 窗口)" || _ng "80% 渲染: $out"
 printf '%s' "$out" | grep -qF $'\033[33m' && _ok "80% 用黄色" || _ng "80% 未用黄色"
 
 # ④ usage=0:ctx? 不显 0%
@@ -79,31 +79,44 @@ SLM="GLM-5.3-Local-joybuilder" SLM_KEY="personal"
 out=$(render "$J_OK")
 echo "$out" | grep -q '◧' && _ng "旧符号 ◧ 仍出现: $out" || _ok "旧符号 ◧ 已弃用"
 
-# ⑧b 消耗过百万 → M 级一位小数显示(1.2M/800k left),不挤爆 statusline
-# (2M 窗口经 conf 声明 —— 消耗 1.2M 时剩余 800k,覆盖 M+k 混合显示)
-printf 'glm-5.3=2000000\n' > "$T/model-windows.conf"
-SLM="GLM-5.3-Local-joybuilder" SLM_KEY="personal"
-out=$(render '{"session_id":"t","model":{"display_name":"GLM-5.3"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":60,"context_window_size":200000,"total_input_tokens":1200000}}')
-echo "$out" | grep -qF '(1.2M/800k left)' \
-  && _ok "M 级消耗显 1.2M(一位小数)" || _ng "M 级渲染: $out"
-rm -f "$T/model-windows.conf"
+# ⑧c tot 累计消耗段(2026-10-26):Σ usage(input+output,不含 cache)千位简写 + 分级变色
+# 造一份 fake transcript(2 条 assistant usage:100+200 in,50+50 out → tot 400)
+mkdir -p "$T/proj"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' \
+  '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":9999}}}' \
+  '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":200,"output_tokens":50}}}' \
+  > "$T/proj/fake.jsonl"
+J_TOT="{\"session_id\":\"fake\",\"transcript_path\":\"$T/proj/fake.jsonl\",\"model\":{\"display_name\":\"GLM-5.3\"},\"workspace\":{\"current_dir\":\"/tmp\"}}"
+out=$(render "$J_TOT")
+echo "$out" | grep -qF 'tot400 ' && _ok "tot 段显 Σin+out=400(cache 不计入)" || _ng "tot 渲染: $out"
+printf '%s' "$out" | grep -qF $'\033[32m' && _ok "400 tokens 用绿色" || _ng "400 未用绿色"
+# M 级一位小数 + 黄色
+printf '%s\n' '{"type":"assistant","message":{"usage":{"input_tokens":1500000,"output_tokens":100000}}}' > "$T/proj/big.jsonl"
+J_BIG="{\"session_id\":\"big\",\"transcript_path\":\"$T/proj/big.jsonl\",\"model\":{\"display_name\":\"GLM-5.3\"},\"workspace\":{\"current_dir\":\"/tmp\"}}"
+out=$(render "$J_BIG")
+echo "$out" | grep -qF 'tot1.6M ' && _ok "M 级消耗显 1.6M(一位小数)" || _ng "M 级 tot 渲染: $out"
+printf '%s' "$out" | grep -qF $'\033[33m' && _ok "1.6M 用黄色" || _ng "1.6M 未用黄色"
+# 无 transcript(transcript_path 缺 + session_id 拼不出)→ tot 段静默省略
+J_NOTOT='{"session_id":"nope","model":{"display_name":"GLM-5.3"},"workspace":{"current_dir":"/nonexistent-dir-xyz"}}'
+out=$(render "$J_NOTOT")
+echo "$out" | grep -q 'tot' && _ng "无 transcript 仍显 tot: $out" || _ok "无 transcript 时 tot 段省略"
 
 # ⑨ model-windows.conf 生效(2026-10-20):conf 声明 glm-5.3=1000000 → left 按 1M 算
 printf 'glm-5.3=1000000\n' > "$T/model-windows.conf"
 out=$(render "$J_OK")
-echo "$out" | grep -qF 'ctx22%' && echo "$out" | grep -qF '(44k/955k left)' \
-  && _ok "conf 窗口表生效:GLM-5.3 按 1M 算 (44k/955k left)" || _ng "conf 窗口表未生效: $out"
+echo "$out" | grep -qF 'ctx22%' && echo "$out" | grep -qF '(955k left)' \
+  && _ok "conf 窗口表生效:GLM-5.3 按 1M 算 (955k left)" || _ng "conf 窗口表未生效: $out"
 # conf 改窗口(500k)→ 覆盖 CC 传的 200k(真实场景:上游窗口与假定不符)
 printf 'glm-5.3=500000\n' > "$T/model-windows.conf"
 out=$(render "$J_OK")
-echo "$out" | grep -qF '(44k/455k left)' \
-  && _ok "conf 可改窗口:glm-5.3=500k → (44k/455k left)" || _ng "conf 改窗口未生效: $out"
+echo "$out" | grep -qF '(455k left)' \
+  && _ok "conf 可改窗口:glm-5.3=500k → (455k left)" || _ng "conf 改窗口未生效: $out"
 # conf 删掉 + 表外模型 → 用 CC 传的 window(Qwen 不在硬编码表,CC 传 200k 就信 200k)
 rm -f "$T/model-windows.conf"
 SLM="Kimi" SLM_KEY=""
 printf '{"session_id":"t","model":{"display_name":"Kimi"},"workspace":{"current_dir":"/tmp"},"context_window":{"used_percentage":22,"context_window_size":200000,"total_input_tokens":44705}}' \
-  | env -u TMUX -u CREW_MODEL -u CREW_BACKEND -u CREW_KEY CREW_SESSION=testsl CREW_HOME="$T" CREW_STATE="$T/state" CREW_STATUSLINE_MODEL=Kimi bash "$SL" 2>/dev/null | grep -qF '(44k/155k left)' \
-  && _ok "conf 缺失回落:kimi 按 CC 传值 200k (44k/155k left)" || _ng "conf 缺失回落失败"
+  | env -u TMUX -u CREW_MODEL -u CREW_BACKEND -u CREW_KEY CREW_SESSION=testsl CREW_HOME="$T" CREW_STATE="$T/state" CREW_STATUSLINE_MODEL=Kimi bash "$SL" 2>/dev/null | grep -qF '(155k left)' \
+  && _ok "conf 缺失回落:kimi 按 CC 传值 200k (155k left)" || _ng "conf 缺失回落失败"
 
 echo ""
 if [ "$fail" = 0 ]; then

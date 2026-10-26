@@ -151,25 +151,13 @@ if [ -n "$used" ] && [ "$used" != "null" ] 2>/dev/null && { [ -z "$in_tok" ] || 
     fi
   fi
   used="${used%.*}"  # 42.0 -> 42(有小数时)
-  # 已消耗 token 千位简写(2026-10-26):用户要求 ctx 段同时显示累计消耗,与剩余并列。
-  # in_tok 此分支必为 >0(usage>0 分支),直接简写;M 级显示一位小数(951k/1.2M)。
-  used_tok_k=""
-  if [ -n "$in_tok" ] && [ "$in_tok" -gt 0 ] 2>/dev/null; then
-    if [ "$in_tok" -ge 1000000 ]; then
-      used_tok_k="$(awk -v n="$in_tok" 'BEGIN{printf "%.1fM", n/1000000}')"
-    else
-      used_tok_k="$(( in_tok / 1000 ))k"
-    fi
-  fi
   case "$used" in
     ''|*[!0-9]*) ;;                       # 非数字:整段跳过
     *) if [ "$used" -ge 90 ]; then c_ctx=$'\033[31m'    # red   >=90% 快压缩了
        elif [ "$used" -ge 75 ]; then c_ctx=$'\033[33m'  # yellow 75-89%
        else c_ctx=$'\033[32m'                           # green <75%
        fi
-       if [ -n "$left_k" ] && [ -n "$used_tok_k" ]; then
-         ctx_seg="$(printf ' %s·%s %sctx%s%% %s(%s/%s left)%s' "$c_dim" "$c_reset" "$c_ctx" "$used" "$c_ctx" "$used_tok_k" "$left_k" "$c_reset")"
-       elif [ -n "$left_k" ]; then
+       if [ -n "$left_k" ] && [ "$used" -gt 0 ]; then
          ctx_seg="$(printf ' %s·%s %sctx%s%% %s(%s left)%s' "$c_dim" "$c_reset" "$c_ctx" "$used" "$c_ctx" "$left_k" "$c_reset")"
        else
          ctx_seg="$(printf ' %s·%s %sctx%s%%%s' "$c_dim" "$c_reset" "$c_ctx" "$used" "$c_reset")"
@@ -179,6 +167,75 @@ elif [ -n "$used" ] && [ "$used" = "0" ] 2>/dev/null; then
   # usage=0 且 input_tokens 也是 0/缺失:网关没回传真实 usage(部分链路偶发),
   # 显暗色 ctx? 而不是骗人的绿色 0%。
   ctx_seg="$(printf ' %s·%s %sctx?%s' "$c_dim" "$c_reset" "$c_dim" "$c_reset")"
+fi
+
+# ---------- 3.55) 累计消耗段 tot(2026-10-26)----------
+# 与 ctx(当前窗口占用,压缩后归零)不同:tot = 本会话从起到现在累计烧掉的
+# input+output tokens —— 用户用它判断「会话是不是跑了太久、烧了太多额度」。
+# 口径:Σ(assistant message.usage 的 input_tokens+output_tokens)。
+# cache_read/cache_creation 不计入(缓存价约 1/10,混入会虚高一个数量级,失去参考价值)。
+# 数据源:stdin JSON 的 transcript_path(CC ≥2.1)优先;缺失则按 session_id 在
+# ~/.claude/projects/<cwd 转义>/<sid>.jsonl 找。渲染频率高 → mtime+size 缓存
+# ($TMPDIR,未变则直接用上次数),变更才重扫(实测 6.5MB 全扫 ~75ms,可接受;
+# 但每秒渲染都扫就浪费)。任何失败整段静默省略(statusline 铁律:绝不报错)。
+tot_seg=""
+tp="$(json_str transcript_path)"
+sid="$(json_str session_id)"
+[ -z "$tp" ] && [ -n "$sid" ] && {
+  _cwd="$(json_str current_dir)"; [ -z "$_cwd" ] && _cwd="$(json_str cwd)"
+  _proj="${_cwd:-$HOME}"
+  # 路径转义规则与 CC 一致:/ -> -,其余原样(project 目录名 = cwd 全路径转义)
+  _enc="$(printf '%s' "$_proj" | sed 's|/|-|g')"
+  _cand="$HOME/.claude/projects/$_enc/$sid.jsonl"
+  [ -f "$_cand" ] && tp="$_cand"
+}
+if [ -n "$tp" ] && [ -f "$tp" ]; then
+  _tot_cache="${TMPDIR:-/tmp}/crew-sl-tot-$(printf '%s' "$tp" | cksum | cut -d' ' -f1)"
+  _mt="$(stat -f '%m %z' "$tp" 2>/dev/null || stat -c '%Y %s' "$tp" 2>/dev/null)"
+  _hit=""
+  if [ -f "$_tot_cache" ]; then
+    _cached_meta="$(head -1 "$_tot_cache" 2>/dev/null)"
+    [ "$_cached_meta" = "$_mt" ] && _hit="$(tail -1 "$_tot_cache" 2>/dev/null)"
+  fi
+  if [ -z "$_hit" ]; then
+    _hit="$(TP="$tp" python3 -c '
+import json, os
+tot = 0
+try:
+    with open(os.environ["TP"], encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            m = d.get("message") if isinstance(d, dict) else None
+            if isinstance(m, dict) and isinstance(m.get("usage"), dict):
+                u = m["usage"]
+                tot += (u.get("input_tokens") or 0) + (u.get("output_tokens") or 0)
+except OSError:
+    pass
+print(tot)
+' 2>/dev/null)"
+    [ -n "$_mt" ] && printf '%s\n%s\n' "$_mt" "${_hit:-0}" > "$_tot_cache" 2>/dev/null &
+  fi
+  case "$_hit" in
+    ''|*[!0-9]*) ;;  # 非数字(含 python 失败空串):整段省略
+    0) ;;            # 0(首条还没落盘):省略,不显骗人的 tot0
+    *) if [ "$_hit" -ge 1000000 ]; then
+         _tot_show="$(awk -v n="$_hit" 'BEGIN{printf "%.1fM", n/1000000}')"
+       elif [ "$_hit" -ge 1000 ]; then
+         _tot_show="$(( _hit / 1000 ))k"
+       else
+         _tot_show="$_hit"
+       fi
+       # 分级变色:>=10M 深红(烧穿),>=3M 红,>=1M 黄,其余绿 —— 长会话一眼识别
+       if   [ "$_hit" -ge 10000000 ]; then c_tot=$'\033[1;31m'
+       elif [ "$_hit" -ge 3000000 ];  then c_tot=$'\033[31m'
+       elif [ "$_hit" -ge 1000000 ];  then c_tot=$'\033[33m'
+       else                                c_tot=$'\033[32m'
+       fi
+       tot_seg="$(printf ' %s·%s %stot%s %s' "$c_dim" "$c_reset" "$c_tot" "$_tot_show" "$c_reset")" ;;
+  esac
 fi
 
 # ---------- 3.6) git 分支段 + 工作目录段(2026-10-15)----------
@@ -206,12 +263,12 @@ if [ -n "$cwd" ] && [ "$cwd" != "/" ]; then
 fi
 
 # ---------- 4) 输出(单行,无尾换行)----------
-# 组装:⬡ [<会话名> · ]<模型> · 🔑<key> · ctx上下文% (剩余) · 分支 · 目录
+# 组装:⬡ [<会话名> · ]<模型> · 🔑<key> · ctx上下文% (剩余) · tot累计 · 分支 · 目录
 c_key=$'\033[35m'   # magenta 区分 key 段
 key_seg="$(printf ' %s·%s %s🔑%s%s' "$c_dim" "$c_reset" "$c_key" "$key" "$c_reset")"
 
 if [ -n "$sess" ]; then
-  printf '%s⬡ %s ·%s %s%s%s%s%s%s%s' "$c_dim" "$sess" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg" "$ctx_seg" "$git_seg" "$dir_seg"
+  printf '%s⬡ %s ·%s %s%s%s%s%s%s%s%s' "$c_dim" "$sess" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg" "$ctx_seg" "$tot_seg" "$git_seg" "$dir_seg"
 else
-  printf '%s⬡%s %s%s%s%s%s%s%s' "$c_dim" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg" "$ctx_seg" "$git_seg" "$dir_seg"
+  printf '%s⬡%s %s%s%s%s%s%s%s%s' "$c_dim" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg" "$ctx_seg" "$tot_seg" "$git_seg" "$dir_seg"
 fi
