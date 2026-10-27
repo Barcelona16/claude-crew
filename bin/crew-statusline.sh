@@ -262,13 +262,37 @@ if [ -n "$cwd" ] && [ "$cwd" != "/" ]; then
   dir_seg="$(printf ' %s·%s %s%s%s' "$c_dim" "$c_reset" "$c_dim" "$d_show" "$c_reset")"
 fi
 
+# ---------- 3.65) 链路健康段(2026-10-28)----------
+# 链路:crew-proxy(:8788) → CCR(:3456) → joycode(:8765)。TCP 并行探测(nc -z -w 1 连接超时;
+# 本机 BSD nc 无 -G,用 -w;全通时毫秒级,单口挂最坏 ~1s);nc 缺失整段省略。
+hl_seg=""
+if command -v nc >/dev/null 2>&1; then
+  _hl_tmp="${TMPDIR:-/tmp}/crew-sl-hl-$$"
+  for _hp in 8788:proxy 3456:ccr 8765:joycode; do
+    _port="${_hp%%:*}"; _name="${_hp#*:}"
+    ( nc -z -w 1 127.0.0.1 "$_port" >/dev/null 2>&1 && echo ok > "$_hl_tmp.$_name" || echo bad > "$_hl_tmp.$_name" ) &
+  done
+  wait 2>/dev/null
+  hl=""
+  for _hp in 8788:proxy 3456:ccr 8765:joycode; do
+    _name="${_hp#*:}"
+    if [ -f "$_hl_tmp.$_name" ] && grep -q ok "$_hl_tmp.$_name" 2>/dev/null; then
+      hl="${hl}${_name}$(printf '\033[32m')✓$(printf '\033[0m')"
+    else
+      hl="${hl}${_name}$(printf '\033[31m')✗$(printf '\033[0m')"
+    fi
+  done
+  rm -f "$_hl_tmp".* 2>/dev/null
+  [ -n "$hl" ] && hl_seg="$(printf ' %s·%s %s' "$c_dim" "$c_reset" "$hl")"
+fi
+
 # ---------- 4) 输出(单行,无尾换行)----------
 # 组装:⬡ [<会话名> · ]<模型> · 🔑<key> · ctx上下文% (剩余) · tot累计 · 分支 · 目录
 c_key=$'\033[35m'   # magenta 区分 key 段
 key_seg="$(printf ' %s·%s %s🔑%s%s' "$c_dim" "$c_reset" "$c_key" "$key" "$c_reset")"
 
 if [ -n "$sess" ]; then
-  printf '%s⬡ %s ·%s %s%s%s%s%s%s%s%s' "$c_dim" "$sess" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg" "$ctx_seg" "$tot_seg" "$git_seg" "$dir_seg"
+  printf '%s⬡ %s ·%s %s%s%s%s%s%s%s%s%s' "$c_dim" "$sess" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg" "$ctx_seg" "$tot_seg" "$git_seg" "$dir_seg" "$hl_seg"
 else
-  printf '%s⬡%s %s%s%s%s%s%s%s%s' "$c_dim" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg" "$ctx_seg" "$tot_seg" "$git_seg" "$dir_seg"
+  printf '%s⬡%s %s%s%s%s%s%s%s%s%s' "$c_dim" "$c_reset" "$c_model" "$model" "$c_reset" "$key_seg" "$ctx_seg" "$tot_seg" "$git_seg" "$dir_seg" "$hl_seg"
 fi
