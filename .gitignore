@@ -11,3 +11,8 @@ __pycache__/
 
 # joycode CLI 本地状态(2026-10-16)
 .joycode/
+
+# ACP 本地依赖(2026-10-28:crew-dsh/acp 的 @agentclientprotocol/sdk 依赖,
+# 由 npm install 可复现,不入库)
+acp/node_modules/
+test/scenarios/output/*.norm-base

@@ -5,6 +5,61 @@
 
 `crew version` 读取本文件头部渲染版本摘要;新版本发布 = 在本文件顶部加一节 + 提交。
 
+## [4.0.0] - 2026-10-28
+
+### 重构(全面检查重构,保功能只改内部)
+- **bin/crew 2314 行 bash 单体 → 薄入口 + bin/crew.d/{common,models,session,commands,ops,dsh}.sh 六模块**:
+  命令分发/模型管理/会话管理/launcher 各归其位;拆前先列 62 函数对外能力清单,拆后逐项核对零丢失;
+  `bash -n` + 全量测试 + 链路实测(:8788→CCR→上游 text_delta)通过。未提交的 resolve_picked_model
+  兜底改动(反查 provider 改按模型名兜底,CREW_HOME 显式传参)整合进 models.sh 保留。
+- **setup/crew_proxy.py 2946 行 py 单体 → 门面 + _crew_{config,windows,breaker,stats,server,handler} 六模块**:
+  配置加载/窗口校准/熔断/统计/HTTP 转发各归其位;未提交的 BrokenPipe/ConnectionResetError 加固保留。
+  Handler 类与 HTML 常量在门面与 _crew_handler.py 双写,逐字节一致(测试依赖门面副本)。
+- 小文件审计:crew-launcher/crew-heartbeat.js/crew-watcher.js/joycode_proxy.py/_responses_compat.py 无冗余,不动。
+
+### 测试(慢测试根治 + 统一入口,只改执行方式不砍断言)
+- **test/run-all.sh 统一入口**:一条命令跑完 22 bash + 5 python + crew-proxy-boot + scenarios,
+  PASS/FAIL + 耗时汇总;看门狗 SIGKILL(180s);`--only <名>` 单测、`--with-scenarios` 场景。
+  全量 29/29 绿,墙钟 ~502s。
+- 慢测试根治:claude-pid sleep 300 → sleep 5 + 轮询探测(10s→1s);autodiscover fake_gw 端口等待
+  90s 看门狗 → 15s kill -9 + 端口轮询;scenarios BSD sed 归一;GNU timeout 可移植 shim;bash 3.2
+  空数组坑用 homebrew bash 5 前置 PATH;本环境 SIGTERM 屏蔽 → 所有 kill 改 kill -9。
+- 修复:claude-pid T3 OUTSIDE 提取 awk 写坏(恒误报)改为只取函数外非注释行 4/4;
+  crew-tmux Case 7 固定 sleep 改 30×0.2s 轮询(全量负载下再扩至 15s)19/19;
+  scenarios 基线刷新(07-kill-purge 过期纪元 + 05-doctor 随应急通道删除重录)。
+
+### 部署 / 运行时
+- **bin/crew-deploy.sh**:repo setup/*.py → ~/.config/claude-crew/ 幂等同步(md5 跳过 + py_compile 门禁),
+  `--check` 只读预览,变更集重启对应 launchd 服务 + 4s 验证,消灭手工同步。
+- joycode launchd plist 与 setup/launchd 模板对齐(修复 5 类漂移)。
+- **Sol 流式打通**:根因 = 上游 GPT-6.1-Sol-A 从不发 `data: [DONE]`,流尾正常 `response.completed`、
+  截断 `response.incomplete`,而 CCR 包内 next-ai-gateway.js 的 $rt 只认 completed+delta;
+  最小 patch 纯新增两分支(备份 .bak-20261028-005929),三路真实验证(正常/截断/回归)全过。
+  ⚠️ npm -g 升级会覆盖,幂等 postinstall 补丁脚本未做(已披露)。
+- **窗口校准准确性**:GLM-5.3 = 1M(1,048,576)确证(官方文档 + 上游自报),非 200k;
+  修真实算法 bug:maybe_calibrate_from_error 上下界方向用反(被拒估算 R 被优先写入会写大窗口致死锁),
+  改优先 proven-safe 成功最大输入 + 10% margin。
+
+### 监控 / 可诊断性
+- **/usage 服务健康**:/api/usage 纯新增 `health{proxy,ccr}`(:3456 1s TCP 探测),页面顶部
+  「proxy ✓ / CCR ✓|✗」状态行,30s 轮询刷新。
+- **模型延迟分布(近 24h)**:CCR 转发链路全部 STATS.record 补 latency(根因:alias 路径从没传)
+  + 流式 TTFT;LatencySeries(小时桶 + Reservoir,成功样本才进分位)持久化 latency.json(0600/20s 节流/重启不丢);
+  /api/usage 纯新增 latency 字段 + /usage 页延迟分布卡片(P50/P90/P99/avg/请求数/成功率)。
+- **一键应急会话**:admin-gated POST /api/emergency-session(key+模型白名单校验,argv 列表防注入,
+  会话名服务端生成,PATH 注入);/usage 页表单(key→联动模型→一键起),实测 launchd 上下文 detached tmux 可起。
+- **报错分层定位**:统一 classify_error → `[layer][fault] + 建议 + 详情` 进 error body 与代理日志;
+  覆盖 ccr-down/joycode-down/no-key/no-provider/upstream-401/400/5xx/breaker-open/all-failed/stream-broken;
+  statusline 新增链路健康段(proxy/ccr/joycode 并行探测),`crew status` 人类模式前置链路行。
+- **模型切换顺畅路径**:`crew model-switch <model> [key]` 统一入口(校验存在→写 provider map→apply→
+  重启 CCR→冒烟最小请求→失败自动回滚+http 码分类根因+重试命令);修 sync-models 跳过带空格模型名 bug(4 处);
+  保留 resolve 三层防线与 launcher 守卫。
+
+### 清理 / 安全
+- 删除 .tmpdbg/(600 权限调试 keys.conf 疑似密钥)、bin/crew.bak-resolve-*、scenarios *.norm-base 残留。
+- .gitignore 补 acp/node_modules/(crew-dsh/acp 运行依赖,可复现)与 *.norm-base。
+- scenarios 基线 05-doctor 随应急通道删除重录,顺带移除基线内明文 token。
+
 ## [Unreleased]
 
 ### 新增
