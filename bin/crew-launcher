@@ -158,6 +158,27 @@ load_backend_conf() {
     esac
     case "$backend" in
       */*)
+        # 2026-10-27 守卫(400 事故根修):selector 的 provider 必须存在于 provider map。
+        # 此前对带 / 的 backend 无条件合成 → ghost provider(如 joycode 分支拼错的
+        # <model>-joycode)会话照起,首个请求才 400 "All target providers failed"。
+        # 现在起会话前就拒,并给出可操作修复指引。
+        local _sel_prov="${backend%%/*}" _sel_found=0
+        local _sel_map="${CREW_CCR_CONFIG:-$CREW_HOME/ccr-providers.json}"
+        if command -v node >/dev/null 2>&1 && [ -f "$_sel_map" ]; then
+          _sel_found=$(SP="$_sel_prov" CREW_PROVIDER_MAP="$_sel_map" node -e '
+            const fs=require("fs");
+            try{ const c=JSON.parse(fs.readFileSync(process.env.CREW_PROVIDER_MAP,"utf8"));
+              const ps=c.Providers||c.providers||[];
+              process.stdout.write(ps.some(p=>p.name===process.env.SP)?"1":"0");
+            }catch(_){ process.stdout.write("0"); }' 2>/dev/null)
+        fi
+        case "${_sel_found:-0}" in
+          1) : ;;
+          *)
+            echo "[crew-launcher] backend '$backend' 的 provider '$_sel_prov' 不在 CCR provider map,拒起(防 400 All target providers failed,2026-10-27 事故)。修复:crew switch <会话> 重选模型,或 crew sync-models --key <key>,或 --model <已存在的provider>/model" >&2
+            return 1
+            ;;
+        esac
         # v1 line 313-315 逻辑:合成 ccr backend
         BK_BASE_URL="http://127.0.0.1:${CREW_PROXY_PORT:-8788}"
         BK_MODEL="$backend"

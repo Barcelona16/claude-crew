@@ -83,6 +83,36 @@ CHANGELOG.md 是版本权威源:`crew version` 读头部渲染。发版 = 顶部
 - **CCR 原生 claudeCode 集成保持关闭**(apply 会写回直连配置踩掉修复)。
 - **中文汇报**(用户偏好)。
 
+### 6.1 模型落地链(selector 唯一真相,2026-10-27 400 事故沉淀)
+
+**事故**:dsh_word 选中新发现的裸名模型(key=joycode)→ 拼出 selector
+`<model>-joycode/<model>` → provider 不存在 → CCR 400 "All target providers failed"。
+三层防线全缺位:ensure 静默失败(set -u 崩在 `BASE="$base"` 未定义)+ launcher 无守卫
++ 错误文案难懂。**同一模型名,joycode 与普通 key 的落地方式不同,selector 拼法也不同**:
+
+| key | ensure 落地动作 | 正确 selector |
+|---|---|---|
+| joycode | 塞进【已有】`joycode`(Claude 系)或 `joycode-oai`(其余)的 models[] | `joycode[-oai]/<model>` |
+| 其他 | 新建 `<model>-<key>` provider | `<model>-<key>/<model>` |
+
+**铁律(改 selector 逻辑必读)**:
+1. **拼 selector 只准走 `resolve_picked_model`**(bin/crew)。它 ensure 落地后**反查
+   provider map 得出真实 provider 名**,再拼 `provider/model` —— 不允许调用点自己拼
+   `$model-$key/$model`(那是普通 key 分支的专属形态)。三个入口(switch / --pick /
+   新起菜单)全走它;加第四个入口也走它。
+2. **ensure_model_in_ccr 失败必须 fail-loud**:回非零让调用方提示,不静默。落地后
+   校验模型确在 map(防半写)。修 set -u 坑:joycode 分支不赋值的变量传 `"${base:-}"`。
+3. **launcher 对 `provider/model` selector 有守卫**:provider 不在 provider map → 拒起
+   并给修复指引(crew switch 重选 / sync-models / --model 显式指定),绝不带病起会话。
+4. **改 map 后必须 `ccr_v3.py --provider-map <map> apply`(带 token)→ drift → doctor**;
+   **apply 只写 sqlite 配置,不热加载运行时 —— 必须重启 CCR(kill 老进程,launchd 拉新)
+   才生效**。验证基准是 sqlite `app_config.default`(或带 `x-ccr-web-auth` 头的 getConfig
+   RPC),**不是 `~/.claude-code-router/config.json`(CCR 2 尸体,别再读它)**。
+5. **新模型冒烟**:apply+重启后,用 `client-key` 拿网关 key,curl 打 :8788 全链路
+   (crew-proxy→CCR→joycode→上游)确认 200 + 模型真回复,才算落地完成。
+6. 测试守护:`test/crew-ensure-selector.test.sh` 13 用例(①-⑧ 覆盖两分支 selector、
+   幂等、失败可见、launcher 守卫)。改 ensure/resolve/launcher 守卫必须先跑它。
+
 ## 7. 不做什么
 
 - 不改需求(分歧先报 wangqiwang1,不擅改)。

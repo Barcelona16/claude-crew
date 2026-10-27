@@ -847,7 +847,12 @@ EOF
 # ensure_model_in_ccr <alias> <model> —— 用户从菜单选中【新模型】后落地(2026-10-16):
 # 把这一个模型写进 provider map(与 sync-models 同规则)+ ccr_apply_provider_map。
 # 幂等:CCR 已有该模型(或选的是 provider/model 全名)→ 零写入零 apply。
-# 失败仅静默(会话仍按选中值起;provider 写入失败时 launcher 会拒绝并提示,不会带病起)。
+# 2026-10-27(400 事故根修):失败【不再静默】—— 写不进 map 或模型名非法时回非零,
+# 调用方(resolve_picked_model / 菜单流程)据此提示,不再让"模型没进 CCR 但会话照起"
+# 的带病状态发生(事故:dsh_word 选 JD-DeepSeek-V4.1-Flash-1017 后 400 All target
+# providers failed)。joycode 分支把模型塞进【已有 joycode/joycode-oai provider】,
+# 普通分支新建 <model>-<alias> provider —— 两种 selector 拼法不同,由
+# resolve_picked_model 统一归一,不再由调用点各拼各的。
 ensure_model_in_ccr() {
   local alias="$1" model="$2"
   [ -n "$alias" ] && [ -n "$model" ] || return 0
@@ -859,7 +864,10 @@ ensure_model_in_ccr() {
   [ "$kv" = joycode ] && is_jc=1
   [ "$is_jc" = 1 ] || base=$(ccr_origin_for_key "$kv")
   [ -f "$ccrcfg" ] || return 0
-  added=$(CCR_CFG="$ccrcfg" ALIAS="$alias" KV="$kv" ISJC="$is_jc" BASE="$base" \
+  # 2026-10-27:set -u 下 joycode 分支 base 永不赋值 → 传空串而不是裸 $base
+  # (此前 `BASE="$base"` 在 set -u 直接 unbound variable 崩,node 永远跑不到,
+  #  模型从未写进 map → 会话 400。这就是 10-27 事故里 ensure 静默失败的根因)
+  added=$(CCR_CFG="$ccrcfg" ALIAS="$alias" KV="$kv" ISJC="$is_jc" BASE="${base:-}" \
     PICK="$model" node -e '
     const fs=require("fs");
     const cfg=JSON.parse(fs.readFileSync(process.env.CCR_CFG,"utf8"));
@@ -904,10 +912,51 @@ ensure_model_in_ccr() {
     process.stdout.write(String(added));
   ' 2>/dev/null) || added=0
   if [ "${added:-0}" -gt 0 ] 2>/dev/null; then
-    ccr_apply_provider_map >/dev/null 2>&1 || true
-    log "auto-sync: '$model' 已写进 CCR(provider $model-$alias)并 apply"
+    ccr_apply_provider_map >/dev/null 2>&1 || { log "ensure: apply 失败(模型已写 map 但未生效,跑 crew sync-models --key $alias)"; return 1; }
+    log "auto-sync: '$model' 已写进 CCR 并 apply"
+  fi
+  # 2026-10-27:落地后校验模型确在 map(防 node 写坏/半写)。fail-loud,不静默。
+  local verify
+  verify=$(ccr_models_for_key "$alias")
+  if ! printf '%s\n' "$verify" | grep -qxF "$model"; then
+    log "ensure: '$model' 落地校验失败(map 里没有;跑 crew sync-models --key $alias)"
+    return 1
   fi
   return 0
+}
+
+# resolve_picked_model <alias> <picked> —— 菜单选中值 → 可路由 CCR 3 selector(2026-10-27)。
+# 选中裸名新模型时:先 ensure_model_in_ccr 落地,再按【该模型实际落在哪个 provider】拼 selector:
+#   joycode key:模型塞进已有 joycode(Claude 系)/ joycode-oai(其余)→ selector=joycode[-oai]/<model>
+#   其他 key  :新建 <model>-<alias> provider              → selector=<model>-<alias>/<model>
+# 返回 selector 到 stdout;ensure 失败 → 回非零(调用方提示,不吞错)。
+# 全名(provider/model)选中 → 原样输出,零副作用。
+# 背景:此前调用点统一拼 "$model-$key/$model",对 joycode 分支拼出不存在的 provider
+# → CCR 400 "All target providers failed"(2026-10-27 dsh_word 事故)。
+resolve_picked_model() {
+  local alias="$1" picked="$2"
+  case "$picked" in
+    */*) printf '%s\n' "$picked"; return 0 ;;
+  esac
+  [ -n "$picked" ] || return 1
+  local before after added
+  before=$(ccr_models_for_key "$alias")
+  ensure_model_in_ccr "$alias" "$picked" || return 1
+  after=$(ccr_models_for_key "$alias")
+  # 落地后反查 provider:找出现在 models 里含它的(优先这次新增的)
+  local sel=""
+  sel=$(KEY="$alias" PICK="$picked" CCR_PROVIDER_MAP="$CCR_PROVIDER_MAP" node -e '
+    const fs=require("fs");
+    const c=JSON.parse(fs.readFileSync(process.env.CCR_PROVIDER_MAP,"utf8"));
+    const pick=process.env.PICK, ps=c.Providers||c.providers||[];
+    // keys.conf 真值(ensure 写 provider 用的 api_key;joycode 真值恰好是 joycode)
+    let kv=pick; try{ const kc=fs.readFileSync(process.env.CREW_HOME+"/keys.conf","utf8");
+      for(const ln of kc.split("\n")){ const i=ln.indexOf("=");
+        if(i>0 && ln.slice(0,i).trim()===process.env.KEY){ kv=ln.slice(i+1).trim(); break; } } }catch(_){}
+    for(const p of ps){ if((p.api_key||p.apiKey)===kv && (p.models||[]).indexOf(pick)>=0){ process.stdout.write(p.name); break; } }
+  ' 2>/dev/null)
+  [ -n "$sel" ] || { log "resolve: '$picked' 落地后仍找不到 provider(异常,查 map)"; return 1; }
+  printf '%s/%s\n' "$sel" "$picked"
 }
 
 
@@ -1649,12 +1698,13 @@ cmd_switch() {
   model_opts=$(auto_discover_models "$picked_key")
   [ -z "$model_opts" ] && { log "key '$picked_key' 没有可路由模型(crew sync-models --key $picked_key 补充);保持原模型"; picked_be="$cur_be"; }
   [ -n "$model_opts" ] && picked_be=$(printf '%s\n' "$model_opts" | _pick_one "选模型 ($name,当前: ${cur_be:-无})" "$cur_be")
-  # 选中裸名新模型(无 provider/ 前缀)→ 写进 CCR 再拼全名(2026-10-16 选中即同步)
-  case "$picked_be" in
-    */*) ;;
-    *) ensure_model_in_ccr "$picked_key" "$picked_be"
-       [ -n "$picked_be" ] && picked_be="$picked_be-$picked_key/$picked_be" ;;
-  esac
+  # 选中裸名新模型(无 provider/ 前缀)→ ensure 落地 + 按 joycode/普通分支拼对 selector
+  # (2026-10-27 根修:统一走 resolve_picked_model,不再各拼各的 $model-$key/$model)
+  if [ -n "$picked_be" ]; then
+    local _sel; _sel=$(resolve_picked_model "$picked_key" "$picked_be") \
+      || { log "切换中止:模型 '$picked_be' 落地失败(上面有指引);保持原模型"; picked_be="$cur_be"; }
+    [ -n "$_sel" ] && picked_be="$_sel"
+  fi
   # 设全局 BACKEND/KEY,走 cmd_spawn 的 live 换模型逻辑(它会判与现值不同才重启)
   [ -n "$picked_key" ] && KEY="$picked_key"
   [ -n "$picked_be" ] && BACKEND="$picked_be"
@@ -1882,12 +1932,12 @@ cmd_spawn() {
       [ -n "$KEY" ] && log "key '$KEY' 没有可路由模型(crew sync-models --key $KEY 补充);可 --model 直接指定"
     else
       local _picked_be; _picked_be=$(printf '%s\n' "$_mo" | _pick_one "选模型 ($name${KEY:+, key=$KEY})" "$_def_be")
-      # 选中裸名新模型 → 写进 CCR 再拼全名(2026-10-16 选中即同步)
-      case "$_picked_be" in
-        */*) ;;
-        *) ensure_model_in_ccr "$KEY" "$_picked_be"
-           [ -n "$_picked_be" ] && _picked_be="$_picked_be-$KEY/$_picked_be" ;;
-      esac
+      # 选中裸名新模型 → ensure 落地 + 拼对 selector(2026-10-27 统一 resolve_picked_model)
+      if [ -n "$_picked_be" ]; then
+        local _sel; _sel=$(resolve_picked_model "$KEY" "$_picked_be") \
+          || { log "选中模型 '$_picked_be' 落地失败(上面有指引),忽略该选择"; _picked_be=""; }
+        [ -n "$_sel" ] && _picked_be="$_sel"
+      fi
       [ -n "$_picked_be" ] && BACKEND="$_picked_be"
     fi
   fi
@@ -1973,12 +2023,12 @@ cmd_spawn() {
       [ -n "$KEY" ] && log "key '$KEY' 没有可路由模型(crew sync-models --key $KEY 补充);可 --model 直接指定"
     else
       local _pm; _pm=$(printf '%s\n' "$_mopts" | _pick_one "选模型 ($name${KEY:+, key=$KEY})" "")
-      # 选中裸名新模型 → 写进 CCR 再拼全名(2026-10-16 选中即同步)
-      case "$_pm" in
-        */*) ;;
-        *) ensure_model_in_ccr "$KEY" "$_pm"
-           [ -n "$_pm" ] && _pm="$_pm-$KEY/$_pm" ;;
-      esac
+      # 选中裸名新模型 → ensure 落地 + 拼对 selector(2026-10-27 统一 resolve_picked_model)
+      if [ -n "$_pm" ]; then
+        local _sel; _sel=$(resolve_picked_model "$KEY" "$_pm") \
+          || { log "选中模型 '$_pm' 落地失败(上面有指引),忽略该选择"; _pm=""; }
+        [ -n "$_sel" ] && _pm="$_sel"
+      fi
       [ -n "$_pm" ] && BACKEND="$_pm"
     fi
   fi
