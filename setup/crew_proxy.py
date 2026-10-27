@@ -33,11 +33,32 @@ Env:
   CREW_PROXY_STATE    circuit-breaker state dump (default ~/.local/share/claude-crew/proxy-state.json)
 """
 
+# ── sys.path bootstrap: ensure sibling _crew_* modules are importable ──────────
+import os as _os
+import sys as _sys
+_here = _os.path.dirname(_os.path.abspath(__file__))
+if _here not in _sys.path:
+    _sys.path.insert(0, _here)
+
+# Register a proxy in sys.modules so submodule-level __getattr__ can resolve
+# monkey-patched config values (tests load us via module_from_spec without
+# registering in sys.modules). The proxy delegates to our own globals dict,
+# so cp.GATEWAY_AUTH = ... is visible inside request handlers.
+if "crew_proxy" not in _sys.modules:
+    class _ConfigProxy:
+        def __getattr__(self, name):
+            return globals()[name]
+        def __setattr__(self, name, value):
+            globals()[name] = value
+    _sys.modules["crew_proxy"] = _ConfigProxy()
+
+# ── re-export stdlib names that callers/tests may access on this module ────────
 import atexit
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import socket
 import select
@@ -50,194 +71,106 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# ── config ──────────────────────────────────────────────────────────────────────
-def _cfg_dir():
-    return os.environ.get("CREW_CONFIG_DIR") or os.path.join(
-        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "claude-crew"
-    )
-
-CFG_DIR   = _cfg_dir()
-KEYS_FILE = os.path.join(CFG_DIR, "keys.conf")
-POLICY    = os.path.join(CFG_DIR, "key-policy.conf")
-USAGE_FILE = os.path.join(CFG_DIR, "usage.json")
-# crew demo gif for the /usage intro. Env override, else next to this script, else the
-# repo's docs/ (dev). Absent -> the <img> just 404s, harmless.
-CREW_DEMO_GIF = os.environ.get("CREW_DEMO_GIF") or next(
-    (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-demo.gif"),
-                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "crew-demo.gif"))
-     if os.path.exists(p)), os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-demo.gif"))
-# crew-proxy hero banner (cyberpunk). Same resolution order as the gif.
-CREW_HERO_PNG = os.environ.get("CREW_HERO_PNG") or next(
-    (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-proxy-hero.png"),
-                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "crew-proxy-hero.png"))
-     if os.path.exists(p)), os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-proxy-hero.png"))
-GATEWAY_AUTH = os.environ.get("GATEWAY_AUTH") or os.path.join(CFG_DIR, "gateway-auth.json")
-# Self-registration: the fixed upstream a submitted key is test-called against (NOT
-# user-supplied — no SSRF). A key that passes is added to the pool for this model.
-REGISTER_TEST_URL = os.environ.get("CREW_REGISTER_URL") or "http://llm-gw.jd.local/v1/chat/completions"
-REGISTER_MODEL = os.environ.get("CREW_REGISTER_MODEL") or "GLM-5.2"
-REGISTER_RETRY_BASE = float(os.environ.get("CREW_REGISTER_RETRY_BASE", "1.5"))  # backoff step (s)
-# Models a self-registrant is allowed to CALL by default (their login's allow_models).
-# Anything else is admin-granted later. Comma-separated env override.
-REGISTER_ALLOW = [m.strip() for m in (os.environ.get("CREW_REGISTER_ALLOW")
-    or "Claude-Opus-4.6-joybuilder,Claude-Opus-4.7-joybuilder,Claude-Opus-4.8-joybuilder,GLM-5.2,GLM-5.2-joybuilder").split(",") if m.strip()]
-CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.join(CFG_DIR, "ccr-providers.json")
-CCR_URL   = (os.environ.get("CREW_CCR_URL") or "http://127.0.0.1:3456").rstrip("/")
-CCR_V3_ADAPTER = os.environ.get("CREW_CCR_V3_ADAPTER") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "ccr_v3.py"
+# ── import from split submodules (order matters for dependency chain) ──────────
+from _crew_config import (
+    CCR_CFG, CCR_URL, CCR_V3_ADAPTER, CFG_DIR, COOLDOWN, COOLDOWN_FILE,
+    CREW_DEMO_GIF, CREW_HERO_PNG, CREW_STATE,
+    FAIL_CODES, FAIL_N, GATEWAY_AUTH, KEYS_FILE, MW_CONF, POLICY, PORT,
+    PT_MAX_RETRY, PT_RETRY_BASE, PT_RETRY_MAX, PT_RETRY_BUDGET,
+    REGISTER_ALLOW, REGISTER_MODEL, REGISTER_RETRY_BASE, REGISTER_TEST_URL,
+    SAFE_NAME, STATE_FILE, USAGE_FILE,
+    _api_sessions_fallback, _cfg_dir, _find_crew_bin, _http_err_summary,
+    _is_fail, _raw_gateway_auth, _read_state_field, cooldown_for, load_ccr_gateway_key,
+    load_ccr_providers, load_cooldown, load_gateway_auth, load_keys,
+    load_policy, mask_key, parse_retry_after, provider_for, register_allow_list,
+    run_crew, sync_ccr_config, log,
 )
-PORT      = int(os.environ.get("CREW_PROXY_PORT", "8788"))
-FAIL_N    = int(os.environ.get("CREW_PROXY_FAILS", "3"))
-COOLDOWN  = float(os.environ.get("CREW_PROXY_COOLDOWN", "60"))
-STATE_FILE = os.environ.get("CREW_PROXY_STATE") or os.path.expanduser(
-    "~/.local/share/claude-crew/proxy-state.json"
+from _crew_windows import (
+    _CALIB_LOCK, _PTL_SOURCE_PATTERNS, _PTL_WINDOW_RES, _mw_conf_pattern,
+    _ptl_hay, calibrate_model_window, estimate_input_tokens,
+    extract_window_from_error, maybe_calibrate_from_error, translate_prompt_too_long,
 )
-FAIL_CODES = {401, 403, 429}  # plus any 5xx and connection errors (see _is_fail)
-
-# ── upstream error-message translation (2026-10-15) ─────────────────────────────
-# Claude Code's auto-compact / reactive-compact recovery keys on the *text* of the
-# error message it receives (see its isPromptTooLong classifier):
-#   n.includes("prompt is too long") || n.includes("input is too long for requested model")
-# The llm-gw GLM gateway instead answers 400 with {"error":{"cause":"...code":"1261",
-# "message":"Prompt exceeds max length"...}} — none of the recognized substrings — so
-# Claude Code treats it as an ordinary 400, retries, and dies instead of compacting.
-# _translate_upstream_error() rewrites such bodies to the exact Anthropic wording so
-# the client's recovery kicks in. Translation happens only on non-2xx, JSON,
-# non-streaming bodies; every other byte passes through untouched.
-_PTL_SOURCE_PATTERNS = (
-    "prompt exceeds max length",   # llm-gw GLM code 1261(英文措辞)
-    "prompt too long",
-    "exceeds the maximum context length",  # OpenAI variant A
-    "maximum context length is",   # OpenAI variant B: "This model's maximum context length is N tokens. However, you requested M..."
-    "context length exceeded",
-    "input is too long",           # generic short form some gateways emit
-    # 2026-10-20 实测补(llm-gw 真实措辞,缺这几种时 CC 压缩恢复不触发 → 会话卡死):
-    "longer than the model's context length",  # GLM-5.3-Local: "...(1183203 tokens) is longer than the model's context length (1048576 tokens)"
-    "exceeded model token limit",             # kimi-k3: "Your request exceeded model token limit: 1048576 (requested: 1254747)"
-    "prompt 超长",                              # GLM code 1261 中文措辞(2026-10-20 实测;上游中英会变,两种都收)
+from _crew_breaker import BREAKER, Breaker
+from _crew_stats import (
+    STATS, USAGE, LATENCY, USAGE_STREAM_CAP, Stats, UsageSeries, LatencySeries, parse_usage,
 )
+from _crew_server import main
 
-# 窗口数字抽取正则(按优先级):匹配到即得真实窗口,自动写 model-windows.conf。
-# 2026-10-20 实测三种上游格式:
-#   GLM-5.3-Local: "longer than the model's context length (1048576 tokens)"
-#   kimi-k3:       "exceeded model token limit: 1048576 (requested: 1254747)"
-#   OpenAI 兼容:   "maximum context length is 1048576 tokens. However, you requested..."
-_PTL_WINDOW_RES = (
-    re.compile(r"context length\D{0,20}(\d{6,9})\s*tokens", re.I),
-    re.compile(r"token limit\D{0,10}(\d{6,9})", re.I),
-    re.compile(r"maximum context length is\s*(\d{6,9})", re.I),
-)
+# CREW_BIN is computed here (monkey-patchable at runtime).
+CREW_BIN = os.environ.get("CREW_BIN") or _find_crew_bin()
 
-def _ptl_hay(body_bytes):
-    """Searchable text from an error body: parse JSON, then keep UN-ESCAPING nested
-    stringified-JSON layers (CCR wraps provider errors as {"error":{"cause":"{\"error\":
-    {...}"}}) until nothing more parses. Each layer's ensure_ascii=False dump is
-    concatenated — so both raw unicode (Prompt 超长) and \\uXXXX-escaped inner strings
-    are searchable. Returns the combined haystack (lowercased)."""
-    texts = []
-    seen = set()
-    def _add(s):
-        if s and s not in seen:
-            seen.add(s)
-            texts.append(s.lower())
-    def _walk(o, depth=0):
-        if depth > 4 or not isinstance(o, (str, dict)):
-            return
-        if isinstance(o, str):
-            _add(o)
-            s = o.strip()
-            if s[:1] in "{[":
-                try:
-                    _walk(json.loads(s), depth + 1)   # 展开字符串化嵌套 JSON
-                except Exception:
-                    pass
-            return
-        for v in o.values():
-            _walk(v, depth + 1)
-        _add(json.dumps(o, ensure_ascii=False))
+# ── Override config loaders so they read monkey-patchable facade constants ──────
+# The _crew_config.py versions read _crew_config's own globals, which don't see
+# test patches like `cp.GATEWAY_AUTH = ...`. These re-definitions shadow the
+# imported names and resolve against this module's globals (which the patches hit).
+def load_gateway_auth():
+    """gateway-auth.json -> {login_key: {maps_to, allow_models, erp, admin}}. Empty dict if absent."""
     try:
-        doc = json.loads(body_bytes)
-    except Exception:
-        return body_bytes.decode("utf-8", "replace").lower()
-    _walk(doc)
-    # 原始字节兜底:raw \\uXXXX 转义序列也在(上面 ensure_ascii=False 覆盖不了
-    # 内层字符串自带的字面 \\u 转义——那本来就是 ASCII 可见的)
-    return " ".join(texts)
+        with open(GATEWAY_AUTH) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for k, v in data.items():
+        if k.startswith("__") or not isinstance(v, dict):
+            continue
+        out[k] = {"maps_to": str(v.get("maps_to", "")),
+                  "allow_models": list(v.get("allow_models") or []),
+                  "erp": str(v.get("erp", "")),
+                  "admin": bool(v.get("admin"))}
+    return out
 
-
-def translate_prompt_too_long(body_bytes):
-    """If an error body indicates context overflow in non-Anthropic wording, return
-    replacement bytes in Anthropic's format; otherwise return None (pass through)."""
+def _raw_gateway_auth():
+    """The gateway-auth.json dict verbatim (including __-prefixed config keys), {} if absent."""
     try:
-        doc = json.loads(body_bytes)
-    except Exception:
-        return None
-    if not isinstance(doc, dict):
-        return None
-    # 2026-10-20:多层展开 hay —— CCR cause 字段是字符串化 JSON,其中文(Prompt 超长)
-    # 以 \uXXXX 转义出现,单层 dumps 匹配不到(实测 GLM-5.2 中文措辞漏匹配根因)。
-    hay = _ptl_hay(body_bytes)
-    if not any(p in hay for p in _PTL_SOURCE_PATTERNS):
-        return None
-    # Anthropic's native envelope. "prompt is too long: X tokens > Y maximum" carries
-    # the token counts Claude Code parses for head-truncation; we don't have them from
-    # the GLM gateway, so emit the count-less form the classifier also accepts
-    # (zSr uses substring matching, lKe's regex just yields undefined — still triggers).
-    out = {"type": "error", "error": {"type": "invalid_request_error",
-                                      "message": "prompt is too long: input tokens and max_tokens exceed context limit."}}
-    return json.dumps(out, ensure_ascii=False).encode()
+        with open(GATEWAY_AUTH) as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
+def load_keys():
+    """keys.conf -> {alias: api_key}. Empty dict if absent."""
+    out = {}
+    try:
+        with open(KEYS_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                alias, key = line.split("=", 1)
+                out[alias.strip()] = key.strip()
+    except FileNotFoundError:
+        pass
+    return out
 
-# ── context-window auto-calibration(2026-10-20)────────────────────────────────
-# 用户洞察:报错那一刻上游就会告诉我们真实窗口 —— "context length (1048576 tokens)"。
-# 校准器在 translate 命中(prompt-too-long)时从错误 body 抽窗口数字,写进
-# model-windows.conf;launcher 下次起会话就带上真实窗口,压缩不再贴错线。
-# 抽不到数字的(GLM-5.2 code 1261 "Prompt 超长"不带数)→ 用 proxy 自己的成功请求
-# 统计夹逼:最近成功 max input 是上界,被拒请求估算 tokens 是下界,取保守下界。
-# 只在数值变化时写(幂等);线程安全(模块锁);异常静默(校准失败不影响转发)。
-_CALIB_LOCK = threading.Lock()
-MW_CONF = os.path.join(os.environ.get("CREW_CONFIG_DIR")
-                       or os.path.expanduser("~/.config/claude-crew"),
-                       "model-windows.conf")
+def load_ccr_providers():
+    """Crew's CCR 3 provider map -> list of {name, models[], api_key}."""
+    try:
+        with open(CCR_CFG) as f:
+            cfg = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    return cfg.get("Providers") or cfg.get("providers") or []
 
-def _mw_conf_pattern(model):
-    """Short lowercase key for a model in model-windows.conf: strip provider prefix
-    and variant suffixes ('prov/GLM-5.3-Local-joybuilder' -> 'glm-5.3').
-    Family+version stays intact — 'glm-5.3' not 'glm' — so windows differ per
-    version (5.2=200k, 5.3=1M) as measured."""
-    m = (model or "").split("/")[-1].lower()
-    # 后缀词库:部署变体/渠道标记,剥掉后剩 family+version
-    suffixes = ("joybuilder", "personal", "local", "newkey", "prod", "flash", "pro")
-    parts = m.split("-")
-    # 从右往左剥已知后缀段,遇到非后缀词停
-    while len(parts) > 1 and parts[-1] in suffixes:
-        parts.pop()
-    fam = "-".join(parts)
-    return fam or m
-
-def extract_window_from_error(body_bytes):
-    """Pull the real context window out of an overflow error body. Returns int or None.
-    Uses the same multi-layer haystack as translate (numbers can hide inside the
-    stringified-JSON cause layer)."""
-    if not body_bytes:
-        return None
-    hay = _ptl_hay(body_bytes)
-    for rx in _PTL_WINDOW_RES:
-        m = rx.search(hay)
-        if m:
-            v = int(m.group(1))
-            if 50000 <= v <= 20000000:   # 合理窗口域:50k..20M
-                return v
-    return None
+def run_crew(args, timeout=10):
+    """Exec `crew <args...>` with shell=False (never string-built). Returns (stdout, err|None)."""
+    try:
+        p = subprocess.run([CREW_BIN, *args], capture_output=True, text=True,
+                           timeout=timeout, shell=False)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return None, f"crew exec failed: {e}"
+    if p.returncode != 0:
+        return None, (p.stderr or p.stdout or f"crew exited {p.returncode}").strip()
+    return p.stdout, None
 
 def calibrate_model_window(model, window, source="upstream-error"):
     """Write/refresh one model line in model-windows.conf. Idempotent, thread-safe.
-    Returns True when the file changed.
-
-    消费方(launcher/statusline)按「模型名包含 key」首条命中,所以这里必须改写
-    *会被该模型命中的现有行*(如 conf 有 kimi=200k,校准 kimi-k3 时改 kimi 行),
-    而不是追加 kimi-k3= 行(追加后 kimi= 在前永远先命中,校准白写)。
-    精确 key 相等则改;现有行是完整模型名的子串(即会被命中)则改它;都不匹配才追加。"""
+    Returns True when the file changed."""
     if not model or not window:
         return False
     m = (model or "").split("/")[-1].lower()
@@ -249,8 +182,6 @@ def calibrate_model_window(model, window, source="upstream-error"):
             if os.path.isfile(MW_CONF):
                 with open(MW_CONF, encoding="utf-8") as f:
                     lines = f.read().splitlines()
-            # 1) 找目标行:精确 == key,或 key 包含现有行(现有行是模型名的子串 →
-            #    消费方包含匹配会命中它)。取最长的命中行(最具体)。
             best_idx, best_len = -1, -1
             for i, ln in enumerate(lines):
                 s = ln.strip()
@@ -264,7 +195,7 @@ def calibrate_model_window(model, window, source="upstream-error"):
                 cur_val = lines[best_idx].split("=", 1)[1].split("#")[0].strip()
                 try:
                     if int(cur_val) == window:
-                        return False    # 已一致,不写
+                        return False
                 except ValueError:
                     pass
                 key = lines[best_idx].split("=", 1)[0].strip()
@@ -281,21 +212,6 @@ def calibrate_model_window(model, window, source="upstream-error"):
             log.warning("[ctx-calibrate] 写 %s 失败: %s", MW_CONF, e)
             return False
 
-def estimate_input_tokens(body_bytes):
-    """Rough input-token estimate from a request body: total message text length / 3
-    (mixed zh/en heuristic; +tools/system overhead folded into the divisor). Used ONLY
-    as the lower-bound evidence in window calibration when the upstream error carries
-    no numbers (GLM-5.2 code 1261). Never on the hot path."""
-    try:
-        doc = json.loads(body_bytes or b"")
-        msgs = doc.get("messages") or []
-        n = sum(len(str(m.get("content", ""))) for m in msgs if isinstance(m, dict))
-        n += len(str(doc.get("system") or ""))
-        return int(n / 3)
-    except Exception:
-        return 0
-
-
 def maybe_calibrate_from_error(model, body_bytes, req_body=None):
     """Called on a translated prompt-too-long error. Upstream-provided number wins;
     otherwise fall back to our own evidence (user insight: proxy knows what worked):
@@ -310,750 +226,16 @@ def maybe_calibrate_from_error(model, body_bytes, req_body=None):
     lower = estimate_input_tokens(req_body)
     upper = STATS.max_input_for(model) if STATS else 0
     if lower > 50000:
-        v = (lower // 10000) * 10000        # 向下取 10k 档,保守
+        v = (lower // 10000) * 10000
         src = f"stats-bounds lower≈{lower} upper={upper}"
-        # 有上界且上界比下界高不了多少(夹逼区窄)→ 更逼近真值;仍取下界保守
         calibrate_model_window(model, v, src)
     elif upper:
-        # 只有上界(被拒 body 估不出):拿上界加 10% 余量当工作窗口
         calibrate_model_window(model, (upper * 11) // 10, f"stats-upper={upper}")
 
-# _passthrough 退避重试(2026-09-01):单 key 会话遇 429/5xx/连接错时,proxy 自己退避重发同一
-# 请求(不换模型/不换 key——纯"等几秒重试"),吸收瞬时波动,claude 侧少报 API error。全 env 可调。
-PT_MAX_RETRY   = int(os.environ.get("CREW_PROXY_MAX_RETRY", "2"))       # 额外重试次数(最多打 1+N 次)
-PT_RETRY_BASE  = float(os.environ.get("CREW_PROXY_RETRY_BASE", "1.0"))  # 指数退避基数秒
-PT_RETRY_MAX   = float(os.environ.get("CREW_PROXY_RETRY_MAX", "8.0"))   # 单次退避上限秒
-PT_RETRY_BUDGET= float(os.environ.get("CREW_PROXY_RETRY_BUDGET", "20.0"))  # 总退避预算秒(超了停)
 
-logging.basicConfig(
-    stream=sys.stdout, level=logging.INFO,
-    format="%(asctime)s [crew-proxy] %(message)s", datefmt="%H:%M:%S",
-)
-log = logging.getLogger("crew-proxy")
+if __name__ == "__main__":
+    main()
 
-
-def _is_fail(code):
-    return code in FAIL_CODES or code >= 500
-
-
-# ── config loaders (re-read on each request; files are tiny) ──────────────────────
-def load_keys():
-    """keys.conf -> {alias: api_key}."""
-    out = {}
-    try:
-        with open(KEYS_FILE) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                out[k.strip()] = v.strip()
-    except FileNotFoundError:
-        pass
-    return out
-
-
-def load_policy():
-    """key-policy.conf -> {realmodel: [alias, ...]} (priority order)."""
-    out = {}
-    try:
-        with open(POLICY) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                model, aliases = line.split("=", 1)
-                out[model.strip()] = aliases.split()
-    except FileNotFoundError:
-        pass
-    return out
-
-
-def load_ccr_providers():
-    """Crew's CCR 3 provider map -> list of {name, models[], api_key}."""
-    try:
-        with open(CCR_CFG) as f:
-            cfg = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-    return cfg.get("Providers") or cfg.get("providers") or []
-
-
-def load_ccr_gateway_key():
-    """Return crew's private CCR 3 loopback gateway key, if configured.
-
-    Claude Code talks to crew-proxy using the harmless session token ``test``.
-    CCR 3 instead authenticates every gateway request against APIKEYS, which is
-    managed by :mod:`ccr_v3`.  Never pass Claude's token through to CCR: it is
-    not an upstream provider credential and it is not a CCR gateway key.
-    """
-    try:
-        with open(CCR_CFG) as f:
-            cfg = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return ""
-    gateway = cfg.get("gateway")
-    if isinstance(gateway, dict):
-        value = gateway.get("api_key") or gateway.get("apiKey")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    value = cfg.get("APIKEY")
-    return value.strip() if isinstance(value, str) else ""
-
-
-COOLDOWN_FILE = os.path.join(CFG_DIR, "cooldown.conf")
-
-
-def load_cooldown():
-    """cooldown.conf -> {daily_quota, transient, retryafter_max} in seconds.
-
-    Optional file; absent -> {} and callers fall back to the single COOLDOWN constant
-    (so behavior is byte-identical to before this feature — the default-harmless rule)."""
-    out = {}
-    try:
-        with open(COOLDOWN_FILE) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                try:
-                    out[k.strip()] = float(v.strip())
-                except ValueError:
-                    continue
-    except FileNotFoundError:
-        pass
-    return out
-
-
-def cooldown_for(code, retry_after):
-    """Pick a cooldown duration (seconds) for a failure, per cooldown.conf.
-
-    - No cooldown.conf at all -> fall back to the single COOLDOWN constant (harmless default).
-    - 429 with a Retry-After <= retryafter_max -> use that Retry-After verbatim (upstream knows best).
-    - 429 with a large/absent Retry-After -> daily_quota (quota exhausted, park for a day).
-    - anything else (401/403/5xx/conn error) -> transient (short cooldown).
-    """
-    conf = load_cooldown()
-    if not conf:
-        return COOLDOWN
-    transient = conf.get("transient", COOLDOWN)
-    if code == 429:
-        ra_max = conf.get("retryafter_max", 300.0)
-        if retry_after is not None and retry_after <= ra_max:
-            return retry_after
-        return conf.get("daily_quota", 86400.0)
-    return transient
-
-
-def parse_retry_after(headers):
-    """Extract Retry-After seconds from response headers; None if absent/unparseable.
-    Only the delta-seconds form is honored (HTTP-date form is rare here and ignored)."""
-    if headers is None:
-        return None
-    raw = headers.get("Retry-After") or headers.get("retry-after")
-    if raw is None:
-        return None
-    try:
-        return float(str(raw).strip())
-    except (ValueError, TypeError):
-        return None
-
-
-def load_gateway_auth():
-    """gateway-auth.json -> {login_key: {maps_to, allow_models, erp, admin}}. Empty dict if absent
-    (the dashboard's login-table section then just shows nothing — harmless default)."""
-    try:
-        with open(GATEWAY_AUTH) as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    out = {}
-    for k, v in data.items():
-        if k.startswith("__") or not isinstance(v, dict):
-            continue  # __doc__ etc. are comments, not login entries
-        out[k] = {"maps_to": str(v.get("maps_to", "")),
-                  "allow_models": list(v.get("allow_models") or []),
-                  "erp": str(v.get("erp", "")),
-                  "admin": bool(v.get("admin"))}
-    return out
-
-
-def _raw_gateway_auth():
-    """The gateway-auth.json dict verbatim (including __-prefixed config keys), {} if absent."""
-    try:
-        with open(GATEWAY_AUTH) as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def register_allow_list():
-    """The live default allow_models handed to a new self-registrant. Admin-editable via
-    gateway-auth.json's reserved "__register_allow__" list; falls back to the REGISTER_ALLOW
-    constant when unset. Always returns a fresh list of clean model-name strings."""
-    v = _raw_gateway_auth().get("__register_allow__")
-    if isinstance(v, list):
-        out = [str(m).strip() for m in v if str(m).strip()]
-        if out:
-            return out
-    return list(REGISTER_ALLOW)
-
-
-def sync_ccr_config():
-    """Apply the provider map through CCR 3's authenticated management RPC.
-
-    The adapter performs an atomic CCR configuration save and restarts its
-    gateway when needed. It deliberately never edits CCR's SQLite file.
-    """
-    if not os.path.isfile(CCR_V3_ADAPTER):
-        log.error("CCR 3 adapter is missing: %s", CCR_V3_ADAPTER)
-        return False
-    try:
-        r = subprocess.run([sys.executable, CCR_V3_ADAPTER, "apply", "--provider-map", CCR_CFG],
-                           timeout=30,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if r.returncode:
-            log.error("CCR 3 provider-map apply failed (rc=%s): %s", r.returncode,
-                      r.stdout.decode("utf-8", "replace").strip())
-            return False
-        log.info("CCR 3 provider-map applied")
-        return True
-    except Exception as e:
-        log.error("CCR 3 provider-map apply failed: %s", e)
-        return False
-
-
-def mask_key(key):
-    """Show only enough of a real API key to recognize it, never the secret itself:
-    'sk-…3f9a' (last 4). Empty/short keys collapse to '…'. Used everywhere a key would
-    otherwise surface in an API response or the dashboard."""
-    if not key:
-        return "…"
-    tail = key[-4:] if len(key) >= 4 else key
-    return "sk-…" + tail
-
-
-def provider_for(realmodel, api_key, providers):
-    """Find the CCR provider serving `realmodel` with `api_key` (mirrors crew's ccr_provider_for)."""
-    for p in providers:
-        if realmodel in (p.get("models") or []) and (p.get("api_key") or p.get("apiKey")) == api_key:
-            return p.get("name")
-    return None
-
-
-# ── crew CLI bridge (crew is the single state-mutation entry point) ───────────────
-CREW_STATE = os.environ.get("CREW_STATE") or os.path.expanduser("~/.local/share/claude-crew")
-# 2026-10-20 修:launchd 起 proxy 时 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin,shutil.which
-# 落空 → 兜底裸名 "crew" → FileNotFoundError → dashboard Sessions 表永远空
-# ("crew exec failed: No such file or directory: 'crew'")。加显式路径探测兜底:
-# which > ~/.local/bin/crew(install.sh 装的默认位)> repo bin/crew > 裸名(最终报错)。
-def _find_crew_bin():
-    found = shutil.which("crew")
-    if found:
-        return found
-    for cand in (os.path.expanduser("~/.local/bin/crew"),
-                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "crew")):
-        if os.path.isfile(cand) and os.access(cand, os.X_OK):
-            return cand
-    return "crew"
-CREW_BIN = os.environ.get("CREW_BIN") or _find_crew_bin()
-# Names/aliases/models we will ever pass to a subprocess or write as a filename. Strict
-# allowlist — anything with a shell metacharacter or path separator is rejected outright.
-SAFE_NAME = re.compile(r"^[A-Za-z0-9._,-]+$")
-
-
-def run_crew(args, timeout=10):
-    """Exec `crew <args...>` with shell=False (never string-built). Returns (stdout, err|None)."""
-    try:
-        p = subprocess.run([CREW_BIN, *args], capture_output=True, text=True,
-                           timeout=timeout, shell=False)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        return None, f"crew exec failed: {e}"
-    if p.returncode != 0:
-        return None, (p.stderr or p.stdout or f"crew exited {p.returncode}").strip()
-    return p.stdout, None
-
-
-def _http_err_summary(e, limit=200):
-    """Best-effort error-message summary from an urllib HTTPError for the dashboard log
-    (2026-10-20). Reads the body without consuming it for the relay path — e.read() on an
-    HTTPError can only be done once, so we peek via a copy; on any failure falls back to
-    the exception string. Used ONLY for display, never for control flow."""
-    try:
-        raw = e.read()
-        e.read = lambda: raw  # put it back for the later _relay(e)
-        txt = raw.decode("utf-8", "replace")
-        try:
-            j = json.loads(txt)
-            for k in ("message", "error", "error.message"):
-                v = j.get(k) if isinstance(j, dict) else None
-                if not v and isinstance(j.get("error"), dict):
-                    v = j["error"].get("message")
-                if v:
-                    return f"HTTP {e.code}: {str(v)[:limit]}"
-            return f"HTTP {e.code}: {txt[:limit]}"
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            return f"HTTP {e.code}: {txt[:limit]}"
-    except Exception:
-        return f"HTTP {getattr(e, 'code', '?')}: {str(e)[:limit]}"
-
-
-def _read_state_field(name, field):
-    """Read one <name>.<field> state file under CREW_STATE. Returns '' when absent."""
-    # SAFE_NAME 校验防路径穿越(name 来自 crew ls --json / dashboard 输入,不信任)。
-    if not SAFE_NAME.match(name or ""):
-        return ""
-    try:
-        with open(os.path.join(CREW_STATE, f"{name}.{field}"), encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
-def _api_sessions_fallback():
-    """crew CLI 不可用时,直接读 state 目录组装 sessions(降级只读视图)。
-    2026-10-20 修:dashboard Sessions 表以前 crew 一挂就整表消失;现在降级展示
-    name/backend/key/dir(state 文件在就在),tmux/status 标 unknown。"""
-    sessions = []
-    try:
-        for fn in os.listdir(CREW_STATE):
-            if not fn.endswith(".backend"):
-                continue
-            name = fn[:-len(".backend")]
-            sessions.append({
-                "name": name,
-                "backend": _read_state_field(name, "backend") or "?",
-                "key": _read_state_field(name, "key") or "?",
-                "dir": _read_state_field(name, "dir") or "-",
-                "sid": _read_state_field(name, "sid") or "",
-                "tmux": None, "status": "unknown (crew CLI 不可用,降级读 state)",
-            })
-    except OSError:
-        pass
-    return {"sessions": sessions, "degraded": True}
-
-
-
-# ── circuit breaker (per key alias) ───────────────────────────────────────────────
-class Breaker:
-    """Per-alias consecutive-failure counter with a cooldown trip. Thread-safe."""
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._fails = {}      # alias -> consecutive failure count
-        self._tripped = {}    # alias -> cooldown-expiry epoch
-        self._load()
-
-    def healthy(self, alias, now):
-        exp = self._tripped.get(alias)
-        if exp is None:
-            return True
-        if now >= exp:            # cooldown elapsed -> auto-recover
-            self._tripped.pop(alias, None)
-            self._fails[alias] = 0
-            return True
-        return False
-
-    def pick(self, aliases, now):
-        """Highest-priority healthy alias; None if every alias is tripped."""
-        with self._lock:
-            for a in aliases:
-                if self.healthy(a, now):
-                    return a
-            return None
-
-    def record_ok(self, alias):
-        with self._lock:
-            if self._fails.get(alias):
-                self._fails[alias] = 0
-            self._persist()
-
-    def record_fail(self, alias, now, cooldown=None):
-        """Increment; trip at FAIL_N. Returns True if this failure tripped the key.
-        cooldown: seconds to park a tripped key (default None -> the single COOLDOWN
-        constant, i.e. behavior identical to before tiered cooldown was added)."""
-        cd = COOLDOWN if cooldown is None else cooldown
-        with self._lock:
-            n = self._fails.get(alias, 0) + 1
-            self._fails[alias] = n
-            tripped = False
-            if n >= FAIL_N:
-                self._tripped[alias] = now + cd
-                tripped = True
-                log.warning("key '%s' TRIPPED after %d fails; cooling down %.0fs", alias, n, cd)
-            self._persist()
-            return tripped
-
-    def snapshot(self, aliases, now):
-        """Per-alias {consec_fails, state, cooldown_left} for the dashboard. Read-only:
-        does NOT mutate (unlike healthy(), which auto-recovers) so /api/status is side-effect free."""
-        out = {}
-        with self._lock:
-            for a in aliases:
-                exp = self._tripped.get(a)
-                if exp is not None and now < exp:
-                    out[a] = {"consec_fails": self._fails.get(a, 0), "state": "tripped",
-                              "cooldown_left": round(exp - now)}
-                else:
-                    out[a] = {"consec_fails": self._fails.get(a, 0), "state": "healthy",
-                              "cooldown_left": 0}
-        return out
-
-    # -- persistence (best effort; state survives restart) --
-    def _persist(self):
-        try:
-            os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-            tmp = STATE_FILE + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump({"fails": self._fails, "tripped": self._tripped}, f)
-            os.replace(tmp, STATE_FILE)
-        except OSError:
-            pass
-
-    def _load(self):
-        try:
-            with open(STATE_FILE) as f:
-                d = json.load(f)
-            self._fails = {str(k): int(v) for k, v in (d.get("fails") or {}).items()}
-            self._tripped = {str(k): float(v) for k, v in (d.get("tripped") or {}).items()}
-        except (FileNotFoundError, json.JSONDecodeError, ValueError):
-            pass
-
-
-BREAKER = Breaker()
-
-
-class Stats:
-    """Request-level counters + token usage + a bounded in-memory log ring buffer.
-    Token usage is BEST-EFFORT and parsed strictly OFF the forward path (see _relay):
-    a missing/garbled usage just means that request isn't counted — it never blocks or
-    slows the proxying. Counts only (tokens + request counts), never prompt/response text."""
-
-    LOG_MAX = 200
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self.totals = {"requests": 0, "ok": 0, "fail": 0, "in_tokens": 0, "out_tokens": 0}
-        self.per_key = {}    # alias -> {requests, ok, fail, in_tokens, out_tokens}
-        self.per_model = {}  # model -> {requests, in_tokens, out_tokens}
-        self._logs = []      # list of dicts, newest last, capped at LOG_MAX
-        self._t0 = time.time()
-
-    def _key(self, alias):
-        return self.per_key.setdefault(
-            alias, {"requests": 0, "ok": 0, "fail": 0, "in_tokens": 0, "out_tokens": 0})
-
-    def _model(self, model):
-        return self.per_model.setdefault(model, {"requests": 0, "in_tokens": 0, "out_tokens": 0})
-
-    def record(self, alias, model, status, ok, forced, failover, latency=None, err_summary=None):
-        with self._lock:
-            self.totals["requests"] += 1
-            self.totals["ok" if ok else "fail"] += 1
-            k = self._key(alias)
-            k["requests"] += 1
-            k["ok" if ok else "fail"] += 1
-            self._model(model)["requests"] += 1
-            entry = {
-                "t": round(time.time() - self._t0, 1),
-                # 2026-10-20:相对秒看不出请求发生在几点;补墙钟 epoch,前端渲染 HH:MM:SS
-                "ts": round(time.time(), 0),
-                "model": model, "alias": alias, "status": status,
-                "ok": ok, "forced": forced, "failover": failover,
-            }
-            # 2026-10-20:失败请求记录错误摘要(截断),前端 hover/展开可见 —— 以前 400/401
-            # 只显示状态码,真实上游错误信息看不到(prompt is too long 之类只能翻 proxy 日志)。
-            if not ok and err_summary:
-                entry["err"] = str(err_summary)[:200]
-            if latency is not None:
-                entry["ms"] = round(latency * 1000)
-            self._logs.append(entry)
-            if len(self._logs) > self.LOG_MAX:
-                del self._logs[:-self.LOG_MAX]
-
-    def record_usage(self, alias, model, in_tok, out_tok):
-        """Add token usage to the last-recorded request's key/model. Best-effort; called
-        AFTER the response body has been relayed to the client (never on the hot path)."""
-        if not in_tok and not out_tok:
-            return
-        with self._lock:
-            self.totals["in_tokens"] += in_tok
-            self.totals["out_tokens"] += out_tok
-            k = self._key(alias)
-            k["in_tokens"] += in_tok
-            k["out_tokens"] += out_tok
-            m = self._model(model)
-            m["in_tokens"] += in_tok
-            m["out_tokens"] += out_tok
-            # 2026-10-20 ctx 校准:每模型最大成功 input = 真实窗口上界证据(GLM-5.2 这类
-            # 报错不带数字时,统计兜底靠它)。维护成本 O(1)。
-            if in_tok > m.get("max_in", 0):
-                m["max_in"] = in_tok
-            if self._logs and self._logs[-1]["alias"] == alias:
-                self._logs[-1]["in_tok"] = in_tok
-                self._logs[-1]["out_tok"] = out_tok
-
-    def max_input_for(self, model):
-        """Largest successful input seen for this model (upper-bound evidence for
-        window calibration). 0 when nothing recorded."""
-        with self._lock:
-            return self._model(model).get("max_in", 0)
-
-    def status(self):
-        with self._lock:
-            return {"totals": dict(self.totals),
-                    "per_key": {a: dict(v) for a, v in self.per_key.items()},
-                    "per_model": {m: dict(v) for m, v in self.per_model.items()}}
-
-    def logs(self, n):
-        with self._lock:
-            return self._logs[-n:][::-1]  # newest first
-
-
-STATS = Stats()
-
-
-class UsageSeries:
-    """Per-login-key token usage bucketed into fixed time windows, for the self-service
-    usage chart. Separate from Stats (which counts by real alias): here the dimension is
-    the client LOGIN key, so two tickets that map to the same real key stay distinct.
-
-    Thread-safe: add() holds the lock for the whole read-modify-write and accumulates
-    directly by (login, bucket) — it never relies on a 'last request' heuristic, so it is
-    correct under concurrent requests sharing one login key. Counts only, never content."""
-
-    BUCKET_SEC = 600          # 10-minute buckets
-    WINDOW_DAYS = 7
-    FLUSH_MIN_SEC = 20
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        # login -> {bucket_ts(int) -> {"turns", "inTok", "outTok"}}
-        self._buckets = {}
-        self._last_flush = 0.0
-        self._dirty = False
-
-    def _bucket_ts(self, now):
-        return int(now // self.BUCKET_SEC) * self.BUCKET_SEC
-
-    def add(self, login, in_tok, out_tok, now=None):
-        if now is None:
-            now = time.time()
-        bts = self._bucket_ts(now)
-        with self._lock:
-            login_map = self._buckets.setdefault(login, {})
-            b = login_map.setdefault(bts, {"turns": 0, "inTok": 0, "outTok": 0})
-            b["turns"] += 1
-            b["inTok"] += int(in_tok or 0)
-            b["outTok"] += int(out_tok or 0)
-            self._dirty = True
-
-    def labels(self):
-        """Every login label that has recorded usage (keys of the bucket store). Includes
-        'direct' (non-gateway traffic) and orphans (a login since removed from the auth
-        table) — so the admin usage view can surface traffic the login table forgot."""
-        with self._lock:
-            return sorted(k for k, m in self._buckets.items() if m)
-
-    def prune(self, now=None):
-        if now is None:
-            now = time.time()
-        cutoff = now - self.WINDOW_DAYS * 86400
-        with self._lock:
-            for login in list(self._buckets):
-                login_map = self._buckets[login]
-                for bts in list(login_map):
-                    if bts < cutoff:
-                        del login_map[bts]
-                if not login_map:
-                    del self._buckets[login]
-
-    def snapshot(self):
-        with self._lock:
-            return {
-                "version": 1,
-                "bucketSec": self.BUCKET_SEC,
-                "buckets": {
-                    login: {str(bts): dict(v) for bts, v in series.items()}
-                    for login, series in self._buckets.items()
-                },
-            }
-
-    def flush(self, force=False, now=None):
-        if now is None:
-            now = time.time()
-        with self._lock:
-            if not force and (not self._dirty or now - self._last_flush < self.FLUSH_MIN_SEC):
-                return
-        data = self.snapshot()
-        try:
-            os.makedirs(os.path.dirname(USAGE_FILE), exist_ok=True)
-            tmp = USAGE_FILE + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(data, f)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, USAGE_FILE)
-        except OSError as e:
-            log.warning("usage flush failed: %s", e)
-            return  # leave _dirty=True so the next flush retries
-        with self._lock:
-            self._last_flush = now
-            self._dirty = False
-
-    def load(self):
-        try:
-            with open(USAGE_FILE) as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return
-        if not isinstance(data, dict) or not isinstance(data.get("buckets"), dict):
-            return
-        restored = {}
-        for login, series in data["buckets"].items():
-            if not isinstance(series, dict):
-                continue
-            out = {}
-            for bts, v in series.items():
-                try:
-                    out[int(bts)] = {"turns": int(v.get("turns", 0)),
-                                     "inTok": int(v.get("inTok", 0)),
-                                     "outTok": int(v.get("outTok", 0))}
-                except (ValueError, TypeError, AttributeError):
-                    continue
-            if out:
-                restored[str(login)] = out
-        with self._lock:
-            self._buckets = restored
-        # Prune relative to the newest restored bucket (data may predate wall-clock,
-        # e.g. after a long downtime): drop only what is >WINDOW_DAYS older than the
-        # series' own latest point, so a valid round-trip survives.
-        newest = max((bts for series in restored.values() for bts in series),
-                     default=None)
-        if newest is not None:
-            self.prune(now=newest + self.BUCKET_SEC)
-
-    def series(self, login, days=7, now=None):
-        if now is None:
-            now = time.time()
-        cutoff = now - days * 86400
-        with self._lock:
-            if login is None:
-                merged = {}
-                for series in self._buckets.values():
-                    for bts, v in series.items():
-                        if bts < cutoff:
-                            continue
-                        m = merged.setdefault(bts, {"turns": 0, "inTok": 0, "outTok": 0})
-                        m["turns"] += v["turns"]; m["inTok"] += v["inTok"]; m["outTok"] += v["outTok"]
-                src = merged
-            else:
-                src = {bts: dict(v) for bts, v in self._buckets.get(login, {}).items() if bts >= cutoff}
-        buckets = []
-        daily = {}
-        tot_new = tot_turns = 0
-        for bts in sorted(src):
-            v = src[bts]
-            new = v["inTok"] + v["outTok"]
-            tot_new += new; tot_turns += v["turns"]
-            buckets.append({
-                "t": bts * 1000,
-                "newTokens": new, "inputSum": v["inTok"], "outputSum": v["outTok"],
-                "turns": v["turns"],
-                "perReqNew": round(new / v["turns"]) if v["turns"] else 0,
-            })
-            day = time.strftime("%Y-%m-%d", time.localtime(bts))
-            dd = daily.setdefault(day, {"day": day, "newTokens": 0, "turns": 0})
-            dd["newTokens"] += new; dd["turns"] += v["turns"]
-        daily_list = []
-        for day in sorted(daily):
-            dd = daily[day]
-            dd["perReqNew"] = round(dd["newTokens"] / dd["turns"]) if dd["turns"] else 0
-            daily_list.append(dd)
-        return {
-            "generatedAt": int(now * 1000),
-            "bucketMin": self.BUCKET_SEC // 60,
-            "windowH": days * 24,
-            "login": login if login is not None else "__all__",
-            "buckets": buckets,
-            "daily": daily_list,
-            "totals": {
-                "newTokens": tot_new, "turns": tot_turns,
-                "perReqNew": round(tot_new / tot_turns) if tot_turns else 0,
-                "days": len(daily_list),
-            },
-        }
-
-
-USAGE = UsageSeries()
-
-
-# ── usage parsing (best-effort, OFF the forward path) ─────────────────────────────
-USAGE_STREAM_CAP = 256 * 1024  # cap the bytes we retain for stream usage scanning
-
-
-def parse_usage(body_bytes):
-    """Extract (input_tokens, output_tokens) from a captured response body. Handles both
-    the non-streaming JSON shape and SSE streams. Returns (0, 0) on anything unexpected —
-    this is best-effort accounting, never a hard dependency. Supports Anthropic
-    (input_tokens/output_tokens) and OpenAI (prompt_tokens/completion_tokens) shapes."""
-    if not body_bytes:
-        return 0, 0
-    try:
-        text = body_bytes.decode("utf-8", "replace")
-    except Exception:
-        return 0, 0
-
-    def _from_usage(u):
-        if not isinstance(u, dict):
-            return None
-        it = u.get("input_tokens", u.get("prompt_tokens"))
-        ot = u.get("output_tokens", u.get("completion_tokens"))
-        if it is None and ot is None:
-            return None
-        return int(it or 0), int(ot or 0)
-
-    # Non-streaming: a single JSON object with a top-level "usage".
-    stripped = text.lstrip()
-    if stripped.startswith("{"):
-        try:
-            obj = json.loads(stripped)
-            r = _from_usage(obj.get("usage"))
-            if r:
-                return r
-        except (json.JSONDecodeError, AttributeError):
-            pass
-
-    # Streaming (SSE): scan `data:` lines for usage. Anthropic reports input_tokens in
-    # message_start and the final output_tokens in message_delta; OpenAI puts a usage
-    # object in the last chunk when stream_options.include_usage is set. We take the max
-    # input seen and the max output seen (final cumulative value).
-    in_tok = out_tok = 0
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        payload = line[5:].strip()
-        if not payload or payload == "[DONE]":
-            continue
-        try:
-            evt = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        # Anthropic: usage nested under the event or under message
-        for u in (evt.get("usage"), (evt.get("message") or {}).get("usage")):
-            r = _from_usage(u)
-            if r:
-                in_tok = max(in_tok, r[0])
-                out_tok = max(out_tok, r[1])
-    return in_tok, out_tok
-
-
-
-# ── dashboard (single self-contained page; vanilla JS polling, no build step) ─────
 DASHBOARD_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>crew-proxy</title>
@@ -1345,7 +527,9 @@ curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
 
 <div id=dashview>
 <div id=totals></div>
+<div id=svcStatus></div>
 <div id=health></div>
+<div id=latencyPanel></div>
 <div id=daily></div>
 <div id=chartWrap><canvas id=tokenChart></canvas><div id=tokenTip></div></div>
 <div id=admin>
@@ -1373,6 +557,12 @@ curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
   <button id=ra-save>保存默认</button>
   <span id=ra-msg class=dim></span>
  </div>
+ <h3>应急会话(一键起 detached tmux claude 会话)</h3>
+ <div class=row>
+  <select id=em-key></select><select id=em-model></select>
+  <button id=em-go>一键起会话</button>
+ </div>
+ <div id=em-msg class=dim style="font-size:12px"></div>
 </div>
 </div>
 
@@ -1402,10 +592,12 @@ async function load(){
   $('#who').textContent=(d.isAdmin?'管理员 · ':'')+'当前查看: '+d.login;
   $('#dmeta').textContent='近 '+(d.windowH/24)+' 天 · '+d.buckets.length+' 点';
   renderTotals(d);renderDaily(d);draw();
+  renderLatency(d.latency);
+  renderSvcStatus(d.health);
   loadHealth();
   $('#adminview').style.display=d.isAdmin?'inline':'none';
   $('#admin').style.display=d.isAdmin?'block':'none';
-  if(d.isAdmin){populateViewsel();loadAdmin();}
+  if(d.isAdmin){populateViewsel();loadAdmin();renderEmergency(d.emergency);}
 }
 function populateViewsel(){
   const sel=$('#viewsel');const logins=(_d&&_d.logins)||[];const orphans=new Set((_d&&_d.orphan_logins)||[]);
@@ -1477,6 +669,26 @@ $('#ra-save').onclick=async()=>{
   if(!r.ok){$('#ra-msg').textContent=r.body.error||'保存失败';}
   else{$('#ra-msg').textContent='已保存: '+((r.body.allow||[]).join(' ')||'(内置默认)');loadAdmin();}
 };
+let _emKeys=[];
+function renderEmergency(em){
+  _emKeys=(em&&em.keys)||[];
+  $('#em-key').innerHTML='<option value="">选 key…</option>'+_emKeys.map(k=>'<option value="'+esc(k.alias)+'">'+esc(k.alias)+'</option>').join('');
+  $('#em-model').innerHTML='';$('#em-msg').textContent='';
+}
+$('#em-key').onchange=()=>{
+  const k=_emKeys.find(x=>x.alias===$('#em-key').value);
+  $('#em-model').innerHTML='<option value="">选模型…</option>'+((k&&k.models)||[]).map(m=>'<option value="'+esc(m)+'">'+esc(m)+'</option>').join('');
+};
+$('#em-go').onclick=async()=>{
+  const key=$('#em-key').value,model=$('#em-model').value;
+  const msg=$('#em-msg');
+  if(!key||!model){msg.innerHTML='<span style="color:#e5534b">先选 key 和模型</span>';return;}
+  const btn=$('#em-go');btn.disabled=true;msg.textContent='起会话中(约几秒,spawn detached tmux)…';
+  const r=await apost('/api/emergency-session',{key,model});
+  btn.disabled=false;
+  if(r.ok&&r.body.ok){msg.innerHTML='<span style="color:#4ec98a">✅ 已起会话: <b>'+esc(r.body.session_name)+'</b></span> <span class=dim>· 接入: <code>crew attach '+esc(r.body.session_name)+'</code></span>';}
+  else{msg.innerHTML='<span style="color:#e5534b">❌ '+esc(r.body.error||'起会话失败')+'</span>';}
+};
 $('#ak-add').onclick=async()=>{
   const r=await apost('/api/ccr/provider',{alias:$('#ak-alias').value.trim(),key:$('#ak-key').value.trim(),model:$('#ak-model').value.trim(),base_url:$('#ak-base').value.trim()});
   if(!r.ok)alert(r.body.error||'失败');else{$('#ak-key').value=$('#ak-alias').value='';loadAdmin();}
@@ -1495,6 +707,23 @@ function renderDaily(d){const days=d.daily||[];if(!days.length){$('#daily').inne
   $('#daily').innerHTML=days.map(x=>{const h=Math.max(2,Math.round((x.newTokens||0)/mx*80));
     return '<div class=dcol title="'+esc(x.day)+' 新增 '+fmtK(x.newTokens)+' · '+fmtK(x.turns)+' 请求"><div>'+fmtK(x.newTokens)+'</div><div class=dbarwrap><div class=dbar style=height:'+h+'px></div></div><div class=dday>'+esc(x.day.slice(5))+'</div></div>';
   }).join('');}
+function fmtMs(v){if(v==null)return '—';return v>=1000?(v/1000).toFixed(1)+'s':Math.round(v)+'ms';}
+function renderLatency(lat){
+  const el=$('#latencyPanel');if(!el)return;
+  const rows=(lat&&lat.models)||[];
+  if(!rows.length){el.innerHTML='<div class=card><h3 style="margin:0 0 6px;font-size:13px;color:#8b95a3">模型延迟分布(近 '+(lat&&lat.windowH?lat.windowH:24)+'h)</h3><span class=dim>暂无延迟数据</span></div>';return;}
+  el.innerHTML='<div class=card><h3 style="margin:0 0 6px;font-size:13px;color:#8b95a3">模型延迟分布(近 '+(lat.windowH||24)+'h)<span class=dim style="font-weight:400"> · 按请求数排序;分位来自成功请求的采样</span></h3>'+
+  '<table><tr><th>模型</th><th>请求数</th><th>成功率</th><th>avg</th><th>P50</th><th>P90</th><th>P99</th><th>TTFT P50/P90/P99</th></tr>'+
+  rows.map(m=>{const sr=(m.successRate==null?'—':(m.successRate*100).toFixed(0)+'%');
+    const ttft=(m.ttftp50Ms==null)?'—':(fmtMs(m.ttftp50Ms)+' / '+fmtMs(m.ttftp90Ms)+' / '+fmtMs(m.ttftp99Ms));
+    return '<tr><td>'+esc(m.model)+'</td><td>'+m.n+'</td><td>'+sr+'</td><td>'+fmtMs(m.avgMs)+'</td><td>'+fmtMs(m.p50Ms)+'</td><td>'+fmtMs(m.p90Ms)+'</td><td>'+fmtMs(m.p99Ms)+'</td><td class=dim>'+ttft+'</td></tr>';
+  }).join('')+'</table></div>';
+}
+function renderSvcStatus(h){
+  const el=$('#svcStatus');if(!el)return;
+  const ok=v=>v?'<span style="color:#4ec98a">✓</span>':'<span style="color:#e5534b">✗</span>';
+  el.innerHTML='<div style="margin:4px 0 10px;font-size:12px">服务状态: proxy '+ok(h&&h.proxy)+' <span class=dim>/</span> CCR '+ok(h&&h.ccr)+(h&&h.ccr?'':' <span class=dim>(3456 无响应,转发会失败)</span>')+'</div>';
+}
 function draw(){
   const cv=$('#tokenChart');const dpr=window.devicePixelRatio||1;
   const W0=cv.clientWidth||800,H0=220;cv.width=W0*dpr;cv.height=H0*dpr;const g=cv.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W0,H0);
@@ -1545,7 +774,118 @@ setInterval(()=>{if(KEY)load();},30000);
 </script></body></html>"""
 
 
-# ── HTTP handler ──────────────────────────────────────────────────────────────────
+
+
+def _ccr_tcp_healthy(timeout=1.0):
+    """Cheap CCR liveness probe: open a TCP connection to CCR's listen port.
+    connect-success == healthy; 1s cap so a wedged CCR never blocks a request thread.
+    The proxy itself is implicitly healthy (this very response is served by it)."""
+    try:
+        u = urllib.parse.urlparse(CCR_URL)
+        host = u.hostname or "127.0.0.1"
+        port = u.port or 3456
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.close()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _fault_for_status(code):
+    """HTTP 状态 → 内部故障短名(日志侧分类用;401/403=key 问题,400=路由/请求问题,
+    5xx/429=上游繁忙)。连接类错误由调用方自己定 hint(如 ccr-down / stream-broken)。"""
+    if code in (401, 403):
+        return "upstream-401"
+    if code == 400:
+        return "upstream-400"
+    if code in (429, 500, 502, 503, 504):
+        return "upstream-5xx"
+    return "unknown"
+
+
+def classify_error(status, hint, detail=""):
+    """统一报错分层标注(2026-10-28,#13):给 proxy 产生的错误加 [layer][fault] 标签 +
+    可操作建议,同一文案同时进 error body 与 proxy 日志 —— 两侧一致,会话侧(CC 报错弹窗)
+    与日志侧都能一眼定位链路层级。upstream 透传错误(CCR/gateway 回的 400/401/5xx)
+    保持 body 原样转发、只在此做日志侧分类,不重写上游文案(避免破坏 claude 的错误解析)。
+    status: HTTP 状态码或 "ERR";hint: 内部故障短名(见 _FAULT 表);detail: 附加现场信息。"""
+    _FAULT = {
+        "ccr-down": ("[proxy][ccr-down]",
+                     "crew-proxy 连不上 CCR(:3456)。下一步: 运行 crew doctor;重启 com.claudecrew.ccr "
+                     "(launchctl kickstart -k gui/$(id -u)/com.claudecrew.ccr) 后重试。"),
+        "joycode-down": ("[proxy][joycode-down]",
+                         "CCR→joycode(:8765) 链路不通。下一步: 检查 :8765 是否在跑;重启 com.claudecrew.joycode。"),
+        "no-key": ("[proxy][no-key]",
+                   "keys.conf 里没有可用 key 别名路由该请求。下一步: crew keys 查看;crew addkey <key> <别名> 加 key。"),
+        "no-provider": ("[proxy][no-provider]",
+                        "CCR provider map 里没有能路由该模型的 provider。下一步: crew sync-models --key <别名>;"
+                        "或 crew model-switch <model> <key>。"),
+        "upstream-401": ("[proxy][upstream-401]",
+                         "该 key 被上游拒绝(401/403):key 失效或未注册。下一步: 换 key(crew addkey <新key>)后重试。"),
+        "upstream-400": ("[proxy][upstream-400]",
+                         "上游拒绝了请求(400):模型路由/provider 状态问题。下一步: crew sync-models --key <别名>;"
+                         "或 crew model-switch <model> <key>。"),
+        "upstream-5xx": ("[proxy][upstream-5xx]",
+                         "上游(CCR/joycode/gateway)5xx 或限流:服务繁忙或故障。下一步: crew doctor;查 proxy/CCR/joycode 日志。"),
+        "breaker-open": ("[breaker][open]",
+                         "熔断中:该 key 连续失败在冷却(cooldown)。下一步: 等冷却结束;确系上游故障先修上游。"),
+        "all-failed": ("[breaker][all-failed]",
+                       "所有可用 key 都失败(failover 耗尽,含熔断冷却)。下一步: 看最近一条上游错误定位根因;修好后重试。"),
+        "stream-broken": ("[proxy][stream-broken]",
+                          "流式响应中途断开(BrokenPipe/ConnectionReset/超时)。下一步: 重试请求;持续出现查上游日志。"),
+        "unknown": ("[proxy][unknown]",
+                    "未知错误,详见 proxy 日志。"),
+    }
+    tag, sug = _FAULT.get(hint, _FAULT["unknown"])
+    msg = f"{tag} {sug}"
+    if detail:
+        msg = f"{msg} 详情: {detail}"
+    return msg
+
+
+def _emergency_key_models():
+    """Admin-only dropdown data for the emergency-session form: [{alias, models}].
+    models = real model names that alias can route = provider models whose api_key ==
+    keys.conf[alias], unioned with models whose policy chain names the alias. Only
+    alias + model names — no key material of any kind."""
+    keys = load_keys()
+    by_alias = {a: set() for a in keys}
+    for p in load_ccr_providers():
+        ak = p.get("api_key") or p.get("apiKey")
+        for a, kv in keys.items():
+            if ak == kv:
+                by_alias[a].update(p.get("models") or [])
+    for m, aliases in load_policy().items():
+        for a in aliases:
+            if a in by_alias:
+                by_alias[a].add(m)
+    return [{"alias": a, "models": sorted(by_alias[a])} for a in sorted(by_alias)]
+
+
+def _run_crew_spawn(name, key, model, timeout=90):
+    """Spawn `crew <name> --key <key> --model <model>` (detached tmux mode).
+    Argument list only, shell=False — never a string, never shell=True. The proxy
+    runs under launchd with a bare PATH (/usr/bin:/bin:...), so inject the homebrew /
+    ~/.local/bin / ~/.npm-global/bin dirs where tmux, node and claude actually live.
+    Returns (stdout, err|None)."""
+    crew_bin = _find_crew_bin()
+    env = os.environ.copy()
+    extra = ["/opt/homebrew/bin",
+             os.path.expanduser("~/.local/bin"),
+             os.path.expanduser("~/.npm-global/bin")]
+    env["PATH"] = os.pathsep.join([p for p in extra if os.path.isdir(p)] +
+                                  [env.get("PATH", "/usr/bin:/bin")])
+    try:
+        p = subprocess.run([crew_bin, name, "--key", key, "--model", model],
+                           capture_output=True, text=True, timeout=timeout,
+                           shell=False, env=env)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return None, "crew spawn failed: %s" % e
+    if p.returncode != 0:
+        return None, (p.stderr or p.stdout or "crew exited %d" % p.returncode).strip()
+    return p.stdout, None
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1577,12 +917,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_err(self, code, msg):
         body = json.dumps({"error": {"message": msg, "type": "crew_proxy_error"}}).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(body)
+        # 客户端可能已断开(上游超时/用户 Ctrl-C 后重连),此时 send_response/end_headers/write
+        # 都会抛 BrokenPipeError/ConnectionResetError。这类错误只说明"没人收错误了",
+        # 不该再冒泡成 traceback 刷日志 —— 静默返回即可。
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _send_json(self, obj, code=200):
         body = json.dumps(obj).encode()
@@ -1714,6 +1060,13 @@ class Handler(BaseHTTPRequestHandler):
             login = key
         out = USAGE.series(login, days=days)
         out["isAdmin"] = bool(entry.get("admin"))
+        # 2026-10-28:每模型最近 24h 延迟分布(P50/P90/P99/avg/请求数/成功率,流式含
+        # TTFT 分位)。纯新增字段——模型名+延迟不含 key 材料,与 /api/health 暴露 models
+        # 的口径一致,登录用户都可见,辅助模型切换决策。
+        out["latency"] = LATENCY.report()
+        # 2026-10-28:服务状态行。proxy 自身隐式健康(本响应就是它发的);CCR 用 1s TCP
+        # connect 探测 127.0.0.1:3456。纯新增字段,不含任何敏感信息。
+        out["health"] = {"proxy": True, "ccr": _ccr_tcp_healthy()}
         if entry.get("admin"):
             # give the admin dropdown the login list here, so it needs no extra (and no
             # unauthenticated /api/status) call through the gateway. Union the login table
@@ -1723,6 +1076,8 @@ class Handler(BaseHTTPRequestHandler):
             usage_labels = set(USAGE.labels())
             out["logins"] = sorted(authset | usage_labels)
             out["orphan_logins"] = sorted(usage_labels - authset)  # usage but no login entry
+            # emergency-session form dropdown data: alias + the models each alias routes.
+            out["emergency"] = {"keys": _emergency_key_models()}
         return self._send_json(out)
 
     # -- pool health: any valid login key may see which pool keys are down (health only,
@@ -1826,6 +1181,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_register_allow(body); return
         if path == "/api/register":
             self._api_register(body); return
+        if path == "/api/emergency-session":
+            self._api_emergency_session(body); return
         # Only /v1/messages and /v1/chat/completions carry a model to route on.
         if path.endswith("/messages") or path.endswith("/chat/completions"):
             if path.endswith("/messages"):
@@ -1940,6 +1297,43 @@ class Handler(BaseHTTPRequestHandler):
             changed.append("key")
         return self._send_json({"ok": True, "changed": changed,
                                 "note": "takes effect next `crew <name>` (restart the session to apply now)"})
+
+    # -- admin: one-click emergency session. Spawns a detached tmux claude session via
+    #    the crew CLI. Hard safety:
+    #    (a) command injection — subprocess uses an argv list, shell=False, never a string.
+    #    (b) whitelist — key must be a real keys.conf alias; model must be one THAT key can
+    #        actually route (provider models for its api_key ∪ models whose policy chain
+    #        names the alias). 400 on anything else, before any subprocess.
+    #    (c) auth — same require_admin() gate as every other management endpoint.
+    #    Returns ONLY the server-generated session name. No key material, no api_key,
+    #    never echoed back (the /api/switch leak lesson).
+    def _api_emergency_session(self, body):
+        if not self.require_admin():
+            return self._send_json({"ok": False, "error": "admin required"}, 403)
+        d = self._read_json(body)
+        if d is None:
+            return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
+        key = str(d.get("key", "")).strip()
+        model = str(d.get("model", "")).strip()
+        keys = load_keys()
+        if key not in keys:
+            return self._send_json({"ok": False, "error": "unknown key alias"}, 400)
+        allowed = set()
+        for p in load_ccr_providers():
+            if (p.get("api_key") or p.get("apiKey")) == keys[key]:
+                allowed.update(p.get("models") or [])
+        for m, aliases in load_policy().items():
+            if key in aliases:
+                allowed.add(m)
+        if model not in allowed:
+            return self._send_json({"ok": False, "error": "model not routable for this key"}, 400)
+        # Server-generated unique name only — never trust a client-supplied name.
+        name = "emergency-%s-%s-%s" % (key, time.strftime("%Y%m%d-%H%M%S"),
+                                       secrets.token_hex(3))
+        _, err = _run_crew_spawn(name, key, model)
+        if err:
+            return self._send_json({"ok": False, "error": err}, 500)
+        return self._send_json({"ok": True, "session_name": name})
 
     # -- stage D: add a key + CCR provider (writes global config; backs up first) --
     def _api_ccr_provider(self, body):
@@ -2480,7 +1874,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = self._relay(e, streaming=False, model=model, req_body=body)
                 if model and not result["cancelled"]:
                     STATS.record("direct", model, e.code, ok=False, forced=False, failover=False,
-                                 err_summary=f"HTTP {e.code}")
+                                 latency=time.time() - _t, err_summary=f"HTTP {e.code}")
                 return
             except Exception as e:
                 # 连接错(timeout/reset 等)也可重试
@@ -2493,16 +1887,23 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                 if model:
                     STATS.record("direct", model, "ERR", ok=False, forced=False, failover=False,
-                                 err_summary=str(e)[:200])
-                self._send_err(502, f"crew-proxy: CCR unreachable: {e}")
+                                 latency=time.time() - _t, err_summary=str(e)[:200])
+                msg = classify_error(502, "ccr-down", str(e))
+                log.warning(msg)
+                self._send_err(502, msg)
                 return
             else:
                 if model:
                     result = self._relay(resp, streaming=stream, capture=True)
                     if not result["cancelled"]:
+                        # 流式:result["ttft"]=首 chunk 墙钟;非流式没有首 token 概念,记 None。
+                        _ttft = result.get("ttft")
+                        if _ttft is not None:
+                            _ttft = _ttft - _t
                         STATS.record("direct", model, getattr(resp, "status", 200) if result["ok"] else "ERR",
                                      ok=result["ok"], forced=False, failover=False,
-                                     latency=time.time() - _t, err_summary=result["error"])
+                                     latency=time.time() - _t, err_summary=result["error"],
+                                     ttft=_ttft)
                     captured = result["body"]
                     if result["ok"] and captured:
                         try:
@@ -2575,7 +1976,9 @@ class Handler(BaseHTTPRequestHandler):
                 log.warning("alias '%s' not in keys.conf; skipping", alias)
                 tried.append(alias)
                 if len(tried) >= len(policy):
-                    self._send_err(502, f"crew-proxy: no usable key for {realmodel}")
+                    msg = classify_error(502, "no-key", f"realmodel={realmodel}")
+                    log.warning(msg)
+                    self._send_err(502, msg)
                     return
                 continue
 
@@ -2584,7 +1987,9 @@ class Handler(BaseHTTPRequestHandler):
                 log.warning("no CCR provider serves '%s' with key '%s'; skipping", realmodel, alias)
                 tried.append(alias)
                 if len(tried) >= len(policy):
-                    self._send_err(502, f"crew-proxy: no CCR provider for {realmodel}/{alias}")
+                    msg = classify_error(502, "no-provider", f"{realmodel}/{alias}")
+                    log.warning(msg)
+                    self._send_err(502, msg)
                     return
                 continue
 
@@ -2611,34 +2016,38 @@ class Handler(BaseHTTPRequestHandler):
                         if not result["cancelled"]:
                             BREAKER.record_fail(alias, time.time(), cd)
                             STATS.record(alias, realmodel, e.code, ok=False, forced=forced,
-                                         failover=bool(tried), err_summary=f"HTTP {e.code}")
+                                         failover=bool(tried), latency=time.time() - _t_send,
+                                         err_summary=f"HTTP {e.code}")
+                            log.warning("← key '%s' upstream %d [proxy][%s]; failing over", alias, e.code, _fault_for_status(e.code))
                         return
                     BREAKER.record_fail(alias, now, cd)
                     STATS.record(alias, realmodel, e.code, ok=False, forced=forced, failover=bool(tried),
-                                 err_summary=f"HTTP {e.code}")
+                                 latency=time.time() - _t_send, err_summary=f"HTTP {e.code}")
                     tried.append(alias)
-                    log.warning("← key '%s' upstream %d; failing over", alias, e.code)
+                    log.warning("← key '%s' upstream %d [proxy][%s]; failing over", alias, e.code, _fault_for_status(e.code))
                     e.close()
                     continue
                 # forced, or a non-failover status (e.g. 400 bad request) -> relay as-is
                 result = self._relay(e, streaming=False, model=realmodel, req_body=body)
                 if not result["cancelled"]:
                     STATS.record(alias, realmodel, e.code, ok=False, forced=forced, failover=bool(tried),
-                                 err_summary=f"HTTP {e.code}")
+                                 latency=time.time() - _t_send, err_summary=f"HTTP {e.code}")
                 return
             except Exception as e:
                 if not forced:
                     BREAKER.record_fail(alias, now, cooldown_for(0, None))  # conn error -> transient tier
                     STATS.record(alias, realmodel, "ERR", ok=False, forced=forced, failover=bool(tried),
-                                 err_summary=str(e)[:200])
+                                 latency=time.time() - _t_send, err_summary=str(e)[:200])
                     tried.append(alias)
                     log.warning("← key '%s' conn error: %s; failing over", alias, e)
                     if len(tried) >= len(policy):
-                        self._send_err(502, f"crew-proxy: all keys failed for {realmodel}: {e}")
+                        msg = classify_error(502, "all-failed", f"{realmodel}: {e}")
+                        log.warning(msg)
+                        self._send_err(502, msg)
                         return
                     continue
                 STATS.record(alias, realmodel, "ERR", ok=False, forced=forced, failover=bool(tried),
-                             err_summary=str(e)[:200])
+                             latency=time.time() - _t_send, err_summary=str(e)[:200])
                 self._send_err(502, f"crew-proxy: {e}")
                 return
 
@@ -2649,9 +2058,15 @@ class Handler(BaseHTTPRequestHandler):
                     BREAKER.record_ok(alias)
                 elif not forced:
                     BREAKER.record_fail(alias, time.time(), cooldown_for(0, None))
+                # 流式首 token 延迟(TTFT):_relay_body 在首个 chunk 写入时记 result["ttft"];
+                # 非流式请求没有该字段,记 None。总耗时=流结束时刻-_t_send(下面 latency)。
+                _ttft = result.get("ttft")
+                if _ttft is not None:
+                    _ttft = _ttft - _t_send
                 STATS.record(alias, realmodel, getattr(resp, "status", 200) if result["ok"] else "ERR",
                              ok=result["ok"], forced=forced, failover=bool(tried),
-                             latency=time.time() - _t_send, err_summary=result["error"])
+                             latency=time.time() - _t_send, err_summary=result["error"],
+                             ttft=_ttft)
             captured = result["body"]
             # Token accounting happens HERE — after the body is fully relayed to the
             # client — so parsing never adds latency to the forward path. Best-effort.
@@ -2742,9 +2157,13 @@ class Handler(BaseHTTPRequestHandler):
             if not result["cancelled"]:
                 try:
                     if not result.get("started"):
-                        self._send_err(502, "crew-proxy: upstream response read failed")
+                        msg = classify_error(502, "stream-broken")
+                        log.warning(msg)
+                        self._send_err(502, msg)
                     elif streaming and not result.get("protocol_error") and result["error"] != "upstream protocol error or missing stream terminal":
-                        self.wfile.write(b'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"upstream stream read failed"}}\n\n')
+                        msg = classify_error(502, "stream-broken")
+                        log.warning(msg)
+                        self.wfile.write(('event: error\ndata: {"type":"error","error":{"type":"api_error","message":"%s"}}\n\n' % msg).encode())
                         self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     result["cancelled"] = True
@@ -2834,6 +2253,10 @@ class Handler(BaseHTTPRequestHandler):
                 chunk = resp.read1(4096)
                 if not chunk:
                     break
+                if "ttft" not in result:
+                    # 2026-10-28:首 chunk 到达即首 token(TTFT)。调用方(record)拿它减发送
+                    # 起点得流式首字节延迟。只记一次,写在任何 flush 之前最贴近上游真实首包。
+                    result["ttft"] = time.time()
                 try:
                     self.wfile.write(chunk)
                     self.wfile.flush()
@@ -2887,54 +2310,7 @@ class Handler(BaseHTTPRequestHandler):
             if buf is not None:
                 buf.extend(data[:USAGE_STREAM_CAP])
         return bytes(buf) if buf is not None else b""
-
-
-def main():
-    log.info("listening on http://127.0.0.1:%d  ->  CCR %s", PORT, CCR_URL)
-    log.info("keys=%s policy=%s ccr=%s", KEYS_FILE, POLICY, CCR_CFG)
-    log.info("breaker: trip after %d fails, cooldown %.0fs", FAIL_N, COOLDOWN)
-    USAGE.load()
-    log.info("usage series loaded (%d logins)", len(USAGE._buckets))
-    atexit.register(lambda: USAGE.flush(force=True))
-    # 2026-10-20:请求线程未捕获异常默认只打印 traceback(见 ConnectionResetError 日志)。
-    # 装线程级 excepthook:记录后静默 —— 线程崩不影响 accept 循环,但记一条结构化日志
-    # 方便 dashboard/doctor 归因(不是自愈,是可观测)。
-    def _thread_excepthook(args):
-        log.warning("thread %s crashed: %s: %s", args.thread.name,
-                    args.exc_type.__name__, args.exc_value)
-    threading.excepthook = _thread_excepthook
-    def _usage_flusher():
-        while True:
-            time.sleep(UsageSeries.FLUSH_MIN_SEC)
-            USAGE.flush()
-    threading.Thread(target=_usage_flusher, daemon=True).start()
-    # 2026-10-20 自愈:serve_forever 意外崩(非 KeyboardInterrupt)→ 关旧 socket 重建重听,
-    # 不退出进程(launchd KeepAlive 重拉有 ThrottleInterval=5s 空窗,期间所有会话请求全挂)。
-    # 重建失败(EADDRINUSE 等端口被占)才放退出 —— 那种交给 launchd/doctor 处理。
-    while True:
-        try:
-            server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-        except OSError as e:
-            log.error("bind :%d failed: %s — exiting (launchd/doctor 会接手)", PORT, e)
-            raise SystemExit(1)
-        try:
-            log.info("serve_forever on :%d", PORT)
-            server.serve_forever()
-        except KeyboardInterrupt:
-            log.info("stopped")
-            try:
-                server.server_close()
-            except OSError:
-                pass
-            return
-        except Exception as e:
-            log.error("serve_forever crashed: %s — rebuilding server", e)
-            try:
-                server.server_close()
-            except OSError:
-                pass
-            time.sleep(1)  # 防疯狂重建;正常崩溃一秒后重听
-
+from _crew_server import main
 
 if __name__ == "__main__":
     main()
