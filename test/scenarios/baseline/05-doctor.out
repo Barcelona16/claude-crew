@@ -1,8 +1,15 @@
-== crew doctor ==
-  crew 0d98e34 (2026-08-30) [main]
-[crew] ✓ 已是最新(= origin/main)
-  [ok]   CCR listening on :3456
-  [ok]   crew-proxy listening on :8788
-  [WARN] no keys.conf at /root/.config/claude-crew/keys.conf
-  [ok]   no key-policy.conf (single-key passthrough — nothing to check)
+== doctor ==
+CREW_STATE: /root/.local/share/claude-crew ✓
+CREW_HOME:  /root/.config/claude-crew ✓
+CS bin:     /Users/wangqiwang1/Desktop/claude-crew/bin/crew-session ✓
+CT bin:     /Users/wangqiwang1/Desktop/claude-crew/bin/crew-tmux ✓
+CL bin:     /Users/wangqiwang1/Desktop/claude-crew/bin/crew-launcher ✓
+tmux:       /opt/homebrew/bin/tmux
+sessions:          0
+== proxy/CCR 链路(2026-10-16 401 防复发)==
+  ✓ settings.json BASE_URL 全部指向 crew-proxy(:8788)
+  ✓ crew-proxy :8788 在听
+  ✓ CCR :3456 在听
+  - ccr_v3.py / provider map 缺失(非 CCR 3 部署,跳过 drift)
+  链路自检通过
 ---exit=0---

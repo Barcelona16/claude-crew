@@ -1,13 +1,14 @@
-[crew] queued -> inbox of 'inbox-test' (from workflow-code)
+[crew] queued -> inbox of 'inbox-test' (from crew-send, id=2f8b5d969de1)
+NOT-woke: 会话 inbox-test 不存在(crew-inbox-test 也不在),消息留 inbox 等下次触发
 ---peek---
-── #1  from workflow-code  at 2026-08-30 12:36:40 ──
-hello world
+── #1  0001-2026-10-27T16-38-04-181Z.json ──
+[00:38:04 session:crew-send] hello world
+(id=2f8b5d969de1 state=pending)
 
-(peeked 1; not consumed — omit --peek to consume)
 ---consume---
-── #1  from workflow-code  at 2026-08-30 12:36:40 ──
-hello world
+── #1 ──
+[00:38:04 session:crew-send] hello world
 
-(consumed 1 message(s))
+(consumed 1 message(s), archived to inbox/inbox-test/consumed/)
 ---after consume peek---
-(inbox empty for 'inbox-test')
+(no messages)

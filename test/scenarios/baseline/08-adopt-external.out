@@ -4,6 +4,5 @@
 adopt-test.sid
 adopt-test.tmux
 ---sid---
-<SID>
----tmux---
+<SID>---tmux---
 mock-tmux-name

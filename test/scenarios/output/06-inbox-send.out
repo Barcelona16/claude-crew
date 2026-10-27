@@ -1,11 +1,14 @@
-[crew] queued -> inbox of 'inbox-test' (from crew send)
+[crew] queued -> inbox of 'inbox-test' (from crew-send, id=<ID>)
+NOT-woke: 会话 inbox-test 不存在(crew-inbox-test 也不在),消息留 inbox 等下次触发
 ---peek---
-── #1  0001-2026-08-30T16:54:19+00:00.msg ──
-hello world
+── #1  0001-<TSFILE>.json ──
+[<TIME> session:crew-send] hello world
+(id=<ID> state=pending)
 
 ---consume---
-── #1  0001-2026-08-30T16:54:19+00:00.msg ──
-hello world
+── #1 ──
+[<TIME> session:crew-send] hello world
 
-(consumed 1 message(s))
+(consumed 1 message(s), archived to inbox/inbox-test/consumed/)
 ---after consume peek---
+(no messages)

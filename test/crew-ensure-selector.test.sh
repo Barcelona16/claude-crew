@@ -20,6 +20,8 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREW_BIN="$SCRIPT_DIR/../bin/crew"
+# 重构后:被测函数整块在 models.sh(入口已薄化);抠取源指向该 lib
+MODELS_LIB="$SCRIPT_DIR/../bin/crew.d/models.sh"
 LAUNCHER="$SCRIPT_DIR/../bin/crew-launcher"
 
 pass=0; fail=0; total=0
@@ -58,7 +60,7 @@ export CCR_PROVIDER_MAP="$T/providers.json"
 
 # 抠出被测函数(同 autodiscover 测试的提取法)
 FUNCS="$T/funcs.sh"
-awk '/^lookup_key\(\)|^ccr_models_for_key\(\)|^ensure_model_in_ccr\(\)|^resolve_picked_model\(\)|^ccr_apply_provider_map\(\)/{p=1} p{print} p&&/^}/{p=0}' "$CREW_BIN" > "$FUNCS"
+awk '/^lookup_key\(\)|^ccr_models_for_key\(\)|^ensure_model_in_ccr\(\)|^resolve_picked_model\(\)|^ccr_apply_provider_map\(\)/{p=1} p{print} p&&/^}/{p=0}' "$MODELS_LIB" > "$FUNCS"
 if ! grep -q "resolve_picked_model" "$FUNCS"; then
   echo "FAIL: resolve_picked_model 未定义于 bin/crew(先实现再跑)"; exit 1
 fi
@@ -96,11 +98,29 @@ import json; c=json.load(open('$T/providers.json'))
 print(any(p.get('name')=='model-NEW-9-personal' for p in c['Providers']))")
 [ "$inmap2" = "True" ] && _ok "② 新 provider 已建" || _ng "② provider 未建" "map 缺 model-NEW-9-personal"
 
+# --- ②b 回归守护(2026-10-27 二修):resolve 反查必须显式传 CREW_HOME 给 node ---
+# 事故:node -e 里只传 KEY/PICK/CCR_PROVIDER_MAP,process.env.CREW_HOME 为 undefined
+# → keys.conf 读不到 → kv 回落成模型名 → api_key===模型名 永不命中 → 恒报
+# "落地后仍找不到 provider",用户选任何裸名新模型都起不来会话。
+# 守护:把 keys.conf 挪到【非默认】CREW_HOME,并清掉环境里的 CREW_HOME 继承,
+# 只有函数内部显式传参才能读到 → 漏传即失败。
+T2="$T/home2"; mkdir -p "$T2"
+cp "$CREW_HOME/keys.conf" "$T2/keys.conf"
+sel2b=$(env -u CREW_HOME bash -c '
+  CREW_HOME="'"$T2"'"
+  . "'"$FUNCS"'"
+  CREW_HOME="'"$T2"'"
+  resolve_picked_model joycode "GLM-5.3-x" 2>/dev/null
+')
+[ "$sel2b" = "joycode-oai/GLM-5.3-x" ] \
+  && _ok "②b resolve 反查显式传 CREW_HOME(非默认 home 也能落地)" \
+  || _ng "②b resolve 漏传 CREW_HOME(反查瞎)" "$sel2b"
+
 # --- ③ 全名透传 ---
 sel3=$(resolve_picked_model joycode "joycode-oai/GLM-5.3" 2>/dev/null)
 [ "$sel3" = "joycode-oai/GLM-5.3" ] && _ok "③ 全名原样透传" || _ng "③ 全名被改" "$sel3"
 ap=$(grep -c "called" "$apply_calls" 2>/dev/null | tr -d ' ')
-[ "$ap" = "2" ] && _ok "③ 全名不触发额外 apply(2 次=①②)" || _ng "③ 多余 apply" "count=$ap"
+[ "$ap" = "3" ] && _ok "③ 全名不触发额外 apply(3 次=①②②b)" || _ng "③ 多余 apply" "count=$ap"
 
 # --- ④ joycode + Claude 系 → joycode/<model> ---
 sel4=$(resolve_picked_model joycode "Claude-Opus-5-hq" 2>/dev/null)

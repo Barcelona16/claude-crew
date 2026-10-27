@@ -76,8 +76,14 @@ tmp_script=$(mktemp)
 echo 'echo CT_RUN_MARKER_XY7Z > /tmp/ct-run-out' > "$tmp_script"
 chmod +x "$tmp_script"
 "$CT" run "$NAME1" "$tmp_script" 2>&1 >/dev/null
-sleep 1
-[ -f /tmp/ct-run-out ] && grep -q CT_RUN_MARKER_XY7Z /tmp/ct-run-out && _ok "run 执行了 script(marker 落盘)" || _ng "run 未执行" "$(cat /tmp/ct-run-out 2>&1)"
+# 轮询等 marker 落盘:tmux 异步执行 + 全量套件下 pane shell 启动慢(负载依赖),
+# 固定 sleep 是竞态源;轮询窗口 15s,断言仍是"run 必须执行 script 且 marker 落盘"。
+_run_ok=""
+for _ in $(seq 1 75); do
+  if [ -f /tmp/ct-run-out ] && grep -q CT_RUN_MARKER_XY7Z /tmp/ct-run-out; then _run_ok=1; break; fi
+  sleep 0.2
+done
+[ -n "$_run_ok" ] && _ok "run 执行了 script(marker 落盘)" || _ng "run 未执行" "$(cat /tmp/ct-run-out 2>&1)"
 rm -f "$tmp_script" /tmp/ct-run-out
 
 # --- Case 8: kill session ---

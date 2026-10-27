@@ -227,7 +227,7 @@ code=$(node -e "require('http').get('http://127.0.0.1:$PORT/healthz',r=>{console
 data=$(node -e "let d='';require('http').get('http://127.0.0.1:$PORT/api/state',r=>{r.on('data',c=>d+=c);r.on('end',()=>console.log(d))}).on('error',()=>{})")
 echo "$data" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);process.exit(Array.isArray(j.sessions)&&j.sessions.length===2?0:1)}catch(e){process.exit(1)}})" \
   && _ok "/api/state 结构正常 sessions=2" || _ng "/api/state 输出异常: $(echo $data | head -c 200)"
-kill $PID 2>/dev/null; wait $PID 2>/dev/null
+kill -9 $PID 2>/dev/null; wait $PID 2>/dev/null
 
 # ---- Case 10: v1.2 U2 · source=private 分类计数 ----
 echo "--- Case 10: privatePending / privateDelivered 字段 ---"
@@ -258,7 +258,7 @@ sleep 0.8
 data=$(node -e "let d='';require('http').get('http://127.0.0.1:$PORT2/api/state',r=>{r.on('data',c=>d+=c);r.on('end',()=>console.log(d))}).on('error',()=>{})")
 echo "$data" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);const s=j.summary||{};process.exit((s.totalPrivatePending>=1 && s.totalPrivateDelivered>=1)?0:1)}catch(e){process.exit(1)}})" \
   && _ok "summary.totalPrivatePending/Delivered 聚合" || _ng "summary 私聊字段缺"
-kill $PID2 2>/dev/null; wait $PID2 2>/dev/null
+kill -9 $PID2 2>/dev/null; wait $PID2 2>/dev/null
 
 echo
 echo "=== crew-web.test.sh: $pass / $total pass, $fail fail ==="

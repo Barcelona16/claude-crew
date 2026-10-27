@@ -24,6 +24,8 @@ unset CREW_SESSION 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREW="$SCRIPT_DIR/../bin/crew"
 DSH="$SCRIPT_DIR/../acp/crew-dsh.mjs"
+# 重构后:cmd_dsh 路由实现在 dsh.sh;源码守护 grep 指向该 lib
+DSH_LIB="$SCRIPT_DIR/../bin/crew.d/dsh.sh"
 
 pass=0; fail=0; total=0
 _ok() { total=$((total+1)); pass=$((pass+1)); echo "  ✓ $1"; }
@@ -230,17 +232,17 @@ await client({name:'e2e-test', version:'0.0.1'})
     }
     await p
   })
-if (!gotText.includes('回复:你好')) { acpd.kill(); throw new Error('未收到角色回复文本,got: ' + JSON.stringify(gotText)) }
-acpd.kill()
+if (!gotText.includes('回复:你好')) { acpd.kill("SIGKILL"); throw new Error('未收到角色回复文本,got: ' + JSON.stringify(gotText)) }
+acpd.kill("SIGKILL")
 console.log('E2E-OK text=' + JSON.stringify(gotText))
 process.exit(0)
 EOF
-  if out=$(node "$T/e2e.mjs" 2>&1); then
+  if out=$(timeout 40 node "$T/e2e.mjs" 2>&1); then
     _ok "⑯ 端到端 SDK client↔crew-acpd 往返(默认 lead 会话 + wire 格式 + stop)"
   else
     _ng "⑯ 端到端失败: $(echo "$out" | tail -3 | head -1 | cut -c1-90)"
   fi
-  kill $FAKE_PID 2>/dev/null
+  kill -9 $FAKE_PID 2>/dev/null
 else
   _ng "⑯ fake HTTP 面未起: $(cat "$T/port.log" | head -1)"
 fi
@@ -289,18 +291,18 @@ await client({name:'martty-sim', version:'0.0.1'}).connectWith(stream, async (cx
   }
   await p
 })
-if (!got.includes('回复:你好')) { acpd.kill(); throw new Error('未收到回复: ' + JSON.stringify(got)) }
-acpd.kill()
+if (!got.includes('回复:你好')) { acpd.kill("SIGKILL"); throw new Error('未收到回复: ' + JSON.stringify(got)) }
+acpd.kill("SIGKILL")
 console.log('MARTTY-E2E-OK target=' + (target || '(auto-lead)'))
 process.exit(0)
 EOF
-  if out=$(node "$T/e2e-martty.mjs" 2>&1); then
+  if out=$(timeout 40 node "$T/e2e-martty.mjs" 2>&1); then
     _ok "⑱ 通用客户端普通 cwd 会话 → 自动绑 lead 并往返"
   else
     _ng "⑱ Martty 适配失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
   fi
   # ⑱b:CREW_DSH_TARGET=designer-… → Martty 普通会话绑指定角色(crew dsh wand3 designer 的富 UI 通道)
-  if out=$(E2E_TARGET=designer-pipe-20261019-wand3 node "$T/e2e-martty.mjs" 2>&1); then
+  if out=$(E2E_TARGET=designer-pipe-20261019-wand3 timeout 40 node "$T/e2e-martty.mjs" 2>&1); then
     _ok "⑱b CREW_DSH_TARGET 指定成员 → Martty 会话绑该角色"
   else
     _ng "⑱b CREW_DSH_TARGET 失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
@@ -330,14 +332,14 @@ await client({name:'banner-test', version:'0.0.1'})
     const session = await cx.buildSession('pipe://PIPE-20261019-wand3/designer').start()
     await new Promise(r => setTimeout(r, 1500))   // 收绑定推送,不发 prompt
   })
-acpd.kill()
+acpd.kill("SIGKILL")
 if (!titles.some(t => t.includes('designer') && t.includes('wand3'))) {
   throw new Error('缺 session_info_update 会话名: ' + JSON.stringify(titles))
 }
 console.log('BANNER-OK titles=' + JSON.stringify(titles))
 process.exit(0)
 EOF
-  if out=$(node "$T/e2e-banner.mjs" 2>&1); then
+  if out=$(timeout 40 node "$T/e2e-banner.mjs" 2>&1); then
     _ok "㉒㉓ 绑定即推会话名(session_info_update.title,历史改走首条 prompt 注入)"
   else
     _ng "㉒㉓ 会话名推送失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
@@ -367,13 +369,13 @@ await client({name:'resume-test', version:'0.0.1'})
   })
   await new Promise(r => setTimeout(r, 2000))
 })
-acpd.kill()
+acpd.kill("SIGKILL")
 const all = got.join('')
 if (!all.includes('历史消息2')) throw new Error('resume 后首条 prompt 缺历史注入: ' + JSON.stringify(all))
 console.log('RESUME-REPLAY-OK')
 process.exit(0)
 EOF
-  if out=$(node "$T/e2e-resume.mjs" 2>&1); then
+  if out=$(timeout 40 node "$T/e2e-resume.mjs" 2>&1); then
     _ok "㉔ resume 后首条 prompt 注入历史(与 new 同路径)"
   else
     _ng "㉔ resume 注入失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
@@ -404,7 +406,7 @@ await client({name:'first-prompt', version:'0.0.1'})
     }
     await p
   })
-acpd.kill()
+acpd.kill("SIGKILL")
 const all = got.join('')
 if (!all.includes('历史消息2')) throw new Error('首条 prompt 未注入历史: ' + JSON.stringify(all))
 if (!all.includes('回复:你好')) throw new Error('真实回复缺失: ' + JSON.stringify(all))
@@ -412,7 +414,7 @@ if (!(all.indexOf('历史消息2') < all.indexOf('回复:你好'))) throw new Er
 console.log('FIRST-PROMPT-REPLAY-OK')
 process.exit(0)
 EOF
-  if out=$(node "$T/e2e-first-prompt.mjs" 2>&1); then
+  if out=$(timeout 40 node "$T/e2e-first-prompt.mjs" 2>&1); then
     _ok "㉕ 首条 prompt 注入历史前缀(历史→回复顺序)"
   else
     _ng "㉕ 首条注入失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
@@ -439,26 +441,26 @@ await client({name:'load-test', version:'0.0.1'})
     if (!resp.sessionId) throw new Error('load 响应缺 sessionId')
     await new Promise(r => setTimeout(r, 2000))
   })
-acpd.kill()
+acpd.kill("SIGKILL")
 const all = chunks.join('')
 if (!all.includes('designer')) throw new Error('load 后缺横幅: ' + JSON.stringify(all))
 if (!all.includes('历史消息2')) throw new Error('load 后缺历史: ' + JSON.stringify(all))
 console.log('LOAD-REPLAY-OK')
 process.exit(0)
 EOF
-  if out=$(node "$T/e2e-load.mjs" 2>&1); then
+  if out=$(timeout 40 node "$T/e2e-load.mjs" 2>&1); then
     _ok "㉖ session/load → 横幅+历史(Toad resume 通道)"
   else
     _ng "㉖ load 失败: $(echo "$out" | tail -2 | head -1 | cut -c1-80)"
   fi
-  kill $FAKE2_PID 2>/dev/null
+  kill -9 $FAKE2_PID 2>/dev/null
 else
   _ng "⑱ fake HTTP 未起"
 fi
 
 echo "--- crew dsh 默认 Martty 富 UI ---"
 # ⑲ cmd_dsh 默认路由(2026-10-20 v3.10 起):Martty 移除;TTY 默认 Toad,--repl 回退内置
-if ! grep -q 'martty' "$CREW" && grep -q 'toad' "$CREW" && grep -q 'CREW_DSH_TARGET' "$CREW" && grep -q '\-\-repl' "$CREW"; then
+if ! grep -q 'martty' "$DSH_LIB" && grep -q 'toad' "$DSH_LIB" && grep -q 'CREW_DSH_TARGET' "$DSH_LIB" && grep -q '\-\-repl' "$DSH_LIB"; then
   _ok "⑲ cmd_dsh 默认 Toad 路由 + CREW_DSH_TARGET 通道 + --repl 回退(Martty 已移除)"
 else
   _ng "⑲ cmd_dsh 路由异常(应 toad 默认且无 martty 残留)"

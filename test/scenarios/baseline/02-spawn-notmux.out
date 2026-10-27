@@ -1,4 +1,4 @@
-[crew] backend 'Claude-Opus-4.8-joybuilder' not found (/root/.config/claude-crew/backends/Claude-Opus-4.8-joybuilder.conf); pass --model <backend> or --pick. available: mock 
+[crew-launcher] no backend for 'mock-test1' 且 fallback 无候选(无 env override 且 CREW_STATE 里无存活会话 state)
 ---exit=0---
 ---state files---
 registry

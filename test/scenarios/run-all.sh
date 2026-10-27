@@ -81,13 +81,27 @@ for s in "${SCENARIOS[@]}"; do
     bash "$script" > "$out_file" 2>&1
   ec=$?
   # 归一化:去掉时间戳/PID/临时路径(baseline diff 稳定)
-  sed -i \
-    -e 's|/tmp/crew-v2-test-state[/A-Za-z0-9._-]*|<STATE>|g' \
-    -e 's|/tmp/crew-v2-test-home[/A-Za-z0-9._-]*|<HOME>|g' \
-    -e 's|[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9:]*Z|<TS>|g' \
-    -e 's|pid=[0-9]\+|pid=<PID>|g' \
-    -e 's|[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}|<SID>|g' \
-    "$out_file"
+  # BSD sed 必须显式空备份后缀(macOS),否则 -e 被当成备份文件名
+  # baseline 录于 Linux/root(默认 CREW_HOME=/root/.config/claude-crew,
+  # CREW_STATE=/root/.local/share/claude-crew);本机用 /tmp 隔离目录跑,
+  # 归一化时把本机临时路径前缀映回 baseline 的 /root 前缀(保留子路径),
+  # 使 diff 稳定。日期/commit/SID/PID 等运行期变量一并归一。
+  # 同一份归一化规则同时应用于 baseline 副本,消除日期/commit 漂移。
+  normalize(){
+    sed -i '' \
+      -e 's|/tmp/crew-v2-test-state|/root/.local/share/claude-crew|g' \
+      -e 's|/tmp/crew-v2-test-home|/root/.config/claude-crew|g' \
+      -e 's|[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9:.]*Z|<TS>|g' \
+      -e 's|[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}-[0-9]\{2\}-[0-9]\{2\}-[0-9]\{3\}Z|<TSFILE>|g' \
+      -e 's|at [0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9:]*|at <DATE>|g' \
+      -e 's|crew [0-9a-f]\{7\} ([0-9-]*) \[main\]|crew <VER> (<DATE>) [main]|g' \
+      -e 's|pid=[0-9]\+|pid=<PID>|g' \
+      -e 's|id=[0-9a-f]\{12\}|id=<ID>|g' \
+      -e 's|\[[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\} session:|[<TIME> session:|g' \
+      -e 's|[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}|<SID>|g' \
+      "$1"
+  }
+  normalize "$out_file"
 
   if [ "$RECORD" = 1 ]; then
     cp "$out_file" "$BASELINE_DIR/$s.out"
@@ -97,13 +111,19 @@ for s in "${SCENARIOS[@]}"; do
     if [ ! -f "$BASELINE_DIR/$s.out" ]; then
       echo "NO-BASELINE $s (先跑 --record)"
       fail=$((fail+1))
-    elif diff -q "$BASELINE_DIR/$s.out" "$out_file" >/dev/null 2>&1; then
-      echo "PASS $s"
-      pass=$((pass+1))
     else
-      echo "FAIL $s (diff:)"
-      diff -u "$BASELINE_DIR/$s.out" "$out_file" | head -20
-      fail=$((fail+1))
+      # baseline 也过同一归一化(日期/commit 漂移)
+      norm_base="$OUTPUT_DIR/$s.norm-base"
+      cp "$BASELINE_DIR/$s.out" "$norm_base"
+      normalize "$norm_base"
+      if diff -q "$norm_base" "$out_file" >/dev/null 2>&1; then
+        echo "PASS $s"
+        pass=$((pass+1))
+      else
+        echo "FAIL $s (diff:)"
+        diff -u "$norm_base" "$out_file" | head -20
+        fail=$((fail+1))
+      fi
     fi
   fi
 done

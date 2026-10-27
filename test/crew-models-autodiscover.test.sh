@@ -14,6 +14,8 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREW_BIN="$SCRIPT_DIR/../bin/crew"
+# 重构后:被测函数整块在 models.sh;抠取源指向该 lib
+MODELS_LIB="$SCRIPT_DIR/../bin/crew.d/models.sh"
 
 pass=0; fail=0; total=0
 _ok(){ total=$((total+1)); pass=$((pass+1)); echo "  ✓ $1"; }
@@ -23,7 +25,11 @@ T="$(mktemp -d /tmp/crew-autodisc.XXXXXX)"
 export CREW_HOME="$T/home"
 export CREW_STATE="$T/state"
 mkdir -p "$CREW_HOME" "$CREW_STATE"
-trap 'rm -rf "$T"; [ -n "${FAKE_PID:-}" ] && kill "$FAKE_PID" 2>/dev/null || true' EXIT
+# 本环境 SIGTERM 屏蔽,后台 mock 服务器一律 kill -9 清理(对测试桩完全正当)
+trap 'rm -rf "$T"; [ -n "${FAKE_PID:-}" ] && kill -9 "$FAKE_PID" 2>/dev/null || true; [ -n "${FAKE_PID2:-}" ] && kill -9 "$FAKE_PID2" 2>/dev/null || true' EXIT
+
+# 端口就绪探测:轮询 nc -z,最多 5s;替代固定 sleep,更快更稳
+wait_port(){ local p="$1" i; for i in $(seq 1 50); do nc -z 127.0.0.1 "$p" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
 
 # keys.conf:personal(8b04 网关)+ joycode(本地代理)
 cat > "$CREW_HOME/keys.conf" <<EOF
@@ -50,7 +56,7 @@ export CCR_PROVIDER_MAP="$T/providers.json"
 # 抠出被测函数(source 纯函数,避免跑主流程)
 FUNCS="$T/funcs.sh"
 # awk 提取(sed 多 -n range 在部分 bash 有重复输出怪癖,2026-10-16 实测)
-awk '/^lookup_key\(\)|^fetch_models_url\(\)|^ccr_origin_for_key\(\)|^ccr_models_for_key\(\)|^ccr_models_for_key_full\(\)|^auto_discover_models\(\)|^ensure_model_in_ccr\(\)|^_autodisc_cache_path\(\)/{p=1} p{print} p&&/^}/{p=0}' "$CREW_BIN" > "$FUNCS"
+awk '/^lookup_key\(\)|^fetch_models_url\(\)|^ccr_origin_for_key\(\)|^ccr_models_for_key\(\)|^ccr_models_for_key_full\(\)|^auto_discover_models\(\)|^ensure_model_in_ccr\(\)|^_autodisc_cache_path\(\)/{p=1} p{print} p&&/^}/{p=0}' "$MODELS_LIB" > "$FUNCS"
 if ! grep -q "auto_discover_models" "$FUNCS"; then
   echo "FAIL: auto_discover_models 未定义于 bin/crew(先实现再跑)"; exit 1
 fi
@@ -93,7 +99,7 @@ srv.serve_forever()
 PYEOF
 python3 "$T/fake_gw.py" &
 FAKE_PID=$!
-sleep 0.5
+wait_port 19999
 
 # provider map 里 personal 的 origin 指向 fake 网关
 # (ccr_origin_for_key 从 api_base_url 提 origin → http://127.0.0.1:19999)
@@ -138,7 +144,7 @@ hits_after3=$(wc -l < "$HITS" | tr -d ' ')
 [ "$hits_after3" -gt "$hits_after" ] && _ok "③ 过期后重新拉取" || _ng "③ 过期未重拉" "$hits_after->$hits_after3"
 
 # --- ④ fail-open:网关挂 → 返回 CCR 静态表非空 ---
-kill $FAKE_PID 2>/dev/null; wait $FAKE_PID 2>/dev/null; FAKE_PID=""
+kill -9 $FAKE_PID 2>/dev/null; wait $FAKE_PID 2>/dev/null; FAKE_PID=""
 backdate_cache 2>/dev/null || python3 -c "
 import os,time,sys
 f='$(_autodisc_cache_path personal)'
@@ -147,7 +153,7 @@ out=$(auto_discover_models personal 2>/dev/null)
 [ -n "$out" ] && _ok "④ 网关挂掉返回静态表(菜单能弹)" || _ng "④ 返回空" "$out"
 
 # --- ⑤ 幂等:已有模型不重复写(①后再跑,模型集不再变) ---
-python3 "$T/fake_gw.py" & FAKE_PID=$!; sleep 0.4
+python3 "$T/fake_gw.py" & FAKE_PID=$!; wait_port 19999
 backdate_cache
 auto_discover_models personal >/dev/null 2>&1
 nprov5=$(python3 -c "
@@ -233,11 +239,11 @@ for p in c["Providers"]:
 json.dump(c, open(os.path.join(os.environ["T"], "providers.json"), "w"), indent=2, ensure_ascii=False)
 PY8
 python3 "$T/fake_gw2.py" & FAKE_PID2=$!
-sleep 0.4
+wait_port 19997
 backdate_cache 2>/dev/null
 out=$(auto_discover_models personal 2>/dev/null)
 [ -n "$out" ] && _ok "⑧ 上游空 data 静默回落非空" || _ng "⑧ 空 data 返回空" "$out"
-kill $FAKE_PID2 2>/dev/null
+kill -9 $FAKE_PID2 2>/dev/null; FAKE_PID2=""
 
 echo ""
 if [ "$fail" = 0 ]; then

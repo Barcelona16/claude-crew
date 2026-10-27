@@ -1,5 +1,5 @@
 [crew] 'test-pin' pinned to tmux — --no-tmux will be refused. Un-pin: crew unpin test-pin
 /root/.local/share/claude-crew/test-pin.pintmux
 [crew] 'test-pin' un-pinned — --no-tmux (foreground) is allowed again
-ls: cannot access '/root/.local/share/claude-crew/test-pin.pintmux': No such file or directory
+ls: /root/.local/share/claude-crew/test-pin.pintmux: No such file or directory
 pintmux gone (expected)

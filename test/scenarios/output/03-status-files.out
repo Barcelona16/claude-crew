@@ -1,5 +1,6 @@
 ---state files---
+registry
 ---.backend---
-cat: <STATE>: No such file or directory
+cat: /root/.local/share/claude-crew/mock-test2.backend: No such file or directory
 ---.notmux---
-cat: <STATE>: No such file or directory
+cat: /root/.local/share/claude-crew/mock-test2.notmux: No such file or directory
