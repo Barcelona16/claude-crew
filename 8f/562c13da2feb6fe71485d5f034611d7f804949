@@ -1,0 +1,34 @@
+bin/crew
+  s_76e741c48e41e8::t_6dd3cbc4501edd 1701-1707
+  s_76e741c48e41e8::t_cf98f55affcdc8 867-870
+  s_76e741c48e41e8::t_9b0f8c5ea9b723 850-855
+  s_76e741c48e41e8::t_47e36a85883c83 1935-1940
+  s_76e741c48e41e8::t_211ae7fd4e7636 915-923,928-959
+  s_76e741c48e41e8::t_32c63bc4f3d603 2026-2031
+CLAUDE.md
+  s_76e741c48e41e8::t_073207a4531765 86-115
+test/crew-ensure-selector.test.sh
+  s_76e741c48e41e8::t_aad0c2ea07db22 1-115,119-120,123-134,140,142-143,148-149,155-158,161-167
+  s_76e741c48e41e8::t_68642d7ef93560 135-139,150-151,154,160
+  s_76e741c48e41e8::t_272d3b3c09e7f1 141,144-147,153,159
+  s_76e741c48e41e8::t_51e8e059068a51 116-118,121-122
+  s_76e741c48e41e8::t_bf43b6240265e1 152
+bin/crew-launcher
+  s_76e741c48e41e8::t_b229bff137096d 161-181
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.7",
+  "base_commit_sha": "8f562c13da2feb6fe71485d5f034611d7f804949",
+  "prompts": {},
+  "sessions": {
+    "s_76e741c48e41e8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "662dfb22-761f-4738-b0da-8c64fd46c74a",
+        "model": "GLM-5.3"
+      },
+      "human_author": "wangqiwang1 <wangqiwang1@jd.com>"
+    }
+  }
+}
