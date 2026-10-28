@@ -19,14 +19,13 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler
 
 from _crew_config import (
-    CCR_URL, CCR_V3_ADAPTER, CREW_DEMO_GIF, CREW_HERO_PNG,
+    CCR_URL, CCR_V3_ADAPTER,
     COOLDOWN, FAIL_N,
-    POLICY, PORT, REGISTER_ALLOW, REGISTER_MODEL, REGISTER_RETRY_BASE,
-    REGISTER_TEST_URL, SAFE_NAME, USAGE_FILE,
+    POLICY, PORT, SAFE_NAME, USAGE_FILE,
     _api_sessions_fallback, _find_crew_bin, _http_err_summary, _is_fail,
-    _raw_gateway_auth, cooldown_for, load_ccr_gateway_key, load_ccr_providers,
+    cooldown_for, load_ccr_gateway_key, load_ccr_providers,
     load_gateway_auth, load_keys, load_policy, mask_key, parse_retry_after,
-    provider_for, register_allow_list, run_crew, sync_ccr_config,
+    provider_for, run_crew, sync_ccr_config,
     PT_MAX_RETRY, PT_RETRY_BASE, PT_RETRY_MAX, PT_RETRY_BUDGET,
     log,
 )
@@ -83,13 +82,8 @@ USAGE_HTML = """<!doctype html><html><head><meta charset=utf-8>
  #intro .feat{color:#9aa4af;margin:8px 0} code{background:#161b22;border:1px solid #21262d;border-radius:4px;padding:1px 6px} a{color:#6cf}
  .wrap{max-width:860px;margin:0 auto}
  .card{background:#12161c;border:1px solid #21262d;border-radius:12px;padding:18px;margin:16px 0}
- .quick pre{background:#0b0e13;border:1px solid #21262d;border-radius:8px;padding:10px 12px;overflow:auto;font-size:12px;color:#b8c2cd}
- .hero{text-align:center;margin:10px 0} .hero img{max-width:100%;border-radius:12px;border:1px solid #21262d}
  .authbox{display:flex;flex-direction:column;gap:10px;align-items:center;margin:14px 0}
  .authbox .line{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
- #regmsg{font-size:12px;max-width:640px;margin:0 auto;text-align:center}
- #regmsg pre{text-align:left;white-space:pre-wrap;color:#e5534b;background:#1a1113;border:1px solid #5a2620;border-radius:6px;padding:8px}
- .adbox{border-top:1px solid #21262d;margin-top:30px;padding-top:8px}
  #dashbar{display:none;align-items:center;gap:12px;flex-wrap:wrap;background:#12161c;border:1px solid #21262d;border-radius:10px;padding:10px 14px;margin:8px 0 4px}
  #dashbar .who{font-weight:600} #dashbar select{background:#161b22;color:#c7d0da;border:1px solid #30363d;border-radius:6px;padding:5px 8px}
  #dashview{display:none}
@@ -97,32 +91,13 @@ USAGE_HTML = """<!doctype html><html><head><meta charset=utf-8>
 <div class=wrap>
 
 <div id=landing>
-<div class="card quick">
- <h3 style="margin-top:0">🚀 快速接入本网关</h3>
- <p class=feat>把本机地址当作 Anthropic API endpoint，用你的 key 直接发请求：</p>
- <pre>ANTHROPIC_BASE_URL=http://__CREW_ADDR__
-ANTHROPIC_API_KEY=&lt;你的 key&gt;
-# 或直接 curl:
-curl http://__CREW_ADDR__/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
-  -H "content-type: application/json" \\
-  -d '{"model":"GLM-5.2","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}'</pre>
- <p class=feat>还没有 key？下面 <b>注册你的 key</b>，测试通过即可加入共享池并使用。</p>
-</div>
-
 <div class=card>
- <div class=hero><img src="/crew-proxy-hero.png" alt="crew-proxy"></div>
  <div class=authbox>
   <div class=line>
-   <input id=key type=password placeholder="输入你的 key 登录" size=30>
-   <button id=login>登录</button>
+   <input id=key type=password placeholder="输入你的 key 进入监控台" size=30>
+   <button id=login>进入</button>
+   <span id=meta class=dim></span>
   </div>
-  <div class=line>
-   <input id=regkey type=password placeholder="注册：粘贴你的真实 key（会用 GLM 实测）" size=42>
-   <input id=regerp placeholder="你的 erp 工号（必填）" size=16>
-   <button id=reg>注册我的 key</button>
-  </div>
-  <div id=regmsg></div>
-  <span id=meta class=dim></span>
  </div>
 </div>
 </div>
@@ -162,20 +137,6 @@ curl http://__CREW_ADDR__/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
  </div>
  <h3>模型策略(优先级顺序)</h3>
  <div id=policy></div>
- <h3>登录表(门票)</h3>
- <div id=logins></div>
- <div class=row>
-  <input id=lg-login placeholder="login key" size=16><input id=lg-maps placeholder="maps_to alias" size=12>
-  <input id=lg-models placeholder="allow_models(空格分隔,空=全部)" size=24>
-  <input id=lg-erp placeholder="erp" size=10><label><input id=lg-admin type=checkbox> admin</label>
-  <button id=lg-add>加/改登录</button>
- </div>
- <h3>新注册者默认可用模型</h3>
- <div class=row>
-  <input id=ra-list placeholder="空格分隔的模型名(空=重置为内置默认)" size=44>
-  <button id=ra-save>保存默认</button>
-  <span id=ra-msg class=dim></span>
- </div>
  <h3>应急会话(一键起 detached tmux claude 会话)</h3>
  <div class=row>
   <select id=em-key></select><select id=em-model></select>
@@ -196,13 +157,6 @@ curl http://__CREW_ADDR__/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
  </form>
 </dialog>
 
-<div class="card adbox" id=intro>
- <h3 style="margin-top:0">想要更强的接入方式？用 crew 🐧</h3>
- <img src="/crew-demo.gif" alt="crew demo" loading=lazy>
- <p class=feat><b>crew</b> —— 一个人同时开多个 Claude Code 会话、随时切换模型、让不同模型互相对话协作；共享 key 池自动故障切换、限额自动摘除恢复。比直接改 base_url 多了：多会话编排、模型热切换、跨模型协作。</p>
- <p class=feat>用 CCR 的话，把 config 里的 <code>api_base_url</code> 改成 <code>http://__CREW_ADDR__</code> 即可；更推荐装 crew 后配一个 backend 指向本网关。</p>
- <p class=feat>仓库：<code>git@coding.jd.com:olsd/claude-crew.git</code>（内网） / <code>git@github.com:Barcelona16/claude-crew.git</code>（外网）</p>
-</div>
 </div>
 <script>
 let KEY=sessionStorage.getItem('crewKey')||'', VIEW='', SELFLOGIN='', _d=null, _geom=null;
@@ -213,8 +167,8 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 async function load(){
   if(!KEY)return;
   let url='/api/usage?days=7'+(VIEW?('&key='+encodeURIComponent(VIEW)):'');
-  let r;try{r=await fetch(url,{headers:{'x-api-key':KEY}});}catch(e){$('#regmsg').innerHTML='<span style=color:#e5534b>网络错误，无法连接网关</span>';logout(false,true);return;}
-  if(r.status===401){logout(true,true);$('#regmsg').innerHTML='<span style=color:#e5534b>❌ 登录失败：key 无效或未注册。请检查后重试，或用下方「注册我的 key」先注册。</span>';return;}
+  let r;try{r=await fetch(url,{headers:{'x-api-key':KEY}});}catch(e){$('#meta').textContent='网络错误，无法连接网关';logout(false,true);return;}
+  if(r.status===401){logout(true,true);$('#meta').textContent='❌ key 无效或无权限，请检查后重试';return;}
   const d=await r.json();_d=d;
   if(!VIEW)SELFLOGIN=d.login;
   // logged in -> switch from landing to dashboard view
@@ -238,7 +192,7 @@ function populateViewsel(){
 }
 function logout(clear,keepmsg){if(clear!==false){KEY='';sessionStorage.removeItem('crewKey');}VIEW='';_d=null;
   $('#landing').style.display='';$('#dashbar').style.display='none';$('#dashview').style.display='none';
-  if(clear!==false)$('#key').value='';$('#meta').textContent='';if(!keepmsg)$('#regmsg').textContent='';}
+  if(clear!==false)$('#key').value='';$('#meta').textContent='';}
 async function loadHealth(){
   let r;try{r=await fetch('/api/health',{headers:{'x-api-key':KEY}});}catch(e){return;}
   if(!r.ok)return;const d=await r.json();
@@ -279,27 +233,7 @@ async function loadAdmin(){
     const r=await apost('/api/policy',{model:b.dataset.ps,aliases:aliases});
     if(!r.ok)alert(r.body.error||'保存失败');
     loadAdmin();});
-  $('#logins').innerHTML='<table><tr><th>login</th><th>maps_to</th><th>allow_models</th><th>erp</th><th>admin</th><th></th></tr>'+
-    (kd.logins||[]).map((a,i)=>'<tr><td title="'+esc(a.login)+'">'+esc(a.login.length>16?a.login.slice(0,6)+'…'+a.login.slice(-4):a.login)+'</td><td>'+esc(a.maps_to)+'</td><td>'+esc((a.allow_models||[]).join(' '))+'</td><td>'+esc(a.erp||'')+'</td><td>'+(a.admin?'✓':'')+'</td><td><button data-le="'+i+'">改</button> <button class=danger data-dl="'+esc(a.login)+'">删</button></td></tr>').join('')+'</table>';
-  window._logins=kd.logins||[];
-  document.querySelectorAll('#logins [data-le]').forEach(b=>b.onclick=()=>{
-    const a=window._logins[+b.dataset.le];if(!a)return;
-    $('#lg-login').value=a.login;$('#lg-maps').value=a.maps_to;$('#lg-models').value=(a.allow_models||[]).join(' ');
-    $('#lg-erp').value=a.erp||'';$('#lg-admin').checked=!!a.admin;
-    $('#lg-login').scrollIntoView({block:'center'});$('#lg-login').focus();});
-  document.querySelectorAll('#logins [data-dl]').forEach(b=>b.onclick=async()=>{
-    if(!confirm('删除登录 '+b.dataset.dl+'?'))return;
-    await apost('/api/gateway/auth',{login:b.dataset.dl,delete:true});loadAdmin();});
-  const ra=await aget('/api/register-allow');
-  if(ra&&$('#ra-list')){$('#ra-list').value=(ra.allow||[]).join(' ');
-    $('#ra-list').placeholder='空格分隔(空=重置为内置默认: '+(ra.builtin||[]).join(' ')+')';}
 }
-$('#ra-save').onclick=async()=>{
-  const models=$('#ra-list').value.trim().split(/\\s+/).filter(Boolean);
-  const r=await apost('/api/register-allow',{allow:models});
-  if(!r.ok){$('#ra-msg').textContent=r.body.error||'保存失败';}
-  else{$('#ra-msg').textContent='已保存: '+((r.body.allow||[]).join(' ')||'(内置默认)');loadAdmin();}
-};
 let _emKeys=[];
 function renderEmergency(em){
   _emKeys=(em&&em.keys)||[];
@@ -323,11 +257,6 @@ $('#em-go').onclick=async()=>{
 $('#ak-add').onclick=async()=>{
   const r=await apost('/api/ccr/provider',{alias:$('#ak-alias').value.trim(),key:$('#ak-key').value.trim(),model:$('#ak-model').value.trim(),base_url:$('#ak-base').value.trim()});
   if(!r.ok)alert(r.body.error||'失败');else{$('#ak-key').value=$('#ak-alias').value='';loadAdmin();}
-};
-$('#lg-add').onclick=async()=>{
-  const models=$('#lg-models').value.trim().split(/\\s+/).filter(Boolean);
-  const r=await apost('/api/gateway/auth',{login:$('#lg-login').value.trim(),maps_to:$('#lg-maps').value.trim(),allow_models:models,erp:$('#lg-erp').value.trim(),admin:$('#lg-admin').checked});
-  if(!r.ok)alert(r.body.error||'失败');else{$('#lg-login').value='';loadAdmin();}
 };
 function renderTotals(d){const T=d.totals||{};$('#totals').innerHTML=[
   {v:fmtK(T.newTokens),k:'新增消耗(近7天)'},{v:fmtK(T.turns),k:'请求数'},
@@ -380,26 +309,6 @@ window.addEventListener('resize',()=>{if(_d)draw();});
 $('#login').onclick=()=>{KEY=$('#key').value.trim();VIEW='';if(!KEY)return;sessionStorage.setItem('crewKey',KEY);SELFLOGIN='';load();};
 $('#logout').onclick=()=>logout(true);
 $('#viewsel').onchange=()=>{VIEW=$('#viewsel').value;load();};
-$('#reg').onclick=async()=>{
-  const k=$('#regkey').value.trim();const erp=$('#regerp').value.trim();const m=$('#regmsg');const btn=$('#reg');
-  if(!k){m.textContent='请先粘贴你的 key';return;}
-  if(!erp){m.innerHTML='<span style=color:#e5534b>请填写你的 erp 工号</span>';return;}
-  btn.disabled=true;m.textContent='正在用 GLM 实测你的 key…（上游繁忙时会自动重试几次）';
-  let r,body;try{r=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:k,erp:erp})});body=await r.json();}catch(e){m.textContent='网络错误: '+e;btn.disabled=false;return;}
-  btn.disabled=false;
-  if(r.ok&&body.ok){
-    m.innerHTML='<span style=color:#4ec98a>✅ 注册成功!</span> 你的 key ('+esc(body.key_masked)+') 已登记。'+
-      '<br>你当前可调用的模型: <b>'+esc((body.allow_models||[]).join(', '))+'</b>(需要更多模型找管理员开通)。'+
-      '<br>现在就能用它登录看用量,或作为 x-api-key 发请求到本网关。接入方式见上方「快速接入」与下方 crew 介绍。';
-    $('#key').value=k;KEY=k;sessionStorage.setItem('crewKey',KEY);load();
-  }else if(body.transient){
-    m.innerHTML='<span style=color:#e0a94f>⏳ '+esc(body.error||'上游繁忙,请稍后重试')+'</span>'+
-      '<br><span class=dim>这不是你的 key 的问题,是上游服务器当前并发已满。点「注册我的 key」再试一次即可。</span>';
-  }else{
-    m.innerHTML='<span style=color:#e5534b>❌ '+esc(body.error||'注册失败')+'</span>'+
-      (body.detail?'<pre>'+esc(body.detail)+'</pre>':'');
-  }
-};
 if(KEY){$('#key').value=KEY;load();}
 setInterval(()=>{if(KEY)load();},30000);
 // -- v4.0.1 dashboard merge: proxy meta / sessions / recent requests --
@@ -857,10 +766,6 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/usage", "/usage/"):
             # v4.0.1:统一到 /dashboard,旧链接 302 兼容
             self._send_redirect("/dashboard")
-        elif path == "/crew-demo.gif":
-            self._send_static(CREW_DEMO_GIF, "image/gif")
-        elif path == "/crew-proxy-hero.png":
-            self._send_static(CREW_HERO_PNG, "image/png")
         elif path == "/api/status":
             self._send_json(self._api_status())
         elif path == "/api/sessions":
@@ -875,8 +780,6 @@ class Handler(BaseHTTPRequestHandler):
             self._api_keys()
         elif path == "/api/policy":
             self._api_policy_get()
-        elif path == "/api/register-allow":
-            self._api_register_allow_get()
         else:
             self._passthrough(b"")
 
@@ -890,14 +793,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_session_config(body); return
         if path == "/api/ccr/provider":
             self._api_ccr_provider(body); return
-        if path == "/api/gateway/auth":
-            self._api_gateway_auth(body); return
         if path == "/api/policy":
             self._api_policy(body); return
-        if path == "/api/register-allow":
-            self._api_register_allow(body); return
-        if path == "/api/register":
-            self._api_register(body); return
         if path == "/api/emergency-session":
             self._api_emergency_session(body); return
         # Only /v1/messages and /v1/chat/completions carry a model to route on.
@@ -1261,302 +1158,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json({"ok": False, "error": f"key-policy.conf write failed: {e}"}, 500)
         return self._send_json({"ok": True, "model": model, "aliases": aliases, "deleted": delete})
 
-    # -- self-service registration: NO admin required. A visitor submits their own real
-    #    key; we test-call the fixed internal upstream (REGISTER_TEST_URL, not user-supplied
-    #    -> no SSRF) with a tiny request. On success the key joins the shared pool for
-    #    REGISTER_MODEL (keys.conf + CCR provider + appended to that model's policy) so it
-    #    participates in failover. On failure the upstream error is returned verbatim so the
-    #    user can see why. Never exposes other keys; cannot touch policy of other models. --
-    def _api_register(self, body):
-        d = self._read_json(body)
-        if d is None:
-            return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
-        key = str(d.get("key", "")).strip()
-        if not key or len(key) > 512:
-            return self._send_json({"ok": False, "error": "key required (<=512 chars)"}, 400)
-        erp = str(d.get("erp", "")).strip()
-        if not erp:
-            return self._send_json({"ok": False, "error": "erp（工号）必填"}, 400)
-        if not SAFE_NAME.match(erp) or len(erp) > 64:
-            return self._send_json({"ok": False, "error": "erp 含非法字符或过长"}, 400)
-        # 1) test-call the fixed internal upstream with a minimal request. Retry a few times
-        #    on TRANSIENT upstream errors (429/503/5xx/conn) — a busy-server "max_concurrency"
-        #    spike is not a bad key. Only auth errors (401/403) mean the key is actually bad.
-        payload = json.dumps({"model": REGISTER_MODEL, "max_tokens": 8,
-                              "messages": [{"role": "user", "content": "ping"}]}).encode()
-        last_detail, last_code = "", None
-        ok_tested = False
-        for attempt in range(4):
-            req = urllib.request.Request(REGISTER_TEST_URL, data=payload, method="POST",
-                                         headers={"Content-Type": "application/json",
-                                                  "Authorization": "Bearer " + key,
-                                                  "x-api-key": key})
-            try:
-                resp = urllib.request.urlopen(req, timeout=30)
-                resp.read(4096)
-                ok_tested = True
-                break
-            except urllib.error.HTTPError as e:
-                last_code = e.code
-                try:
-                    last_detail = e.read(2048).decode("utf-8", "replace")
-                except Exception:
-                    last_detail = ""
-                if e.code in (401, 403):
-                    # genuine auth failure -> the key is bad, no point retrying.
-                    return self._send_json({"ok": False, "stage": "test",
-                                            "error": f"key 无效或无权限 (HTTP {e.code})",
-                                            "detail": last_detail}, 400)
-                # 429/5xx/other -> transient, retry after a short backoff
-            except Exception as e:
-                last_code, last_detail = None, str(e)
-            time.sleep(REGISTER_RETRY_BASE * (attempt + 1))
-        if not ok_tested:
-            # exhausted retries on a transient condition -> tell the user to retry, do NOT
-            # reject the key. 503 so the UI can distinguish "server busy" from "bad key".
-            return self._send_json({"ok": False, "stage": "test", "transient": True,
-                                    "error": "上游繁忙,暂时无法验证你的 key(并发已满/限流),请稍后重试",
-                                    "detail": last_detail}, 503)
-        # 2) key passed -> add to the pool. Dedupe by key: if an existing alias already holds
-        #    this exact key, reuse it (idempotent re-register); else mint self-<8hex of key>.
-        keys = load_keys()
-        alias = next((a for a, k in keys.items() if k == key), None)
-        if alias is None:
-            import hashlib
-            alias = "self-" + hashlib.sha256(key.encode()).hexdigest()[:8]
-        # keys.conf upsert
-        try:
-            lines, found = [], False
-            if os.path.exists(KEYS_FILE):
-                with open(KEYS_FILE) as f:
-                    for ln in f:
-                        if ln.strip() and not ln.lstrip().startswith("#") and ln.split("=", 1)[0].strip() == alias:
-                            lines.append(f"{alias}={key}\n"); found = True
-                        else:
-                            lines.append(ln if ln.endswith("\n") else ln + "\n")
-            if not found:
-                lines.append(f"{alias}={key}\n")
-            os.makedirs(os.path.dirname(KEYS_FILE), exist_ok=True)
-            tmp = KEYS_FILE + ".tmp"
-            with open(tmp, "w") as f:
-                f.writelines(lines)
-            os.chmod(tmp, 0o600); os.replace(tmp, KEYS_FILE)
-        except OSError as e:
-            return self._send_json({"ok": False, "error": f"keys.conf write failed: {e}"}, 500)
-        # 3) CCR providers: clone one provider per model this pool already serves, using the
-        #    new key with that model's own base_url + transformer, so the key can serve EVERY
-        #    model (not just the one we test-called).
-        added_models = []
-        try:
-            with open(CCR_CFG) as f:
-                cfg = json.load(f)
-            provs = cfg.get("Providers") or cfg.get("providers") or []
-            # model -> (base_url, transformer) template from an existing provider serving it
-            tmpl = {}
-            for p in provs:
-                base = p.get("api_base_url") or p.get("apiBaseUrl") or REGISTER_TEST_URL
-                tr = p.get("transformer") or {"use": ["OpenAI"]}
-                for m in (p.get("models") or []):
-                    tmpl.setdefault(m, (base, tr))
-            # guarantee the test model even if no provider enumerated it
-            tmpl.setdefault(REGISTER_MODEL, (REGISTER_TEST_URL, {"use": ["OpenAI"]}))
-            shutil.copy2(CCR_CFG, f"{CCR_CFG}.bak.{int(time.time())}")
-            existing = {p.get("name") for p in provs}
-            for m, (base, tr) in tmpl.items():
-                pname = f"{m}-{alias}"
-                if pname in existing:
-                    continue
-                provs.append({"name": pname, "api_base_url": base, "api_key": key,
-                              "models": [m], "transformer": tr})
-                added_models.append(m)
-            cfg["Providers"] = provs; cfg.pop("providers", None)
-            tmp = CCR_CFG + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(cfg, f, indent=2)
-            os.replace(tmp, CCR_CFG)
-        except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
-            return self._send_json({"ok": False, "error": f"CCR config update failed: {e}"}, 500)
-        # 4) policy: append alias to EVERY model's line (create lines for models with none).
-        try:
-            models = sorted(set(tmpl))
-            plines = []
-            if os.path.exists(POLICY):
-                with open(POLICY) as f:
-                    plines = f.readlines()
-            out, seen = [], set()
-            for ln in plines:
-                s = ln.strip()
-                if s and not s.startswith("#") and "=" in s:
-                    m = s.split("=", 1)[0].strip()
-                    if m in models:
-                        seen.add(m)
-                        cur = s.split("=", 1)[1].split()
-                        if alias not in cur:
-                            cur.append(alias)
-                        out.append(f"{m} = {' '.join(cur)}\n")
-                        continue
-                out.append(ln)
-            for m in models:
-                if m not in seen:
-                    out.append(f"{m} = {alias}\n")
-            os.makedirs(os.path.dirname(POLICY), exist_ok=True)
-            tmp = POLICY + ".tmp"
-            with open(tmp, "w") as f:
-                f.writelines(out)
-            os.replace(tmp, POLICY)
-        except OSError as e:
-            return self._send_json({"ok": False, "error": f"policy write failed: {e}"}, 500)
-        # 5) create/refresh a gateway-auth login entry for this key so the registrant can only
-        #    CALL the default-authorized models (allow_models). login == the key itself.
-        #    Never grants admin; if the login already exists, keep its admin/erp but do NOT
-        #    widen allow_models automatically (admin manages that afterwards).
-        try:
-            auth = load_gateway_auth()
-            prev = auth.get(key, {})
-            entry = {"maps_to": alias,
-                     "allow_models": prev.get("allow_models") or register_allow_list(),
-                     "erp": erp or prev.get("erp", "")}
-            if prev.get("admin"):
-                entry["admin"] = True
-            # write raw (load_gateway_auth normalizes on read); preserve other logins + __doc__
-            raw = {}
-            try:
-                with open(GATEWAY_AUTH) as f:
-                    raw = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                raw = {}
-            if not isinstance(raw, dict):
-                raw = {}
-            raw[key] = entry
-            os.makedirs(os.path.dirname(GATEWAY_AUTH), exist_ok=True)
-            if os.path.exists(GATEWAY_AUTH):
-                shutil.copy2(GATEWAY_AUTH, f"{GATEWAY_AUTH}.bak.{int(time.time())}")
-            tmp = GATEWAY_AUTH + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(raw, f, indent=2)
-            os.chmod(tmp, 0o600); os.replace(tmp, GATEWAY_AUTH)
-        except OSError as e:
-            return self._send_json({"ok": False, "error": f"gateway-auth write failed: {e}"}, 500)
-        log.info("self-registered key alias '%s' into %d models; allow=%s", alias, len(tmpl), entry["allow_models"])
-        if added_models and not sync_ccr_config():
-            return self._send_json({"ok": False, "error": "provider map saved but CCR 3 apply failed"}, 502)
-        return self._send_json({"ok": True, "alias": alias, "models": sorted(set(tmpl)),
-                                "allow_models": entry["allow_models"], "key_masked": mask_key(key)})
-
-    # -- default allow-list for NEW self-registrants (admin-editable) --
-    #    GET  -> {allow: [...current...], builtin: [...constant fallback...]}
-    #    POST {allow: ["ModelA","ModelB"]} -> persist to gateway-auth.json "__register_allow__"
-    #    Model names are strict-allowlisted (no shell metachars / commas). Empty list resets
-    #    to the built-in constant (removes the override).
-    def _api_register_allow_get(self):
-        if not self.require_admin():
-            return self._send_json({"error": "admin required"}, 403)
-        return self._send_json({"allow": register_allow_list(), "builtin": list(REGISTER_ALLOW)})
-
-    def _api_register_allow(self, body):
-        if not self.require_admin():
-            return self._send_json({"ok": False, "error": "admin required"}, 403)
-        d = self._read_json(body)
-        if d is None:
-            return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
-        raw_list = d.get("allow")
-        if not isinstance(raw_list, list):
-            return self._send_json({"ok": False, "error": "allow must be a list"}, 400)
-        ok_name = re.compile(r"^[A-Za-z0-9._-]+$")
-        models = []
-        for m in raw_list:
-            m = str(m).strip()
-            if not m:
-                continue
-            if not ok_name.match(m):
-                return self._send_json({"ok": False, "error": f"invalid model name: {m!r}"}, 400)
-            if m not in models:
-                models.append(m)
-        try:
-            raw = _raw_gateway_auth()
-            if not isinstance(raw, dict):
-                raw = {}
-            if models:
-                raw["__register_allow__"] = models
-            else:
-                raw.pop("__register_allow__", None)  # empty = reset to built-in default
-            os.makedirs(os.path.dirname(GATEWAY_AUTH), exist_ok=True)
-            if os.path.exists(GATEWAY_AUTH):
-                shutil.copy2(GATEWAY_AUTH, f"{GATEWAY_AUTH}.bak.{int(time.time())}")
-            tmp = GATEWAY_AUTH + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(raw, f, indent=2)
-            os.chmod(tmp, 0o600); os.replace(tmp, GATEWAY_AUTH)
-        except OSError as e:
-            return self._send_json({"ok": False, "error": f"gateway-auth write failed: {e}"}, 500)
-        log.info("register-allow default set to %s", register_allow_list())
-        return self._send_json({"ok": True, "allow": register_allow_list()})
-
-    # -- gateway login table: add/update/delete an entry in gateway-auth.json --
-    #    {login, maps_to, allow_models[], erp}          -> upsert
-    #    {login, delete: true}                          -> remove
-    # login/maps_to/model names are strict-allowlisted (no shell metachars, no commas).
-    def _api_gateway_auth(self, body):
-        if not self.require_admin():
-            return self._send_json({"ok": False, "error": "admin required"}, 403)
-        d = self._read_json(body)
-        if d is None:
-            return self._send_json({"ok": False, "error": "invalid JSON"}, 400)
-        login = str(d.get("login", ""))
-        ok_name = re.compile(r"^[A-Za-z0-9._-]+$")
-        if not ok_name.match(login):
-            return self._send_json({"ok": False, "error": "invalid login key"}, 400)
-
-        auth = load_gateway_auth()
-
-        if d.get("delete"):
-            if login not in auth:
-                return self._send_json({"ok": False, "error": "login key not found"}, 404)
-            auth.pop(login, None)
-        else:
-            maps_to = str(d.get("maps_to", ""))
-            if not ok_name.match(maps_to):
-                return self._send_json({"ok": False, "error": "invalid maps_to"}, 400)
-            # maps_to must be a real alias in keys.conf.
-            if maps_to not in load_keys():
-                return self._send_json({"ok": False, "error": f"maps_to '{maps_to}' not in keys.conf"}, 400)
-            allow = d.get("allow_models") or []
-            if not isinstance(allow, list):
-                return self._send_json({"ok": False, "error": "allow_models must be a list"}, 400)
-            clean_allow = []
-            for m in allow:
-                m = str(m).strip()
-                if not m:
-                    continue
-                if not ok_name.match(m):
-                    return self._send_json({"ok": False, "error": f"invalid model name '{m}'"}, 400)
-                clean_allow.append(m)
-            erp = str(d.get("erp", ""))
-            if erp and not ok_name.match(erp):
-                return self._send_json({"ok": False, "error": "invalid erp"}, 400)
-            prev_admin = bool(auth.get(login, {}).get("admin"))
-            admin = bool(d["admin"]) if isinstance(d.get("admin"), bool) else prev_admin
-            entry = {"maps_to": maps_to, "allow_models": clean_allow, "erp": erp}
-            if admin:
-                entry["admin"] = True
-            auth[login] = entry
-
-        # write back: back up first (if the file exists), then atomic replace, mode 0600.
-        try:
-            os.makedirs(os.path.dirname(GATEWAY_AUTH), exist_ok=True)
-            backup = None
-            if os.path.exists(GATEWAY_AUTH):
-                backup = f"{GATEWAY_AUTH}.bak.{int(time.time())}"
-                shutil.copy2(GATEWAY_AUTH, backup)
-            tmp = GATEWAY_AUTH + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(auth, f, indent=2)
-            os.replace(tmp, GATEWAY_AUTH)
-            os.chmod(GATEWAY_AUTH, 0o600)
-        except OSError as e:
-            return self._send_json({"ok": False, "error": f"gateway-auth write failed: {e}"}, 500)
-        return self._send_json({"ok": True, "login": login, "deleted": bool(d.get("delete")),
-                                "backup_path": backup})
 
     # -- plain reverse proxy (no key logic): health, /v1/models, unknown paths, and
     #    policy-less model calls. When model is given (a real completion call), the request

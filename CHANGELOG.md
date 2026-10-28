@@ -5,6 +5,23 @@
 
 `crew version` 读取本文件头部渲染版本摘要;新版本发布 = 在本文件顶部加一节 + 提交。
 
+## [Unreleased]
+
+## [4.0.2] - 2026-10-28
+
+### 剥离对外共享层(proxy 回归个人使用)
+- **删除面向外部用户的整套注册/门票机制**:登录页(快速接入文案/hero 图/注册表单)、
+  `/api/register`(自助注册,实测 key→入池+CCR provider+policy+登录条目)、`/api/gateway/auth`
+  (门票增删改)与 `/api/register-allow`(新注册者默认模型)全部移除;登录页精简为单行
+  key 输入条,鉴权(gateway-auth.json admin 判定)与 Key 池/模型策略/应急会话保留。
+- **删除宣传与静态资源**:#intro crew 宣传页(仓库链接/CCR 接入说明)与两张静态图路由
+  (/crew-demo.gif、/crew-proxy-hero.png)移除;`_crew_config` 的 CREW_DEMO_GIF/
+  CREW_HERO_PNG/REGISTER_*/register_allow_list/_raw_gateway_auth 常量与函数清理。
+- **净减代码**:_crew_handler.py -296 行、crew_proxy.py 门面 -297 行、_crew_config.py 清理;
+  双写 USAGE_HTML 与 Handler 仍逐字节一致;test_crew_proxy.py 同步删注册/门票测试块。
+- 实测:/dashboard 精简页 0 残留、/usage 302、被删端点 404、/v1/messages 转发与
+  /api/usage 延迟统计正常。
+
 ## [4.0.1] - 2026-10-28
 
 ### 监控页统一

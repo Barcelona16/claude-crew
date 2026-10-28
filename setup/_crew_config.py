@@ -35,27 +35,7 @@ CFG_DIR   = _cfg_dir()
 KEYS_FILE = os.path.join(CFG_DIR, "keys.conf")
 POLICY    = os.path.join(CFG_DIR, "key-policy.conf")
 USAGE_FILE = os.path.join(CFG_DIR, "usage.json")
-# crew demo gif for the /usage intro. Env override, else next to this script, else the
-# repo's docs/ (dev). Absent -> the <img> just 404s, harmless.
-CREW_DEMO_GIF = os.environ.get("CREW_DEMO_GIF") or next(
-    (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-demo.gif"),
-                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "crew-demo.gif"))
-     if os.path.exists(p)), os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-demo.gif"))
-# crew-proxy hero banner (cyberpunk). Same resolution order as the gif.
-CREW_HERO_PNG = os.environ.get("CREW_HERO_PNG") or next(
-    (p for p in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-proxy-hero.png"),
-                 os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "crew-proxy-hero.png"))
-     if os.path.exists(p)), os.path.join(os.path.dirname(os.path.abspath(__file__)), "crew-proxy-hero.png"))
 GATEWAY_AUTH = os.environ.get("GATEWAY_AUTH") or os.path.join(CFG_DIR, "gateway-auth.json")
-# Self-registration: the fixed upstream a submitted key is test-called against (NOT
-# user-supplied — no SSRF). A key that passes is added to the pool for this model.
-REGISTER_TEST_URL = os.environ.get("CREW_REGISTER_URL") or "http://llm-gw.jd.local/v1/chat/completions"
-REGISTER_MODEL = os.environ.get("CREW_REGISTER_MODEL") or "GLM-5.2"
-REGISTER_RETRY_BASE = float(os.environ.get("CREW_REGISTER_RETRY_BASE", "1.5"))  # backoff step (s)
-# Models a self-registrant is allowed to CALL by default (their login's allow_models).
-# Anything else is admin-granted later. Comma-separated env override.
-REGISTER_ALLOW = [m.strip() for m in (os.environ.get("CREW_REGISTER_ALLOW")
-    or "Claude-Opus-4.6-joybuilder,Claude-Opus-4.7-joybuilder,Claude-Opus-4.8-joybuilder,GLM-5.2,GLM-5.2-joybuilder").split(",") if m.strip()]
 CCR_CFG   = os.environ.get("CREW_CCR_CONFIG") or os.path.join(CFG_DIR, "ccr-providers.json")
 CCR_URL   = (os.environ.get("CREW_CCR_URL") or "http://127.0.0.1:3456").rstrip("/")
 CCR_V3_ADAPTER = os.environ.get("CREW_CCR_V3_ADAPTER") or os.path.join(
@@ -236,28 +216,6 @@ def load_gateway_auth():
                   "erp": str(v.get("erp", "")),
                   "admin": bool(v.get("admin"))}
     return out
-
-
-def _raw_gateway_auth():
-    """The gateway-auth.json dict verbatim (including __-prefixed config keys), {} if absent."""
-    try:
-        with open(GATEWAY_AUTH) as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def register_allow_list():
-    """The live default allow_models handed to a new self-registrant. Admin-editable via
-    gateway-auth.json's reserved "__register_allow__" list; falls back to the REGISTER_ALLOW
-    constant when unset. Always returns a fresh list of clean model-name strings."""
-    v = _raw_gateway_auth().get("__register_allow__")
-    if isinstance(v, list):
-        out = [str(m).strip() for m in v if str(m).strip()]
-        if out:
-            return out
-    return list(REGISTER_ALLOW)
 
 
 def sync_ccr_config():

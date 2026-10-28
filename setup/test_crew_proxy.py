@@ -288,8 +288,7 @@ cp.CREW_STATE = os.path.join(_tmp, "state")
 print("Admin gate on management endpoints:")
 for _p, _b in (("/api/session/config", {"name": "x"}),
                ("/api/session/kill", {"name": "x"}),
-               ("/api/ccr/provider", {"alias": "z", "key": "k", "model": "M", "base_url": "https://x"}),
-               ("/api/gateway/auth", {"login": "z", "maps_to": "k1"})):
+               ("/api/ccr/provider", {"alias": "z", "key": "k", "model": "M", "base_url": "https://x"})):
     code, _ = jpost(_p, _b, key=None)
     check("no key -> 403 %s" % _p, code == 403)
     code, _ = jpost(_p, _b, key="plainkey")
@@ -332,60 +331,6 @@ check("bad alias rejected", code == 400 and not r.get("ok"))
 code, r = jpost("/api/ccr/provider", {"alias": "k5", "key": "x", "model": "MODEL_X",
                                        "base_url": "ftp://nope", "transformer": "OpenAI"})
 check("non-http base_url rejected", code == 400 and not r.get("ok"))
-
-# ── gateway login table: add / update / delete + erp join + injection ─────────────
-print("Gateway login table (/api/gateway/auth):")
-cp.GATEWAY_AUTH = os.path.join(_tmp, "gateway-auth.json")
-# add a ticket mapped to a real alias k1, limited to MODEL_X
-code, r = jpost("/api/gateway/auth", {"login": "ticket1", "maps_to": "k1",
-                                      "allow_models": ["MODEL_X"], "erp": "alice"})
-check("add login ticket1", code == 200 and r.get("ok"))
-_auth = json.load(open(cp.GATEWAY_AUTH))
-check("ticket1 persisted", _auth.get("ticket1", {}).get("maps_to") == "k1")
-check("gateway-auth.json is 0600", (os.stat(cp.GATEWAY_AUTH).st_mode & 0o777) == 0o600)
-# maps_to must be a real alias in keys.conf
-code, r = jpost("/api/gateway/auth", {"login": "bad", "maps_to": "nosuchalias"})
-check("maps_to must exist in keys.conf", code == 400 and not r.get("ok"))
-# injection: login key with shell metachars rejected
-code, r = jpost("/api/gateway/auth", {"login": "a;rm -rf /", "maps_to": "k1"})
-check("shell-metachar login rejected", code == 400 and not r.get("ok"))
-# injection: bad model name in allow_models rejected
-code, r = jpost("/api/gateway/auth", {"login": "t2", "maps_to": "k1", "allow_models": ["a/../b"]})
-check("bad model name rejected", code == 400 and not r.get("ok"))
-# update existing
-code, r = jpost("/api/gateway/auth", {"login": "ticket1", "maps_to": "k2",
-                                      "allow_models": [], "erp": "bob"})
-check("update ticket1 -> k2/all/bob", code == 200 and r.get("ok"))
-_auth = json.load(open(cp.GATEWAY_AUTH))
-check("update persisted", _auth["ticket1"]["maps_to"] == "k2" and _auth["ticket1"]["allow_models"] == [])
-# erp join shows up in /api/status keys
-code, raw = get("/api/status")
-_st = json.loads(raw)
-_k2 = next((k for k in _st["keys"] if k["alias"] == "k2"), {})
-check("erp joins onto k2 in status", _k2.get("erp") == "bob")
-check("status has auth rows", any(a["login"] == "ticket1" for a in _st.get("auth", [])))
-# delete
-code, r = jpost("/api/gateway/auth", {"login": "ticket1", "delete": True})
-check("delete ticket1", code == 200 and r.get("ok"))
-check("ticket1 gone", "ticket1" not in json.load(open(cp.GATEWAY_AUTH)))
-code, r = jpost("/api/gateway/auth", {"login": "ghost", "delete": True})
-check("delete missing -> 404", code == 404)
-# admin flag: seed with admin
-code, r = jpost("/api/gateway/auth", {"login": "adm1", "maps_to": "k1", "admin": True})
-check("add admin login adm1", code == 200 and r.get("ok"))
-_auth = json.load(open(cp.GATEWAY_AUTH))
-check("adm1 admin seeded", _auth["adm1"].get("admin") is True)
-# edit same login WITHOUT sending admin -> admin preserved, edit applied
-code, r = jpost("/api/gateway/auth", {"login": "adm1", "maps_to": "k1", "allow_models": ["MODEL_X"]})
-check("edit adm1 without admin", code == 200 and r.get("ok"))
-_auth = json.load(open(cp.GATEWAY_AUTH))
-check("adm1 admin preserved on edit", _auth["adm1"].get("admin") is True)
-check("adm1 edit applied", _auth["adm1"]["allow_models"] == ["MODEL_X"])
-# normal upsert stays clean (no admin key written)
-code, r = jpost("/api/gateway/auth", {"login": "norm1", "maps_to": "k1"})
-check("add norm1", code == 200 and r.get("ok"))
-_auth = json.load(open(cp.GATEWAY_AUTH))
-check("norm1 has no admin key", "admin" not in _auth["norm1"])
 
 # ── key pool: /api/keys (admin) + /api/health (any login) + delete ────────────────
 print("Key pool + health:")
@@ -454,55 +399,6 @@ check("unknown alias -> 400", code == 400 and not r.get("ok"))
 code, r = jpost("/api/policy", {"model": "MODEL_Z", "delete": True})
 check("delete MODEL_Z policy line", code == 200 and r.get("deleted"))
 check("MODEL_Z policy gone", "MODEL_Z" not in cp.load_policy())
-
-# ── self-registration: public, GLM test-call, key joins pool ──────────────────────
-print("Self-registration:")
-# success path: mock returns 200 for GLM-5.2 -> key pooled across ALL models
-code, r = jpost("/api/register", {"key": "SELF_KEY_123", "erp": "alice01"}, key=None)
-check("register no admin needed -> 200", code == 200 and r.get("ok"))
-check("register returns masked key", r.get("key_masked", "").startswith("sk-…"))
-_alias = r.get("alias")
-check("register minted self- alias", _alias and _alias.startswith("self-"))
-check("register returns models list", isinstance(r.get("models"), list) and len(r["models"]) >= 1)
-check("registered key in keys.conf", "SELF_KEY_123" in open(cp.KEYS_FILE).read())
-_pol = cp.load_policy()
-check("registered alias in every served model's policy", all(_alias in _pol.get(m, []) for m in r["models"]))
-_ccr = json.load(open(_ccr_cfg))
-check("registered CCR provider(s) present", sum(1 for p in _ccr["Providers"] if p.get("api_key") == "SELF_KEY_123") >= 1)
-check("register returns allow_models", isinstance(r.get("allow_models"), list) and len(r["allow_models"]) >= 1)
-_auth = json.load(open(cp.GATEWAY_AUTH))
-check("register created a login entry keyed by the key", "SELF_KEY_123" in _auth)
-check("login entry allow_models = defaults", _auth["SELF_KEY_123"]["allow_models"] == r["allow_models"])
-check("login entry maps_to the minted alias", _auth["SELF_KEY_123"]["maps_to"] == _alias)
-check("register login is NOT admin", not _auth["SELF_KEY_123"].get("admin"))
-check("register login carries submitted erp", _auth["SELF_KEY_123"].get("erp") == "alice01")
-# erp is required
-code, r = jpost("/api/register", {"key": "NOERP_KEY"}, key=None)
-check("register without erp -> 400", code == 400 and "erp" in (r.get("error") or ""))
-check("no-erp key NOT pooled", "NOERP_KEY" not in open(cp.KEYS_FILE).read())
-# idempotent re-register: same key -> same alias, no dupe providers/policy
-_before = sum(1 for p in _ccr["Providers"] if p.get("api_key") == "SELF_KEY_123")
-code, r2 = jpost("/api/register", {"key": "SELF_KEY_123", "erp": "alice01"}, key=None)
-check("re-register same key reuses alias", r2.get("alias") == _alias)
-_ccr2 = json.load(open(_ccr_cfg))
-check("re-register adds no dup providers", sum(1 for p in _ccr2["Providers"] if p.get("api_key") == "SELF_KEY_123") == _before)
-_pol2 = cp.load_policy()
-check("re-register no dup alias in policy", all(_pol2.get(m, []).count(_alias) == 1 for m in r2.get("models", [])))
-# failure path: AUTH error (401/403) -> key is bad, 400, verbatim error, NOT pooled
-MOCK["fail_providers"] = {"GLM-5.2"}; MOCK["fail_code"] = 401
-code, r = jpost("/api/register", {"key": "BAD_SELF_KEY", "erp": "bob02"}, key=None)
-check("auth-fail key -> 400 not ok", code == 400 and not r.get("ok"))
-check("auth-fail not marked transient", not r.get("transient"))
-check("auth-fail key NOT added to keys.conf", "BAD_SELF_KEY" not in open(cp.KEYS_FILE).read())
-# transient path: 503/busy -> retried, then 503 transient=True, NOT pooled (not the key's fault)
-MOCK["fail_providers"] = {"GLM-5.2"}; MOCK["fail_code"] = 503
-code, r = jpost("/api/register", {"key": "BUSY_SELF_KEY", "erp": "cara03"}, key=None)
-check("busy upstream -> 503 transient", code == 503 and r.get("transient") is True)
-check("busy upstream key NOT pooled", "BUSY_SELF_KEY" not in open(cp.KEYS_FILE).read())
-MOCK["fail_providers"] = set()
-# empty key rejected
-code, r = jpost("/api/register", {"key": ""}, key=None)
-check("empty key -> 400", code == 400 and not r.get("ok"))
 
 # ── usage parsing (unit) ──────────────────────────────────────────────────────────
 print("Usage parsing (unit):")
