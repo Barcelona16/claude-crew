@@ -535,6 +535,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        # 页面内嵌 JS 随版本演进,浏览器启发式缓存会拿到旧版黑屏;强制每次重新验证。
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
         try:
