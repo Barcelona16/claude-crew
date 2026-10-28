@@ -643,10 +643,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _trusted(self):
         """Loopback peer => the single-user local machine; treated as authenticated
-        admin. The proxy binds 127.0.0.1 only, so this is the normal case; if the
-        bind ever widens, non-loopback peers still require a real key."""
+        admin. The proxy binds dual-stack (::, V6ONLY=0), so IPv4 loopback arrives
+        as the IPv4-mapped ::ffff:127.0.0.1; accept the mapped form too."""
         addr = self.client_address[0] if self.client_address else ""
-        return addr in ("127.0.0.1", "::1")
+        return addr in ("127.0.0.1", "::1") or addr.startswith("::ffff:127.")
 
     def require_admin(self):
         """Return the caller's login key iff it maps to an admin entry, else None.
