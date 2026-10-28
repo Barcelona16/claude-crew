@@ -520,9 +520,10 @@ code, d = get_usage("personal", "?key=jimdbtest")
 check("admin can view another login", code == 200 and d["login"] == "jimdbtest")
 code, d = get_usage("personal", "?key=__all__")
 check("admin __all__ sums all logins", d["login"] == "__all__" and d["totals"]["newTokens"] == 32)
-check("admin usage carries logins list for dropdown", isinstance(d.get("logins"), list) and "jimdbtest" in d["logins"])
+check("admin usage carries aliases list for dropdown", isinstance(d.get("aliases"), list) and "k1" in d["aliases"] and "k3" in d["aliases"])
+check("admin usage drops raw logins/orphans", d.get("logins") is None and d.get("orphan_logins") is None)
 code, d = get_usage("jimdbtest")
-check("normal user usage has no logins list", d.get("logins") is None)
+check("normal user usage has no aliases", d.get("aliases") is None)
 check("buckets carry perReqNew", d["buckets"][0].get("perReqNew") is not None)
 
 # ── /usage page serves HTML with the chart canvas ─────────────────────────────────

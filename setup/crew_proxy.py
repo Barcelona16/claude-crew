@@ -349,10 +349,10 @@ async function load(){
   if(d.isAdmin){populateViewsel();loadAdmin();renderEmergency(d.emergency);}
 }
 function populateViewsel(){
-  const sel=$('#viewsel');const logins=(_d&&_d.logins)||[];const orphans=new Set((_d&&_d.orphan_logins)||[]);
-  sel.innerHTML='<option value="">我自己('+esc(SELFLOGIN||'')+')</option><option value="__all__">全部人合计</option>'+
-    logins.map(l=>'<option value="'+esc(l)+'">'+esc(l)+(orphans.has(l)?(l==='direct'?' · 直连/未走网关':' · 未登录(孤儿)'):'')+'</option>').join('');
-  sel.value=VIEW;
+  const sel=$('#viewsel');const als=(_d&&_d.aliases)||[];
+  sel.innerHTML='<option value="__all__">全部人合计</option>'+
+    als.map(a=>'<option value="'+esc(a)+'">'+esc(a)+'</option>').join('');
+  sel.value=VIEW||'__all__';
 }
 async function loadHealth(){
   let r;try{r=await fetch('/api/health');}catch(e){return;}
@@ -853,7 +853,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_json({"error": "unauthorized"}, 401)
         want = q.get("key", [None])[0]
         if entry.get("admin") and want:
-            login = None if want == "__all__" else want
+            if want == "__all__":
+                login = None
+            else:
+                keys = load_keys()
+                if want in keys:
+                    # 别名视角 = 别名记账 + 该 key 值记账(带 X-Crew-Login 头的流量)
+                    login = sorted({want} | {l for l in USAGE.labels() if l == keys[want]})
+                else:
+                    login = want  # 兼容直接传原始 usage 标签
         else:
             login = key
         out = USAGE.series(login, days=days)
@@ -870,10 +878,13 @@ class Handler(BaseHTTPRequestHandler):
             # unauthenticated /api/status) call through the gateway. Union the login table
             # with every label that actually has usage, so 'direct' and orphaned (removed)
             # logins are viewable too — otherwise their traffic is invisible per-key.
-            authset = set(load_gateway_auth().keys())
             usage_labels = set(USAGE.labels())
-            out["logins"] = sorted(authset | usage_labels)
-            out["orphan_logins"] = sorted(usage_labels - authset)  # usage but no login entry
+            # 下拉只给真实 key 别名(keys.conf);usage 标签按别名聚合:
+            # 别名记账 + 该 key 值记账(带 X-Crew-Login 头的流量)。不再暴露
+            # gateway-auth 裸 key / direct / 孤儿标签。
+            kf = load_keys()
+            out["aliases"] = sorted(kf)
+            out["alias_labels"] = {a: sorted({a} | {l for l in usage_labels if l == kf[a]}) for a in kf}
             # emergency-session form dropdown data: alias + the models each alias routes.
             out["emergency"] = {"keys": _emergency_key_models()}
         return self._send_json(out)

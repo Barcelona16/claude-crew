@@ -247,8 +247,17 @@ class UsageSeries:
                         m = merged.setdefault(bts, {"turns": 0, "inTok": 0, "outTok": 0})
                         m["turns"] += v["turns"]; m["inTok"] += v["inTok"]; m["outTok"] += v["outTok"]
                 src = merged
-            else:
+            elif isinstance(login, str):
                 src = {bts: dict(v) for bts, v in self._buckets.get(login, {}).items() if bts >= cutoff}
+            else:
+                # 别名视角: 跨多个 usage 标签(别名 + 对应 key 值)按 bucket 聚合
+                src = {}
+                for lb in login:
+                    for bts, v in self._buckets.get(lb, {}).items():
+                        if bts < cutoff:
+                            continue
+                        m = src.setdefault(bts, {"turns": 0, "inTok": 0, "outTok": 0})
+                        m["turns"] += v["turns"]; m["inTok"] += v["inTok"]; m["outTok"] += v["outTok"]
         buckets = []
         daily = {}
         tot_new = tot_turns = 0
@@ -274,7 +283,7 @@ class UsageSeries:
             "generatedAt": int(now * 1000),
             "bucketMin": self.BUCKET_SEC // 60,
             "windowH": days * 24,
-            "login": login if login is not None else "__all__",
+            "login": (login[0] if isinstance(login, list) else login) if login is not None else "__all__",
             "buckets": buckets,
             "daily": daily_list,
             "totals": {
