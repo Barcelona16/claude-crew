@@ -3,6 +3,7 @@
 
 import atexit
 import logging
+import socket
 import threading
 import time
 from http.server import ThreadingHTTPServer
@@ -10,6 +11,16 @@ from http.server import ThreadingHTTPServer
 from _crew_config import CCR_URL, COOLDOWN, FAIL_N, KEYS_FILE, POLICY, CCR_CFG, PORT, log
 from _crew_handler import Handler
 from _crew_stats import STATS, USAGE, LATENCY, UsageSeries
+
+class _DualStackHTTPServer(ThreadingHTTPServer):
+    """Bind on IPv6 with V6ONLY=0 so both http://127.0.0.1:PORT and
+    http://localhost:PORT (→ ::1) work — browsers resolve localhost to ::1
+    first on macOS, which previously made /dashboard unreachable."""
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
 
 def main():
     log.info("listening on http://127.0.0.1:%d  ->  CCR %s", PORT, CCR_URL)
@@ -41,7 +52,7 @@ def main():
     # 重建失败(EADDRINUSE 等端口被占)才放退出 —— 那种交给 launchd/doctor 处理。
     while True:
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+            server = _DualStackHTTPServer(("::", PORT), Handler)
         except OSError as e:
             log.error("bind :%d failed: %s — exiting (launchd/doctor 会接手)", PORT, e)
             raise SystemExit(1)
