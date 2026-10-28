@@ -796,9 +796,42 @@ class Handler(BaseHTTPRequestHandler):
             if path.endswith("/messages"):
                 # 清洗 tool id 里的非法冒号(如 Bash:0),否则严格网关(4.7-joybuilder)会 400。
                 body = self._sanitize_tool_ids(body)
+                # thinking 兼容:5.5+ 上游只认 thinking.type=adaptive(+output_config.effort),
+                # disabled/enabled 会 400 ValidationException。
+                body = self._normalize_thinking(body)
             self._route(body)
         else:
             self._passthrough(body)
+
+    def _normalize_thinking(self, body):
+        """Anthropic /v1/messages: 5.5+ upstream only accepts
+        thinking.type=adaptive (+ output_config.effort); 'disabled'/'enabled'
+        → 400 ValidationException ("use adaptive and output_config.effort").
+        disabled → drop thinking; enabled → adaptive + output_config.effort.
+        Byte-safe: if nothing changed, original bytes are returned unchanged."""
+        try:
+            payload = json.loads(body or b"{}")
+        except (json.JSONDecodeError, ValueError):
+            return body
+        if not isinstance(payload, dict):
+            return body
+        t = payload.get("thinking")
+        if not isinstance(t, dict) or not isinstance(t.get("type"), str):
+            return body
+        ttype = t["type"]
+        if ttype == "disabled":
+            del payload["thinking"]
+        elif ttype in ("enabled", "adaptive"):
+            if ttype == "enabled":
+                t["type"] = "adaptive"
+                t.pop("budget_tokens", None)
+            oc = payload.get("output_config")
+            if not isinstance(oc, dict):
+                oc = payload["output_config"] = {}
+            oc.setdefault("effort", "medium")
+        else:
+            return body
+        return json.dumps(payload).encode()
 
     def _read_json(self, body):
         try:
