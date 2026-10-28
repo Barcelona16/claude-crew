@@ -236,214 +236,6 @@ def maybe_calibrate_from_error(model, body_bytes, req_body=None):
 if __name__ == "__main__":
     main()
 
-DASHBOARD_HTML = r"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>crew-proxy</title>
-<style>
-:root{color-scheme:dark}
-*{box-sizing:border-box}
-body{margin:0;font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:#0d1117;color:#c9d1d9}
-header{padding:12px 18px;border-bottom:1px solid #21262d;display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
-h1{font-size:16px;margin:0;color:#58a6ff}
-.muted{color:#8b949e;font-size:12px}
-main{padding:18px;display:grid;gap:22px;max-width:1100px}
-section h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:#8b949e;margin:0 0 8px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #21262d;white-space:nowrap}
-th{color:#8b949e;font-weight:600}
-td.dir{color:#8b949e;max-width:280px;overflow:hidden;text-overflow:ellipsis}
-.pill{padding:1px 8px;border-radius:10px;font-size:12px}
-.live,.healthy{background:#132e1a;color:#3fb950}
-.tripped,.fail{background:#3a1416;color:#f85149}
-.resumable{background:#1c2330;color:#58a6ff}
-.new{background:#2b2416;color:#d29922}
-button{font:inherit;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:3px 10px;cursor:pointer}
-button:hover{background:#30363d}
-button.danger{border-color:#5a1e1e}button.danger:hover{background:#3a1416}
-#logs{max-height:280px;overflow:auto}
-.err{color:#f85149;font-size:12px}
-.dim{color:#6e7681}
-dialog{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:10px;padding:18px;min-width:320px}
-dialog input,dialog select{font:inherit;width:100%;padding:5px;margin:4px 0 12px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px}
-label{font-size:12px;color:#8b949e}
-</style></head><body>
-<header>
-  <h1>crew-proxy</h1>
-  <span class="muted" id="meta"></span>
-  <span class="muted" id="totals"></span>
-  <span class="muted dim" style="margin-left:auto" id="tick"></span>
-</header>
-<main>
-  <section><h2>Keys</h2><table id="keys"><thead><tr>
-    <th>alias</th><th>erp</th><th>state</th><th>requests</th><th>ok</th><th>fail</th><th>in tok</th><th>out tok</th><th>consec</th><th>cooldown</th>
-  </tr></thead><tbody></tbody></table></section>
-
-  <section><h2>Usage by model</h2><table id="models"><thead><tr>
-    <th>model</th><th>requests</th><th>in tok</th><th>out tok</th><th>total tok</th>
-  </tr></thead><tbody></tbody></table></section>
-
-  <section><h2>Login table (gateway)</h2>
-    <table id="auth"><thead><tr>
-      <th>login key</th><th>maps to</th><th>allow models</th><th>erp</th><th></th>
-    </tr></thead><tbody></tbody></table>
-    <button id="authadd" style="margin-top:8px">+ add login key / ticket</button>
-  </section>
-
-  <section><h2>Sessions</h2>
-    <div class="err" id="sess-err"></div>
-    <table id="sessions"><thead><tr>
-      <th>name</th><th>status</th><th>model</th><th>key</th><th>dir</th><th></th>
-    </tr></thead><tbody></tbody></table>
-  </section>
-
-  <section><h2>Recent requests</h2><div id="logs"><table><thead><tr>
-    <th>t</th><th>model</th><th>key</th><th>status</th><th>latency</th><th>tokens</th><th></th>
-  </tr></thead><tbody></tbody></table></div></section>
-
-  <section><button id="addbtn">+ add key / provider (writes CCR config)</button></section>
-</main>
-
-<dialog id="editdlg"><form method="dialog">
-  <h2 id="edittitle">edit session</h2>
-  <label>model</label><input id="edit-model" placeholder="preset name">
-  <label>key (alias, empty to clear)</label><input id="edit-key" placeholder="alias or blank">
-  <div style="display:flex;gap:8px;justify-content:flex-end">
-    <button value="cancel">cancel</button><button id="edit-save" value="save">save</button>
-  </div>
-</form></dialog>
-
-<dialog id="adddlg"><form method="dialog">
-  <h2>add key + CCR provider</h2>
-  <label>alias</label><input id="add-alias" placeholder="gw2">
-  <label>api key</label><input id="add-key" placeholder="sk-...">
-  <label>model</label><input id="add-model" placeholder="model name (must match a preset)">
-  <label>base url</label><input id="add-base" placeholder="https://api.provider.com/v1/chat/completions">
-  <label>transformer</label><select id="add-tf"><option>Anthropic</option><option>OpenAI</option></select>
-  <div style="display:flex;gap:8px;justify-content:flex-end">
-    <button value="cancel">cancel</button><button id="add-save" value="save" class="danger">write CCR config</button>
-  </div>
-</form></dialog>
-
-<dialog id="authdlg"><form method="dialog">
-  <h2 id="auth-title">add login key</h2>
-  <label>login key (real key or ticket)</label><input id="auth-login" placeholder="jimdbtest">
-  <label>maps to (real alias in keys.conf)</label><input id="auth-mapsto" placeholder="personal">
-  <label>allow models (space/comma separated, empty = all)</label><input id="auth-models" placeholder="GLM-5.2">
-  <label>erp (contributor)</label><input id="auth-erp" placeholder="wangqiwang1">
-  <div style="display:flex;gap:8px;justify-content:flex-end">
-    <button value="cancel">cancel</button><button id="auth-save" value="save">save</button>
-  </div>
-</form></dialog>
-
-<script>
-const $=s=>document.querySelector(s), tb=s=>document.querySelector(s+' tbody');
-function pill(s){return `<span class="pill ${s}">${s}</span>`}
-function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-function kfmt(n){n=n||0;return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n)}
-
-async function jget(u){const r=await fetch(u);if(!r.ok)throw new Error(r.status);return r.json()}
-async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json()}
-
-async function refresh(){
-  try{
-    const s=await jget('/api/status');
-    $('#meta').textContent=`:${s.port} -> ${s.ccr_url}  ·  trip@${s.fail_n} cooldown ${s.cooldown}s`;
-    $('#totals').textContent=`req ${s.totals.requests}  ok ${s.totals.ok}  fail ${s.totals.fail}  ·  tok ${kfmt(s.totals.in_tokens)}in / ${kfmt(s.totals.out_tokens)}out`;
-    tb('#keys').innerHTML=s.keys.map(k=>`<tr><td>${esc(k.alias)}</td><td class=dim>${esc(k.erp)||'-'}</td><td>${pill(k.state)}</td>
-      <td>${k.requests}</td><td>${k.ok}</td><td>${k.fail}</td><td>${kfmt(k.in_tokens)}</td><td>${kfmt(k.out_tokens)}</td>
-      <td>${k.consec_fails}</td><td>${k.cooldown_left?k.cooldown_left+'s':'-'}</td></tr>`).join('')||'<tr><td class=dim colspan=10>no key activity yet</td></tr>';
-    tb('#models').innerHTML=(s.models||[]).map(m=>`<tr><td>${esc(m.model)}</td><td>${m.requests}</td>
-      <td>${kfmt(m.in_tokens)}</td><td>${kfmt(m.out_tokens)}</td><td>${kfmt((m.in_tokens||0)+(m.out_tokens||0))}</td></tr>`).join('')
-      ||'<tr><td class=dim colspan=5>no usage yet</td></tr>';
-    tb('#auth').innerHTML=(s.auth||[]).map(a=>`<tr><td>${esc(a.login)}</td><td>${esc(a.maps_to)}</td>
-      <td class=dim>${(a.allow_models&&a.allow_models.length)?esc(a.allow_models.join(', ')):'<span class=dim>all</span>'}</td>
-      <td class=dim>${esc(a.erp)||'-'}</td>
-      <td><button onclick="editAuth('${esc(a.login)}','${esc(a.maps_to)}','${esc((a.allow_models||[]).join(' '))}','${esc(a.erp)}')">edit</button>
-          <button class=danger onclick="delAuth('${esc(a.login)}')">del</button></td></tr>`).join('')
-      ||'<tr><td class=dim colspan=5>no login keys — click "add" below</td></tr>';
-  }catch(e){$('#meta').innerHTML='<span class=err>proxy status unavailable</span>'}
-
-  try{
-    const d=await jget('/api/sessions');
-    $('#sess-err').textContent=d.error||'';
-    tb('#sessions').innerHTML=(d.sessions||[]).map(x=>`<tr>
-      <td>${esc(x.name)}</td><td>${pill(x.status)}</td><td>${esc(x.model)}</td><td>${esc(x.key)}</td>
-      <td class=dir title="${esc(x.dir)}">${esc(x.dir)}</td>
-      <td><button onclick="copyCmd('${esc(x.name)}','${esc(x.model)}','${esc(x.key)}')">copy</button>
-          <button onclick="editSess('${esc(x.name)}','${esc(x.model)}','${esc(x.key)}')">edit</button>
-          <button class=danger onclick="killSess('${esc(x.name)}')">kill</button></td></tr>`).join('')
-      ||'<tr><td class=dim colspan=6>no sessions</td></tr>';
-  }catch(e){$('#sess-err').textContent='sessions unavailable'}
-
-  try{
-    const l=await jget('/api/logs?n=100');
-    // 2026-10-20:时间列改墙钟 HH:MM:SS(相对秒看不出几点发生);失败请求追加 err 摘要
-    // (截 200 字),hover title 看全文 —— 以前 400/401 只见状态码,上游真实错误要翻日志。
-    tb('#logs table').innerHTML=(l.logs||[]).map(x=>{
-      const tm=x.ts?new Date(x.ts*1000).toLocaleTimeString([], {hour12:false}):x.t+'s';
-      const err=x.err?('<span class=err title="'+esc(x.err)+'">'+esc(x.err.slice(0,80))+'</span>'):'';
-      return `<tr><td class=dim>${tm}</td><td>${esc(x.model)}</td>
-      <td>${esc(x.alias)}</td><td>${x.ok?pill('healthy'):'<span class=err>'+esc(x.status)+'</span>'}</td>
-      <td class=dim>${x.ms!=null?x.ms+'ms':'-'}</td>
-      <td class=dim>${(x.in_tok!=null||x.out_tok!=null)?kfmt(x.in_tok)+'/'+kfmt(x.out_tok):'-'}</td>
-      <td class=dim>${x.failover?'failover ':''}${x.forced?'forced ':''}${err}</td></tr>`}).join('')
-      ||'<tr><td class=dim colspan=7>no requests yet</td></tr>';
-  }catch(e){}
-  $('#tick').textContent='updated '+new Date().toLocaleTimeString();
-}
-
-let editName=null;
-function copyCmd(name,model,key){
-  let cmd='crew '+name;
-  if(model && model!=='-' && model!=='default') cmd+=' --model '+model;
-  if(key && key!=='-') cmd+=' --key '+key;
-  navigator.clipboard.writeText(cmd).then(()=>{
-    const el=$('#tick'); el.textContent='copied: '+cmd;
-  }).catch(()=>{ prompt('copy this command:', cmd); });
-}
-function editSess(name,model,key){editName=name;$('#edittitle').textContent='edit '+name;
-  $('#edit-model').value=model==='-'?'':model;$('#edit-key').value=key==='-'?'':key;$('#editdlg').showModal()}
-$('#edit-save').onclick=async()=>{await jpost('/api/session/config',
-  {name:editName,model:$('#edit-model').value.trim(),key:$('#edit-key').value.trim()});setTimeout(refresh,200)};
-
-// -- gateway login table edit --
-function openAuth(login,mapsto,models,erp){
-  $('#auth-title').textContent=login?('edit '+login):'add login key';
-  $('#auth-login').value=login||'';$('#auth-login').readOnly=!!login;
-  $('#auth-mapsto').value=mapsto||'';$('#auth-models').value=models||'';$('#auth-erp').value=erp||'';
-  $('#authdlg').showModal();
-}
-function editAuth(login,mapsto,models,erp){openAuth(login,mapsto,models,erp)}
-$('#authadd').onclick=()=>openAuth('','','','');
-$('#auth-save').onclick=async()=>{
-  const login=$('#auth-login').value.trim();
-  if(!login)return;
-  const allow=$('#auth-models').value.trim().split(/[\s,]+/).filter(Boolean);
-  const r=await jpost('/api/gateway/auth',
-    {login,maps_to:$('#auth-mapsto').value.trim(),allow_models:allow,erp:$('#auth-erp').value.trim()});
-  if(r&&r.error)alert('failed: '+r.error);
-  setTimeout(refresh,200);
-};
-async function delAuth(login){
-  if(!confirm('delete login key "'+login+'"?'))return;
-  const r=await jpost('/api/gateway/auth',{login,delete:true});
-  if(r&&r.error)alert('failed: '+r.error);
-  setTimeout(refresh,200);
-}
-
-async function killSess(name){if(!confirm('kill session "'+name+'"? (removes tmux + crew state; transcript kept)'))return;
-  const r=await jpost('/api/session/kill',{name});if(r&&r.error)alert(r.error);setTimeout(refresh,300)}
-
-$('#addbtn').onclick=()=>$('#adddlg').showModal();
-$('#add-save').onclick=async()=>{
-  if(!confirm('Write a new provider into your CCR config? A backup is made first.'))return;
-  const r=await jpost('/api/ccr/provider',{alias:$('#add-alias').value.trim(),key:$('#add-key').value.trim(),
-    model:$('#add-model').value.trim(),base_url:$('#add-base').value.trim(),transformer:$('#add-tf').value});
-  alert(r&&r.ok?('added. backup: '+r.backup_path+'\nRun `crew up` or kickstart CCR to reload.'):('failed: '+(r&&r.error)));
-  setTimeout(refresh,200)};
-
-refresh();setInterval(refresh,3000);
-</script></body></html>"""
 
 
 # ── /usage self-service page (per-key token usage; pure-canvas chart, no libs) ─────
@@ -464,6 +256,11 @@ USAGE_HTML = """<!doctype html><html><head><meta charset=utf-8>
  #health{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
  .hk{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:5px 9px;font-size:12px}
  .hk .st{font-weight:600} .hk.ok .st{color:#4ec98a} .hk.bad .st{color:#e5534b}
+ .pill{padding:1px 8px;border-radius:10px;font-size:11px}
+ .pill.live,.pill.healthy{background:#132e1a;color:#4ec98a}
+ .pill.fail,.pill.tripped{background:#3a1416;color:#e5534b}
+ .pill.resumable{background:#1c2330;color:#6cf}
+ .pill.new{background:#2b2416;color:#d29922}
  #admin{margin-top:26px;border-top:1px solid #21262d;padding-top:16px;display:none}
  #admin h3{margin:16px 0 6px;font-size:13px;color:#8b95a3}
  table{border-collapse:collapse;width:100%;font-size:12px} th,td{text-align:left;padding:4px 8px;border-bottom:1px solid #1a1e26}
@@ -491,10 +288,10 @@ USAGE_HTML = """<!doctype html><html><head><meta charset=utf-8>
 <div class="card quick">
  <h3 style="margin-top:0">🚀 快速接入本网关</h3>
  <p class=feat>把本机地址当作 Anthropic API endpoint，用你的 key 直接发请求：</p>
- <pre>ANTHROPIC_BASE_URL=http://11.91.165.248:8790
+ <pre>ANTHROPIC_BASE_URL=http://__CREW_ADDR__
 ANTHROPIC_API_KEY=&lt;你的 key&gt;
 # 或直接 curl:
-curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
+curl http://__CREW_ADDR__/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
   -H "content-type: application/json" \\
   -d '{"model":"GLM-5.2","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}'</pre>
  <p class=feat>还没有 key？下面 <b>注册你的 key</b>，测试通过即可加入共享池并使用。</p>
@@ -528,8 +325,18 @@ curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
 <div id=dashview>
 <div id=totals></div>
 <div id=svcStatus></div>
+<div id=pmeta class=dim style="margin:4px 0 10px;font-size:12px"></div>
 <div id=health></div>
 <div id=latencyPanel></div>
+<div class=card id=sessCard>
+ <h3 style="margin:0 0 6px;font-size:13px;color:#8b95a3">运行中会话 <span class=dim style="font-weight:400">· crew ls --json</span></h3>
+ <div id=sess-err class=dim style="font-size:12px"></div>
+ <table id=sessions><thead><tr><th>name</th><th>status</th><th>model</th><th>key</th><th>dir</th><th></th></tr></thead><tbody></tbody></table>
+</div>
+<div class=card>
+ <h3 style="margin:0 0 6px;font-size:13px;color:#8b95a3">最近请求 <span class=dim style="font-weight:400">· 最近 100 条</span></h3>
+ <div id=logs style="max-height:280px;overflow:auto"><table><thead><tr><th>t</th><th>model</th><th>key</th><th>status</th><th>latency</th><th>tokens</th><th></th></tr></thead><tbody></tbody></table></div>
+</div>
 <div id=daily></div>
 <div id=chartWrap><canvas id=tokenChart></canvas><div id=tokenTip></div></div>
 <div id=admin>
@@ -566,11 +373,22 @@ curl http://11.91.165.248:8790/v1/messages -H "x-api-key: &lt;你的 key&gt;" \\
 </div>
 </div>
 
+<dialog id=editdlg style="background:#161b22;color:#c7d0da;border:1px solid #30363d;border-radius:10px;padding:18px;min-width:320px">
+ <form method=dialog>
+  <h3 id=edittitle style="margin:0 0 10px;font-size:14px">edit session</h3>
+  <div style="font-size:12px;color:#8b95a3">model</div><input id=edit-model style="width:100%;background:#0e1116;border:1px solid #30363d;border-radius:6px;padding:5px;margin:4px 0 10px">
+  <div style="font-size:12px;color:#8b95a3">key (alias, empty to clear)</div><input id=edit-key style="width:100%;background:#0e1116;border:1px solid #30363d;border-radius:6px;padding:5px;margin:4px 0 10px">
+  <div style="display:flex;gap:8px;justify-content:flex-end">
+   <button value=cancel>cancel</button><button id=edit-save value=save>save</button>
+  </div>
+ </form>
+</dialog>
+
 <div class="card adbox" id=intro>
  <h3 style="margin-top:0">想要更强的接入方式？用 crew 🐧</h3>
  <img src="/crew-demo.gif" alt="crew demo" loading=lazy>
  <p class=feat><b>crew</b> —— 一个人同时开多个 Claude Code 会话、随时切换模型、让不同模型互相对话协作；共享 key 池自动故障切换、限额自动摘除恢复。比直接改 base_url 多了：多会话编排、模型热切换、跨模型协作。</p>
- <p class=feat>用 CCR 的话，把 config 里的 <code>api_base_url</code> 改成 <code>http://11.91.165.248:8790</code> 即可；更推荐装 crew 后配一个 backend 指向本网关。</p>
+ <p class=feat>用 CCR 的话，把 config 里的 <code>api_base_url</code> 改成 <code>http://__CREW_ADDR__</code> 即可；更推荐装 crew 后配一个 backend 指向本网关。</p>
  <p class=feat>仓库：<code>git@coding.jd.com:olsd/claude-crew.git</code>（内网） / <code>git@github.com:Barcelona16/claude-crew.git</code>（外网）</p>
 </div>
 </div>
@@ -595,6 +413,7 @@ async function load(){
   renderLatency(d.latency);
   renderSvcStatus(d.health);
   loadHealth();
+  refreshOps();
   $('#adminview').style.display=d.isAdmin?'inline':'none';
   $('#admin').style.display=d.isAdmin?'block':'none';
   if(d.isAdmin){populateViewsel();loadAdmin();renderEmergency(d.emergency);}
@@ -771,6 +590,72 @@ $('#reg').onclick=async()=>{
 };
 if(KEY){$('#key').value=KEY;load();}
 setInterval(()=>{if(KEY)load();},30000);
+// -- v4.0.1 dashboard merge: proxy meta / sessions / recent requests --
+function pill(s){return '<span class="pill '+esc(s)+'">'+esc(s)+'</span>'}
+let _opsBusy=false;
+async function refreshOps(){
+  if(_opsBusy)return;_opsBusy=true;
+  try{
+    const [st,ss,ll]=await Promise.allSettled([
+      fetch('/api/status').then(r=>r.ok?r.json():null),
+      fetch('/api/sessions').then(r=>r.ok?r.json():null),
+      fetch('/api/logs?n=100').then(r=>r.ok?r.json():null)
+    ]);
+    const pm=$('#pmeta');
+    if(st.status==='fulfilled'&&st.value){
+      const s=st.value;
+      pm.textContent='proxy :'+s.port+' -> '+esc(s.ccr_url||'?')+'  ·  trip@'+s.fail_n+'  cooldown '+(s.cooldown!=null?s.cooldown+'s':'-');
+    }else{pm.textContent='proxy status unavailable';}
+    const se=$('#sess-err');
+    if(ss.status==='fulfilled'&&ss.value){
+      const d=ss.value;
+      se.textContent=d.error||'';
+      $('#sessions tbody').innerHTML=(d.sessions||[]).map(x=>
+        `<tr><td>${esc(x.name)}</td><td>${pill(x.status)}</td><td>${esc(x.model)}</td><td>${esc(x.key)}</td>
+        <td class=dim title="${esc(x.dir)}">${esc(x.dir)}</td>
+        <td><button onclick="copyCmd('${esc(x.name)}','${esc(x.model)}','${esc(x.key)}')">copy</button>
+            <button onclick="editSess('${esc(x.name)}','${esc(x.model)}','${esc(x.key)}')">edit</button>
+            <button class=danger onclick="killSess('${esc(x.name)}')">kill</button></td></tr>`).join('')
+        ||'<tr><td class=dim colspan=6>no sessions</td></tr>';
+    }else{se.textContent='sessions unavailable';}
+    if(ll.status==='fulfilled'&&ll.value){
+      const l=ll.value;
+      $('#logs tbody').innerHTML=(l.logs||[]).map(x=>{
+        const tm=x.ts?new Date(x.ts*1000).toLocaleTimeString([],{hour12:false}):x.t+'s';
+        const err=x.err?('<span style="color:#e5534b" title="'+esc(x.err)+'">'+esc(x.err.slice(0,80))+'</span>'):'';
+        return `<tr><td class=dim>${tm}</td><td>${esc(x.model)}</td><td>${esc(x.alias)}</td>
+        <td>${x.ok?pill('healthy'):'<span style="color:#e5534b">'+esc(x.status)+'</span>'}</td>
+        <td class=dim>${x.ms!=null?x.ms+'ms':'-'}</td>
+        <td class=dim>${(x.in_tok!=null||x.out_tok!=null)?fmtK(x.in_tok)+'/'+fmtK(x.out_tok):'-'}</td>
+        <td class=dim>${x.failover?'failover ':''}${x.forced?'forced ':''}${err}</td></tr>`}).join('')
+        ||'<tr><td class=dim colspan=7>no requests yet</td></tr>';
+    }
+  }finally{_opsBusy=false;}
+}
+let editName=null;
+function copyCmd(name,model,key){
+  let cmd='crew '+name;
+  if(model&&model!=='-'&&model!=='default')cmd+=' --model '+model;
+  if(key&&key!=='-')cmd+=' --key '+key;
+  navigator.clipboard.writeText(cmd).then(()=>{$('#pmeta').textContent='copied: '+cmd;})
+    .catch(()=>{prompt('copy this command:',cmd);});
+}
+function editSess(name,model,key){
+  editName=name;$('#edittitle').textContent='edit '+name;
+  $('#edit-model').value=model==='-'?'':model;$('#edit-key').value=key==='-'?'':key;
+  $('#editdlg').showModal();
+}
+$('#edit-save').onclick=async()=>{
+  await apost('/api/session/config',{name:editName,model:$('#edit-model').value.trim(),key:$('#edit-key').value.trim()});
+  setTimeout(refreshOps,200);
+};
+async function killSess(name){
+  if(!confirm('kill session "'+name+'"? (removes tmux + crew state; transcript kept)'))return;
+  const r=await apost('/api/session/kill',{name});
+  if(!r.ok&&r.body&&r.body.error)alert(r.body.error);
+  setTimeout(refreshOps,300);
+}
+setInterval(()=>{if(KEY)refreshOps();},15000);
 </script></body></html>"""
 
 
@@ -953,6 +838,25 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def _send_redirect(self, location):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _render_dashboard(self):
+        """Unified dashboard = USAGE_HTML with the quick-connect address filled
+        from the request's Host (fallback: the server bind address, then
+        localhost). Address is injected via placeholder replace — no f-string,
+        so the HTML constant stays a plain string."""
+        host = self.headers.get("Host")
+        if not host:
+            try:
+                host = "%s:%s" % self.server.server_address
+            except Exception:
+                host = "127.0.0.1:8788"
+        return USAGE_HTML.replace("__CREW_ADDR__", host)
 
     def _send_static(self, filepath, content_type):
         try:
@@ -1137,9 +1041,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path in ("/dashboard", "/dashboard/"):
-            self._send_html(DASHBOARD_HTML)
+            self._send_html(self._render_dashboard())
         elif path in ("/usage", "/usage/"):
-            self._send_html(USAGE_HTML)
+            # v4.0.1:统一到 /dashboard,旧链接 302 兼容
+            self._send_redirect("/dashboard")
         elif path == "/crew-demo.gif":
             self._send_static(CREW_DEMO_GIF, "image/gif")
         elif path == "/crew-proxy-hero.png":

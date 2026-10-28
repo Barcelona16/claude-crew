@@ -1,7 +1,7 @@
 # Example: use the shared crew-gateway (an outward, Anthropic-compatible API) as a crew
 # backend — so `crew` can run models off a shared box instead of your own upstream keys.
 #
-# How it works:  your client --(x-api-key: LOGIN KEY)--> crew-gateway (:8790)
+# How it works:  your client --(x-api-key: LOGIN KEY)--> crew-gateway (:8788)
 #                  -> crew-proxy -> CCR -> upstream gateway
 # The gateway authenticates you by a LOGIN KEY and routes to a shared key pool, so you
 # never handle upstream credentials — you only hold your own login key.
@@ -17,7 +17,7 @@
 # This file is sourced by bash — keep it valid shell (KEY=value; quote values with spaces).
 
 # The gateway's Anthropic /v1/messages endpoint (scheme://host:port — NO trailing path).
-BASE_URL=http://11.91.165.248:8790
+BASE_URL=http://127.0.0.1:8788
 
 # Model to request. New registrants are allowed Claude-Opus-4.6-joybuilder by default.
 MODEL=Claude-Opus-4.6-joybuilder

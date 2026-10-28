@@ -5,6 +5,20 @@
 
 `crew version` 读取本文件头部渲染版本摘要;新版本发布 = 在本文件顶部加一节 + 提交。
 
+## [4.0.1] - 2026-10-28
+
+### 监控页统一
+- **单一入口 /dashboard**:以 /usage(功能超集)为基底合成综合 dashboard,补入原 /dashboard 独有的
+  Sessions 表(/api/sessions,含 copy/edit/kill 会话操作)、Recent requests 日志表(/api/logs?n=100)
+  与 proxy status meta(/api/status:端口/ccr_url/trip/cooldown);保留登录/注册、token 序列图、
+  延迟分布 24h、健康状态、应急会话、Key 池/模型策略/登录表管理。深色 UI 风格与既有页一致。
+- **路由**:/dashboard(/dashboard/) 返回综合页;/usage 与 /usage/ 302 → /dashboard(旧链接兼容)。
+- **快速接入文案地址修正**:3 处硬编码 11.91.165.248:8790(旧网关)改为占位符 __CREW_ADDR__,
+  服务端按请求 Host 动态填充(回退 server_address/127.0.0.1:8788)——纯 .replace 注入,HTML 常量
+  保持普通字符串,无 f-string 转义风险。
+- backends/crew-gateway.conf.example 的 BASE_URL 与注释同步 8788(注:dsh/common 的 11.91.165.248:3200
+  是 JimDB 远端开发机默认值,非网关文案,未动)。
+
 ## [4.0.0] - 2026-10-28
 
 ### 重构(全面检查重构,保功能只改内部)
