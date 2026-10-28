@@ -90,23 +90,10 @@ USAGE_HTML = """<!doctype html><html><head><meta charset=utf-8>
 </style></head><body>
 <div class=wrap>
 
-<div id=landing>
-<div class=card>
- <div class=authbox>
-  <div class=line>
-   <input id=key type=password placeholder="输入你的 key 进入监控台" size=30>
-   <button id=login>进入</button>
-   <span id=meta class=dim></span>
-  </div>
- </div>
-</div>
-</div>
-
 <div id=dashbar>
  <span class=who id=who></span>
  <span id=adminview style=display:none>查看: <select id=viewsel></select></span>
  <span id=dmeta class=dim></span>
- <button id=logout style=margin-left:auto>退出</button>
 </div>
 
 <div id=dashview>
@@ -159,20 +146,18 @@ USAGE_HTML = """<!doctype html><html><head><meta charset=utf-8>
 
 </div>
 <script>
-let KEY=sessionStorage.getItem('crewKey')||'', VIEW='', SELFLOGIN='', _d=null, _geom=null;
+let VIEW='', SELFLOGIN='', _d=null, _geom=null;
 const $=s=>document.querySelector(s);
 function fmtK(n){if(n==null)return '—';if(n>=1e6)return (n/1e6).toFixed(2)+'M';if(n>=1e3)return (n/1e3).toFixed(0)+'k';return String(Math.round(n));}
 function fmtClock(ms){const d=new Date(ms),p=x=>String(x).padStart(2,'0');return p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function load(){
-  if(!KEY)return;
   let url='/api/usage?days=7'+(VIEW?('&key='+encodeURIComponent(VIEW)):'');
-  let r;try{r=await fetch(url,{headers:{'x-api-key':KEY}});}catch(e){$('#meta').textContent='网络错误，无法连接网关';logout(false,true);return;}
-  if(r.status===401){logout(true,true);$('#meta').textContent='❌ key 无效或无权限，请检查后重试';return;}
+  let r;try{r=await fetch(url);}catch(e){$('#dmeta').textContent='网络错误，无法连接网关';return;}
+  if(r.status===401){$('#dmeta').textContent='❌ 鉴权失败（非本机访问需要 key）';return;}
   const d=await r.json();_d=d;
   if(!VIEW)SELFLOGIN=d.login;
-  // logged in -> switch from landing to dashboard view
-  $('#landing').style.display='none';$('#dashbar').style.display='flex';$('#dashview').style.display='block';
+  $('#dashbar').style.display='flex';$('#dashview').style.display='block';
   $('#who').textContent=(d.isAdmin?'管理员 · ':'')+'当前查看: '+d.login;
   $('#dmeta').textContent='近 '+(d.windowH/24)+' 天 · '+d.buckets.length+' 点';
   renderTotals(d);renderDaily(d);draw();
@@ -190,18 +175,15 @@ function populateViewsel(){
     logins.map(l=>'<option value="'+esc(l)+'">'+esc(l)+(orphans.has(l)?(l==='direct'?' · 直连/未走网关':' · 未登录(孤儿)'):'')+'</option>').join('');
   sel.value=VIEW;
 }
-function logout(clear,keepmsg){if(clear!==false){KEY='';sessionStorage.removeItem('crewKey');}VIEW='';_d=null;
-  $('#landing').style.display='';$('#dashbar').style.display='none';$('#dashview').style.display='none';
-  if(clear!==false)$('#key').value='';$('#meta').textContent='';}
 async function loadHealth(){
-  let r;try{r=await fetch('/api/health',{headers:{'x-api-key':KEY}});}catch(e){return;}
+  let r;try{r=await fetch('/api/health');}catch(e){return;}
   if(!r.ok)return;const d=await r.json();
   $('#health').innerHTML=(d.pool||[]).map(p=>{const bad=p.state!=='healthy';
     return '<div class="hk '+(bad?'bad':'ok')+'"><span class=dim>'+esc(p.key_masked)+'</span> <span class=st>'+(bad?('异常'+(p.cooldown_left?' '+p.cooldown_left+'s':'')):'正常')+'</span></div>';
   }).join('')||'<span class=dim>池子为空</span>';
 }
-async function aget(path){const r=await fetch(path,{headers:{'x-api-key':KEY}});return r.ok?r.json():null;}
-async function apost(path,obj){const r=await fetch(path,{method:'POST',headers:{'x-api-key':KEY,'Content-Type':'application/json'},body:JSON.stringify(obj)});return {ok:r.ok,body:await r.json().catch(()=>({}))};}
+async function aget(path){const r=await fetch(path);return r.ok?r.json():null;}
+async function apost(path,obj){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});return {ok:r.ok,body:await r.json().catch(()=>({}))};}
 async function loadAdmin(){
   const kd=await aget('/api/keys');
   if(!kd)return;
@@ -309,8 +291,8 @@ window.addEventListener('resize',()=>{if(_d)draw();});
 $('#login').onclick=()=>{KEY=$('#key').value.trim();VIEW='';if(!KEY)return;sessionStorage.setItem('crewKey',KEY);SELFLOGIN='';load();};
 $('#logout').onclick=()=>logout(true);
 $('#viewsel').onchange=()=>{VIEW=$('#viewsel').value;load();};
-if(KEY){$('#key').value=KEY;load();}
-setInterval(()=>{if(KEY)load();},30000);
+load();
+setInterval(()=>{load();},30000);
 // -- v4.0.1 dashboard merge: proxy meta / sessions / recent requests --
 function pill(s){return '<span class="pill '+esc(s)+'">'+esc(s)+'</span>'}
 let _opsBusy=false;
@@ -376,7 +358,7 @@ async function killSess(name){
   if(!r.ok&&r.body&&r.body.error)alert(r.body.error);
   setTimeout(refreshOps,300);
 }
-setInterval(()=>{if(KEY)refreshOps();},15000);
+setInterval(()=>{refreshOps();},15000);
 </script></body></html>"""
 
 
@@ -659,10 +641,18 @@ class Handler(BaseHTTPRequestHandler):
                 key = auth_h[7:].strip()
         return key or None
 
+    def _trusted(self):
+        """Loopback peer => the single-user local machine; treated as authenticated
+        admin. The proxy binds 127.0.0.1 only, so this is the normal case; if the
+        bind ever widens, non-loopback peers still require a real key."""
+        addr = self.client_address[0] if self.client_address else ""
+        return addr in ("127.0.0.1", "::1")
+
     def require_admin(self):
         """Return the caller's login key iff it maps to an admin entry, else None.
-        Management endpoints call this and 403 on None — enforced on 127.0.0.1 too, so
-        exposing them through the gateway is safe (the gateway re-checks as a first gate)."""
+        Loopback callers are implicitly admin (personal dashboard, no login)."""
+        if self._trusted():
+            return "local"
         key = self._client_key()
         entry = load_gateway_auth().get(key) if key else None
         return key if (entry and entry.get("admin")) else None
@@ -677,7 +667,11 @@ class Handler(BaseHTTPRequestHandler):
         auth = load_gateway_auth()
         entry = auth.get(key) if key else None
         if entry is None:
-            return self._send_json({"error": "unauthorized"}, 401)
+            if self._trusted():
+                # local single-user machine: no login needed, act as admin
+                entry = {"admin": True, "maps_to": "local", "allow_models": []}
+            else:
+                return self._send_json({"error": "unauthorized"}, 401)
         want = q.get("key", [None])[0]
         if entry.get("admin") and want:
             login = None if want == "__all__" else want
@@ -710,7 +704,7 @@ class Handler(BaseHTTPRequestHandler):
     #    without learning credentials). Unknown key -> 401. --
     def _api_health(self):
         key = self._client_key()
-        if not key or key not in load_gateway_auth():
+        if not self._trusted() and (not key or key not in load_gateway_auth()):
             return self._send_json({"error": "unauthorized"}, 401)
         now = time.time()
         keys = load_keys()

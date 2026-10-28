@@ -7,6 +7,20 @@
 
 ## [Unreleased]
 
+## [4.0.3] - 2026-10-28
+
+### 监控台本机免登录(打开即看)
+- **loopback 信任模式**:proxy 只绑 127.0.0.1,本机请求(127.0.0.1/::1)视为已认证
+  admin —— 打开 /dashboard 直接查看,不再需要输入 personal key;非 loopback 请求
+  仍要求真实 key(未来若放宽绑定,鉴权不退化)。
+- **前端删除登录态**:landing key 输入条、退出按钮、sessionStorage 逻辑全部移除;
+  页面加载即拉取用量/延迟/会话/日志,管理操作(key 池/策略/应急会话/会话 kill)直接可用。
+- 后端新增 `_trusted()`(peer 判定),`require_admin`/`/api/usage`/`/api/health`
+  在 loopback 下放行;双写 USAGE_HTML 与 Handler 逐字节一致。
+- 测试:monkey-patch 保持非本机鉴权断言覆盖,新增 trusted 分支 4 用例;Python 4/4 套件全绿。
+- 实测:/dashboard 无登录条、/api/usage 无 key 200 + isAdmin、/api/keys 与 /api/health
+  无 key 200、/v1/messages 转发正常。
+
 ## [4.0.2] - 2026-10-28
 
 ### 剥离对外共享层(proxy 回归个人使用)

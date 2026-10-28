@@ -101,6 +101,12 @@ _proxy_port = _proxy_srv.server_address[1]
 threading.Thread(target=_proxy_srv.serve_forever, daemon=True).start()
 PROXY = f"http://127.0.0.1:{_proxy_port}"
 
+# v4.0.3: loopback peers are trusted (no login on the personal dashboard). The auth
+# assertions below simulate a NON-loopback client so the key-gated paths stay covered;
+# the trusted branch gets its own dedicated test at the end.
+_orig_trusted = cp.Handler._trusted
+cp.Handler._trusted = lambda self: False
+
 FAILS = 0
 def check(name, cond):
     global FAILS
@@ -528,6 +534,27 @@ check("/usage returns html", r.status == 200 and "<canvas" in html and "tokenCha
 check("/usage references /api/usage", "/api/usage" in html)
 check("/usage has health strip + admin panel", "id=health" in html and "id=admin" in html)
 check("/usage admin panel references mgmt endpoints", "/api/keys" in html and "/api/policy" in html)
+
+# ── v4.0.3: trusted loopback mode (personal dashboard, no login) ───────────────────
+print("Trusted loopback (no key):")
+cp.Handler._trusted = _orig_trusted   # restore: real 127.0.0.1 clients
+try:
+    req = urllib.request.Request(PROXY + "/api/usage")
+    r = urllib.request.urlopen(req, timeout=10)
+    d = json.loads(r.read().decode())
+    check("usage no key -> 200", r.status == 200)
+    check("trusted usage acts as admin", d.get("isAdmin") is True)
+    req = urllib.request.Request(PROXY + "/api/keys")
+    r = urllib.request.urlopen(req, timeout=10)
+    check("keys no key -> 200 (admin)", r.status == 200)
+    req = urllib.request.Request(PROXY + "/api/health")
+    r = urllib.request.urlopen(req, timeout=10)
+    check("health no key -> 200", r.status == 200)
+except urllib.error.HTTPError as e:
+    check("trusted endpoints reachable", False)
+    print("  HTTP error:", e.code, e.read(200))
+finally:
+    cp.Handler._trusted = lambda self: False
 
 print()
 if FAILS:
