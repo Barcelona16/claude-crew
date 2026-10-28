@@ -288,8 +288,6 @@ document.addEventListener('mousemove',ev=>{const cv=$('#tokenChart'),tip=$('#tok
   tip.innerHTML='<b>'+fmtClock(best.t)+'</b><br><span style=color:#8f8>新增</span> '+fmtK(best.newTokens)+'<br><span style=color:#6cf>in</span> '+fmtK(best.inputSum)+' · <span style=color:#e0a94f>out</span> '+fmtK(best.outputSum)+'<br>turns '+best.turns+' · 均 '+fmtK(best.perReqNew);
   tip.style.display='block';tip.style.left=(ev.clientX-r.left+12)+'px';tip.style.top=(ev.clientY-r.top+8)+'px';});
 window.addEventListener('resize',()=>{if(_d)draw();});
-$('#login').onclick=()=>{KEY=$('#key').value.trim();VIEW='';if(!KEY)return;sessionStorage.setItem('crewKey',KEY);SELFLOGIN='';load();};
-$('#logout').onclick=()=>logout(true);
 $('#viewsel').onchange=()=>{VIEW=$('#viewsel').value;load();};
 load();
 setInterval(()=>{load();},30000);
